@@ -1,0 +1,11 @@
+# Ignore everything
+# *
+
+/Logs
+*/images
+*/Data/mapas/
+*/Data/modules/
+*/Data/pdf/
+*/Data/systems/
+*/Data/tokenizer/
+*/Data/worlds/duvik/
