@@ -1,0 +1,22 @@
+{
+  "dataPath": "/home/foundry/foundryuserdata",
+  "compressStatic": true,
+  "fullscreen": false,
+  "hostname": "taberna.duckdns.org",
+  "language": "es.foundryvtt-es",
+  "localHostname": null,
+  "port": 443,
+  "protocol": null,
+  "proxyPort": 443,
+  "proxySSL": true,
+  "routePrefix": null,
+  "updateChannel": "stable",
+  "upnp": true,
+  "upnpLeaseDuration": null,
+  "awsConfig": null,
+  "passwordSalt": null,
+  "sslCert": "fullchain.pem",
+  "sslKey": "privkey.pem",
+  "world": "duvik",
+  "serviceConfig": null
+}
