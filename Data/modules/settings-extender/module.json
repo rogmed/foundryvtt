@@ -1,0 +1,24 @@
+{
+  "description": "Extends the settings menu, adding additional types for configuration values.",
+  "version": "1.2.1",
+  "id": "settings-extender",
+  "authors": [
+    {
+      "name": "Azzurite#2004",
+      "flags": {}
+    }
+  ],
+  "title": "Settings Extender",
+  "library": true,
+  "compatibility": {
+    "minimum": "10",
+    "verified": "10",
+    "maximum": "10"
+  },
+  "esmodules": [
+    "settings-extender.js"
+  ],
+  "url": "https://gitlab.com/foundry-azzurite/settings-extender",
+  "manifest": "https://gitlab.com/foundry-azzurite/settings-extender/-/jobs/artifacts/1.2.1/raw/dist/settings-extender/module.json?job=build",
+  "download": "https://gitlab.com/foundry-azzurite/settings-extender/-/jobs/artifacts/1.2.1/raw/dist/settings-extender.zip?job=build"
+}

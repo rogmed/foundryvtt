@@ -1,0 +1,40 @@
+{
+  "name": "mundo-compartido-5e",   
+  "title": "Mundo Compartido 5e",   
+  "description": "Compartiendo datos, compendio y configuración entre mundos.",   
+  "author": "rogeliomdn",
+  "version": "1.0.0",
+  "minimumCoreVersion": "10.291",
+  "compatibleCoreVersion":"10.291",
+  "packs": 
+  [
+      {
+        "name": "objetos",
+        "label": "Objetos",
+        "path": "packs/objetos.db",
+	"entity": "Item",
+	"module": "mundo-compartido-5e"
+      },
+      {
+	"name": "monstruos",
+        "label": "Monstruos",
+	"path": "packs/monstruos.db",
+	"entity": "Actor",
+        "module": "mundo-compartido-5e"
+      },
+      {
+	"name": "subclases",
+	"label": "Subclases",
+        "path": "packs/subclases.db",
+	"entity": "Item",
+	"module": "mundo-compartido-5e"
+      },
+      {
+	"name": "rasgos-de-clase",
+	"label": "Rasgos de Clase",
+        "path": "packs/rasgos-de-clase.db",
+	"entity": "Item",
+	"module": "mundo-compartido-5e"
+      }
+  ]
+}

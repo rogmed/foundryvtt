@@ -1,0 +1,13 @@
+{
+  "BABELE.CompendiumTranslations": "Tłumaczenia",
+  "BABELE.TranslateActorHeadBtn": "Przetłumacz",
+  "BABELE.TranslateActorTitle": "Tłumacz Aktor",
+  "BABELE.TranslateActorHint": "Automatycznie tłumaczy wszystkie posiadane przez aktora przedmioty, dla których istnieje przetłumaczone kompendium",
+  "BABELE.TranslateActorBtn": "Przetłumacz!",
+  "BABELE.ExportTranslationTitle": "Eksportuj plik tłumaczenia",
+  "BABELE.ExportTranslationBtn": "Eksport!",
+  "BABELE.ExportTranslationNotes": "Wybierz format, w jakim ma być wyeksportowany plik tłumaczenia. Wybierz \"Legacy\" dla oryginalnego, rodzimego formatu lub \"compatible\", jeśli chcesz zarządzać tłumaczeniem za pomocą zewnętrznej platformy lokalizacyjnej (np. Weblate, Transifex, itp.).",
+  "BABELE.ExportTranslationFormat": "Format",
+  "BABELE.ExportTranslationFormatLegacy": "Dziedzictwo",
+  "BABELE.ExportTranslationFormatCompatible": "Kompatybilny"
+}

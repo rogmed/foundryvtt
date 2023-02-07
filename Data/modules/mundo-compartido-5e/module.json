@@ -1,0 +1,17 @@
+{
+  "id": "mundo-compartido-5e",   
+  "title": "Mundo Compartido 5e",   
+  "description": "Compartiendo datos, compendio y configuración entre mundos.",   
+  "authors":
+  [
+    {
+      "name": "rogeliomdn"
+    }
+  ],
+  "version": "1.0.0",
+  "compatibility":
+  {
+    "minimum": "10.291",
+    "verified": "10.291"
+  }
+}

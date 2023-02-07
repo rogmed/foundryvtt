@@ -1,0 +1,12 @@
+{
+  "title": "Mundo Compartido 5e",
+  "id": "mundo-compartido-5e",
+  "system": "dnd5e",
+  "background": "mapas/CultOfTheForgottenGod/6.jpeg",
+  "coreVersion": "10.291",
+  "compatibility": {
+    "minimum": "10",
+    "verified": "10"
+  },
+  "systemVersion": "2.1.4"
+}

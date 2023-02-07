@@ -1,0 +1,58 @@
+{
+  "description": "Allows pinging on the map",
+  "version": "1.4.0",
+  "id": "pings",
+  "authors": [
+    {
+      "name": "Azzurite#2004",
+      "flags": {}
+    }
+  ],
+  "title": "Pings",
+  "compatibility": {
+    "minimum": "9",
+    "verified": "10",
+    "maximum": "10"
+  },
+  "esmodules": [
+    "main.js"
+  ],
+  "languages": [
+    {
+      "lang": "en",
+      "name": "English",
+      "path": "languages/en.json",
+      "flags": {}
+    },
+    {
+      "lang": "pt-BR",
+      "name": "Português (Brasil)",
+      "path": "languages/pt-BR.json",
+      "flags": {}
+    },
+    {
+      "lang": "ja",
+      "name": "日本語",
+      "path": "languages/ja.json",
+      "flags": {}
+    }
+  ],
+  "relationships": {
+    "requires": [
+      {
+        "id": "settings-extender",
+        "type": "module",
+        "compatibility": {}
+      },
+      {
+        "id": "lib-wrapper",
+        "type": "module",
+        "compatibility": {}
+      }
+    ]
+  },
+  "socket": true,
+  "url": "https://gitlab.com/foundry-azzurite/pings",
+  "manifest": "https://gitlab.com/foundry-azzurite/pings/-/jobs/artifacts/master/raw/dist/pings/module.json?job=build",
+  "download": "https://gitlab.com/foundry-azzurite/pings/-/jobs/artifacts/master/raw/dist/pings.zip?job=build"
+}

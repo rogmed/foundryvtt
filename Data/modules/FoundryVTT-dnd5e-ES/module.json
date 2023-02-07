@@ -1,0 +1,39 @@
+{
+  "title": "Translation: Spanish [DnD5e]",
+  "description": "IMPORTANTE: ACTIVAR MÓDULO | Agrega la traducción al español del sistema dnd5e para FoundryVTT.",
+  "version": "1.63.1",
+  "styles": [
+    "dnd5eES.css"
+  ],
+  "languages": [
+    {
+      "lang": "es",
+      "name": "Spanish",
+      "path": "es.json",
+      "flags": {}
+    }
+  ],
+  "url": "https://gitlab.com/carlosjrlu/foundryvtt-dnd5e-lang-es/",
+  "manifest": "https://gitlab.com/carlosjrlu/foundryvtt-dnd5e-lang-es/-/raw/master/es/module.json",
+  "download": "https://gitlab.com/carlosjrlu/foundryvtt-dnd5e-lang-es/-/jobs/artifacts/master/raw/dnd5e-es.zip?job=build",
+  "id": "FoundryVTT-dnd5e-ES",
+  "authors": [
+    {
+      "name": "Cosmo Corban#4840",
+      "flags": {}
+    }
+  ],
+  "relationships": {
+    "systems": [
+      {
+        "id": "dnd5e",
+        "type": "system",
+        "compatibility": {}
+      }
+    ]
+  },
+  "compatibility": {
+    "minimum": "9.245",
+    "verified": "9"
+  }
+}

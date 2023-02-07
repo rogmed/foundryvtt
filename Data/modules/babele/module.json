@@ -1,0 +1,91 @@
+{
+  "id": "babele",
+  "title": "Babele",
+  "description": "Module allowing a 'runtime' translation of all the installed compendiums",
+  "version": "2.3.4",
+  "compatibility": {
+    "minimum": "10",
+    "verified": "10.288"
+  },
+  "relationships": {
+    "requires": [
+      {
+        "id": "lib-wrapper",
+        "type": "module",
+        "compatibility": {}
+      }
+    ]
+  },
+  "authors": [
+    {
+      "name": "Simone",
+      "email": "simone.ricciardi@gmail.com",
+      "discord": "Simone [UTC +1]#6710",
+      "flags": {}
+    }
+  ],
+  "scripts": [
+    "lib/jszip.min.js",
+    "lib/FileSaver.js",
+    "babele.js"
+  ],
+  "languages": [
+    {
+      "lang": "ar",
+      "name": "Arabic",
+      "path": "lang/ar.json",
+      "flags": {}
+    },
+    {
+      "lang": "en",
+      "name": "English",
+      "path": "lang/en.json",
+      "flags": {}
+    },
+    {
+      "lang": "it",
+      "name": "Italian",
+      "path": "lang/it.json",
+      "flags": {}
+    },
+    {
+      "lang": "es",
+      "name": "Español",
+      "path": "lang/es.json",
+      "flags": {}
+    },
+    {
+      "lang": "de",
+      "name": "Deutsch (German)",
+      "path": "lang/de.json",
+      "flags": {}
+    },
+    {
+      "lang": "fr",
+      "name": "Français",
+      "path": "lang/fr.json",
+      "flags": {}
+    },
+    {
+      "lang": "pl",
+      "name": "Polski",
+      "path": "lang/pl.json",
+      "flags": {}
+    },
+    {
+      "lang": "zh-tw",
+      "name": "Taiwanese",
+      "path": "lang/zh-tw.json",
+      "flags": {}
+    },
+    {
+      "lang": "ja",
+      "name": "日本語",
+      "path": "lang/ja.json",
+      "flags": {}
+    }
+  ],
+  "url": "https://gitlab.com/riccisi/foundryvtt-babele",
+  "manifest": "https://gitlab.com/riccisi/foundryvtt-babele/raw/master/module/module.json",
+  "download": "https://gitlab.com/riccisi/foundryvtt-babele/-/jobs/artifacts/2.3.4/raw/babele.zip?job=build"
+}

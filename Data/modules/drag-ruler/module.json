@@ -1,0 +1,84 @@
+{
+  "id": "drag-ruler",
+  "title": "Drag Ruler",
+  "description": "When dragging a token displays a ruler showing how far you've moved that token.",
+  "version": "1.13.2",
+  "compatibility": {
+    "minimum": "10",
+    "verified": "10"
+  },
+  "authors": [
+    {
+      "name": "Manuel Vögele",
+      "email": "develop@manuel-voegele.de",
+      "discord": "Stäbchenfisch#5107",
+      "flags": {}
+    }
+  ],
+  "esmodules": [
+    "src/libwrapper_shim.js",
+    "src/main.js",
+    "src/socket.js"
+  ],
+  "languages": [
+    {
+      "lang": "de",
+      "name": "Deutsch",
+      "path": "lang/de.json",
+      "flags": {}
+    },
+    {
+      "lang": "en",
+      "name": "English",
+      "path": "lang/en.json",
+      "flags": {}
+    },
+    {
+      "lang": "es",
+      "name": "Español",
+      "path": "lang/es.json",
+      "flags": {}
+    },
+    {
+      "lang": "fr",
+      "name": "Français",
+      "path": "lang/fr.json",
+      "flags": {}
+    },
+    {
+      "lang": "ja",
+      "name": "日本語",
+      "path": "lang/ja.json",
+      "flags": {}
+    },
+    {
+      "lang": "ko",
+      "name": "한국어",
+      "path": "lang/ko.json",
+      "flags": {}
+    },
+    {
+      "lang": "zh-tw",
+      "name": "正體中文",
+      "path": "lang/zh-tw.json",
+      "flags": {}
+    }
+  ],
+  "relationships": {
+    "requires": [
+      {
+        "id": "socketlib",
+        "type": "module",
+        "manifest": "https://raw.githubusercontent.com/manuelVo/foundryvtt-socketlib/master/module.json",
+        "compatibility": {}
+      }
+    ]
+  },
+  "socket": true,
+  "url": "https://github.com/manuelVo/foundryvtt-drag-ruler",
+  "download": "https://github.com/manuelVo/foundryvtt-drag-ruler/archive/v1.13.2.zip",
+  "manifest": "https://raw.githubusercontent.com/manuelVo/foundryvtt-drag-ruler/master/module.json",
+  "readme": "https://github.com/manuelVo/foundryvtt-drag-ruler/blob/master/README.md",
+  "changelog": "https://github.com/manuelVo/foundryvtt-drag-ruler/blob/master/CHANGELOG.md",
+  "bugs": "https://github.com/manuelVo/foundryvtt-drag-ruler/issues"
+}

@@ -1,0 +1,59 @@
+{
+  "id": "forien-copy-environment",
+  "title": "Forien's Copy Environment",
+  "description": "Allows for copying list of system/modules and versions, and gives ability to export/import game and player settings",
+  "authors": [
+    {
+      "name": "Blair McMillan",
+      "url": "https://github.com/sneat",
+      "discord": "blair#9056",
+      "flags": {}
+    },
+    {
+      "name": "Forien",
+      "url": "https://www.patreon.com/forien",
+      "discord": "Forien#2130",
+      "flags": {}
+    }
+  ],
+  "url": "https://github.com/League-of-Foundry-Developers/foundryvtt-forien-copy-environment",
+  "bugs": "https://github.com/League-of-Foundry-Developers/foundryvtt-forien-copy-environment/issues",
+  "changelog": "https://github.com/League-of-Foundry-Developers/foundryvtt-forien-copy-environment/blob/master/changelog.md",
+  "flags": {
+    "allowBugReporter": true
+  },
+  "version": "v2.1.6",
+  "compatibility": {
+    "minimum": "0.6.0",
+    "verified": "10.288"
+  },
+  "esmodules": [
+    "/scripts/module.js"
+  ],
+  "styles": [
+    "/styles/module.css"
+  ],
+  "languages": [
+    {
+      "lang": "en",
+      "name": "English",
+      "path": "languages/en.json",
+      "flags": {}
+    },
+    {
+      "lang": "ja",
+      "name": "日本語",
+      "path": "languages/ja.json",
+      "flags": {}
+    },
+    {
+      "lang": "de",
+      "name": "Deutsch",
+      "path": "languages/de.json",
+      "flags": {}
+    }
+  ],
+  "manifest": "https://github.com/League-of-Foundry-Developers/foundryvtt-forien-copy-environment/releases/latest/download/module.json",
+  "download": "https://github.com/League-of-Foundry-Developers/foundryvtt-forien-copy-environment/releases/download/v2.1.6/module.zip",
+  "library": true
+}

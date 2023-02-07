@@ -1,0 +1,123 @@
+{
+  "id": "midi-qol",
+  "title": "Midi QOL",
+  "description": "Automates rolling weapon/spell attacks and applying damage",
+  "version": "10.0.28",
+  "authors": [
+    {
+      "name": "tposney",
+      "flags": {}
+    }
+  ],
+  "socket": true,
+  "esmodules": [
+    "src/midi-qol.js"
+  ],
+  "styles": [
+    "css/styles.css"
+  ],
+  "relationships": {
+    "systems": [
+      {
+        "id": "dnd5e",
+        "type": "system",
+        "compatibility": {
+          "minimum": "2.0.3"
+        }
+      },
+      {
+        "id": "sw5e",
+        "type": "system",
+        "compatibility": {
+          "minimum": "2.0.2.2.2.5"
+        }
+      }
+    ],
+    "requires": [
+      {
+        "id": "socketlib",
+        "type": "module",
+        "compatibility": {}
+      },
+      {
+        "id": "lib-wrapper",
+        "type": "module",
+        "compatibility": {}
+      }
+    ]
+  },
+  "packs": [
+    {
+      "name": "midiqol-sample-items",
+      "label": "MidiQOL Sample Items",
+      "path": "packs/sampleitems.db",
+      "private": false,
+      "type": "Item",
+      "system": "dnd5e",
+      "flags": {}
+    }
+  ],
+  "languages": [
+    {
+      "lang": "en",
+      "name": "English",
+      "path": "lang/en.json",
+      "flags": {}
+    },
+    {
+      "lang": "ja",
+      "name": "日本語",
+      "path": "lang/ja.json",
+      "flags": {}
+    },
+    {
+      "lang": "ko",
+      "name": "Korean",
+      "path": "lang/ko.json",
+      "flags": {}
+    },
+    {
+      "lang": "fr",
+      "name": "Français",
+      "path": "lang/fr.json",
+      "flags": {}
+    },
+    {
+      "lang": "pt-BR",
+      "name": "Português (Brasil)",
+      "path": "lang/pt-BR.json",
+      "flags": {}
+    },
+    {
+      "lang": "es",
+      "name": "Spanish",
+      "path": "lang/es.json",
+      "flags": {}
+    },
+    {
+      "lang": "de",
+      "name": "Deutsch",
+      "path": "lang/de.json",
+      "flags": {}
+    },
+    {
+      "lang": "it",
+      "name": "Italian",
+      "path": "lang/it.json",
+      "flags": {}
+    }
+  ],
+  "compatibility": {
+    "minimum": "10.286",
+    "verified": "10",
+    "maximum": "10"
+  },
+  "bugs": "https://gitlab.com/tposney/midi-qol/-/issues",
+  "flags": {
+    "allowBugReporter": true
+  },
+  "url": "https://gitlab.com/tposney/midi-qol",
+  "manifest": "https://gitlab.com/tposney/midi-qol/raw/v10/package/module.json",
+  "download": "https://gitlab.com/tposney/midi-qol/raw/v10/package/midi-qol-v10.0.28.zip",
+  "changelog": "https://gitlab.com/tposney/midi-qol/raw/v10/Changelog.md"
+}

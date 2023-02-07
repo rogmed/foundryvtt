@@ -1,0 +1,177 @@
+{
+  "id": "dice-so-nice",
+  "title": "Dice So Nice!",
+  "description": "Adds customizable 3D dice to Foundry VTT with lots of options to fit your playstyle.",
+  "version": "4.6.5",
+  "compatibility": {
+    "minimum": "10",
+    "verified": "10.288"
+  },
+  "authors": [
+    {
+      "name": "Simone",
+      "discord": "Simone [UTC +2]#6710",
+      "flags": {}
+    },
+    {
+      "name": "JDW",
+      "discord": "JDW#6422",
+      "flags": {}
+    }
+  ],
+  "esmodules": [
+    "main.js"
+  ],
+  "scripts": [
+    "libs/cannon.min.js",
+    "libs/select2.min.js"
+  ],
+  "socket": true,
+  "styles": [
+    "css/style.css",
+    "css/select2.css"
+  ],
+  "languages": [
+    {
+      "lang": "en",
+      "name": "English",
+      "path": "lang/en.json",
+      "flags": {}
+    },
+    {
+      "lang": "it",
+      "name": "Italian",
+      "path": "lang/it.json",
+      "flags": {}
+    },
+    {
+      "lang": "es",
+      "name": "Español",
+      "path": "lang/es.json",
+      "flags": {}
+    },
+    {
+      "lang": "ca",
+      "name": "Català",
+      "path": "lang/ca.json",
+      "flags": {}
+    },
+    {
+      "lang": "zh-tw",
+      "name": "正體中文",
+      "path": "lang/zh-tw.json",
+      "flags": {}
+    },
+    {
+      "lang": "ko",
+      "name": "Korean",
+      "path": "lang/ko.json",
+      "flags": {}
+    },
+    {
+      "lang": "pt-BR",
+      "name": "Português (Brasil)",
+      "path": "lang/pt-BR.json",
+      "flags": {}
+    },
+    {
+      "lang": "fr",
+      "name": "Français",
+      "path": "lang/fr.json",
+      "flags": {}
+    },
+    {
+      "lang": "ja",
+      "name": "日本語",
+      "path": "lang/ja.json",
+      "flags": {}
+    },
+    {
+      "lang": "de",
+      "name": "Deutsch",
+      "path": "lang/de.json",
+      "flags": {}
+    },
+    {
+      "lang": "cs",
+      "name": "Česky",
+      "path": "lang/cs.json",
+      "flags": {}
+    },
+    {
+      "lang": "fi",
+      "name": "Suomi",
+      "path": "lang/fi.json",
+      "flags": {}
+    },
+    {
+      "lang": "sv",
+      "name": "Svenska",
+      "path": "lang/sv.json",
+      "flags": {}
+    },
+    {
+      "lang": "ro",
+      "name": "Română",
+      "path": "lang/ro.json",
+      "flags": {}
+    },
+    {
+      "lang": "ru",
+      "name": "Русский",
+      "path": "lang/ru.json",
+      "flags": {}
+    },
+    {
+      "lang": "pl",
+      "name": "polski",
+      "path": "lang/pl.json",
+      "flags": {}
+    }
+  ],
+  "media": [
+    {
+      "type": "cover",
+      "loop": false,
+      "flags": {}
+    },
+    {
+      "type": "video",
+      "loop": true,
+      "flags": {}
+    },
+    {
+      "type": "video",
+      "loop": false,
+      "flags": {}
+    },
+    {
+      "type": "screenshot",
+      "loop": false,
+      "flags": {}
+    },
+    {
+      "type": "screenshot",
+      "loop": false,
+      "flags": {}
+    },
+    {
+      "type": "screenshot",
+      "loop": false,
+      "flags": {}
+    },
+    {
+      "type": "screenshot",
+      "loop": false,
+      "flags": {}
+    }
+  ],
+  "url": "https://gitlab.com/riccisi/foundryvtt-dice-so-nice",
+  "manifest": "https://gitlab.com/riccisi/foundryvtt-dice-so-nice/-/raw/master/module/module.json",
+  "download": "https://gitlab.com/riccisi/foundryvtt-dice-so-nice/-/jobs/artifacts/4.6.5/raw/dist/dice-so-nice.zip?job=build",
+  "bugs": "https://gitlab.com/riccisi/foundryvtt-dice-so-nice/-/issues",
+  "readme": "https://gitlab.com/riccisi/foundryvtt-dice-so-nice/-/blob/master/README.md",
+  "flags": {
+    "allowBugReporter": true
+  }
+}

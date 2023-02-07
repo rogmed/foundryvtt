@@ -1,0 +1,11 @@
+{
+    "DICESONICE.config": "Настройки 3D-кубов",
+    "DICESONICE.configHint": "Здесь каждый игрок может настроить индивидуальные параметры 3D-кубов (включить/выключить, цвета, размер, качество...)",
+    "DICESONICE.settingsAppearance": "Внешний вид",
+    "DICESONICE.settingsPreferences": "Предпочтения",
+    "DICESONICE.settingsPerformance": "Качество",
+    "DICESONICE.enable": "Включить 3D-кубы (Это не повлияет на других игроков)",
+    "DICESONICE.showExtraDice": "Включить дополнительную кастомизацию кубов",
+    "DICESONICE.labelColor": "Цвет цифры",
+    "DICESONICE.diceColor": "Цвет куба"
+}
