@@ -1,0 +1,57 @@
+<form action="#">
+
+  <div class="left">
+    <div class="new-filter-name">
+      @<input type="text" name="name" id="name" value="{{tag}}"
+        placeholder="{{localize 'QUICKINSERT.FilterListFilterTagPlaceholder'}}" pattern="[A-Za-z0-9\._-]+"
+        minlength="1">
+    </div>
+    <input type="text" name="title" id="title" value="{{subTitle}}" placeholder="title">
+    {{#if isDefault}}
+    {{localize 'QUICKINSERT.FilterEditorFilterIsDefault'}}
+    {{else if forbiddenWorld}}
+    {{localize 'QUICKINSERT.FilterEditorFilterIsForbiddenWorld'}}
+    {{/if}}
+
+    <div class="example-out">
+      <div class="hint">{{localize 'QUICKINSERT.FilterEditorTryMe'}} <i class="fas fa-hand-point-down"></i></div>
+      <button class="open-here">
+        {{localize 'QUICKINSERT.FilterEditorOpenElsewhere'}}<br>
+        {{localize 'QUICKINSERT.FilterEditorReactivateHere'}}
+      </button>
+    </div>
+  </div>
+
+  <div class="right">
+    <h2>{{localize 'QUICKINSERT.FilterEditorCompendium'}}</h2>
+    <div class="collection-list compendium-list">
+      {{#each collections}}
+      <div class="collection-item">
+        <input type="checkbox" name="{{name}}" id="{{name}}" {{#if selected}}checked{{/if}}>
+        <label class="checkbox" for="{{name}}"><i class="fas fa-atlas"></i>{{label}}</label>
+      </div>
+      {{/each}}
+    </div>
+
+    <h2>{{localize 'QUICKINSERT.FilterEditorDirectory'}}</h2>
+    <div class="collection-list directory-list">
+      {{#each folders}}
+      <div class="collection-item">
+        <input type="checkbox" name="{{name}}" id="{{name}}" {{#if selected}}checked{{/if}}>
+        <label class="checkbox" for="{{name}}"><i class="fas fa-folder"></i>{{label}}</label>
+      </div>
+      {{/each}}
+    </div>
+
+    <h2>{{localize 'QUICKINSERT.FilterEditorEntityType'}}</h2>
+    <div class="collection-list entity-list">
+      {{#each documentTypes}}
+      <div class="collection-item">
+        <input type="checkbox" name="{{name}}" id="{{name}}" {{#if selected}}checked{{/if}}>
+        <label class="checkbox" for="{{name}}"><i class="fas fa-globe"></i>{{label}}</label>
+      </div>
+      {{/each}}
+    </div>
+  </div>
+
+</form>

@@ -1,0 +1,51 @@
+<form action="#">
+  <div class="notes">{{localize 'QUICKINSERT.IndexingSettingsForcesReindex'}}</div>
+  <div class="notes">{{localize 'QUICKINSERT.IndexingSettingsHiddenCompendiums'}}</div>
+  <div class="notes">{{localize 'QUICKINSERT.IndexingSettingsDisabledCompendiumEntities'}}</div>
+  <header class="table-header flexrow">
+    <label class="index"></label>
+    <label>{{localize 'USER.RolePlayer'}}</label>
+    <label>{{localize 'USER.RoleTrusted'}}</label>
+    <label>{{localize 'USER.RoleAssistant'}}</label>
+    <label>{{localize 'USER.RoleGamemaster'}}</label>
+  </header>
+  <div class="indexing-list">
+    <h2>{{localize 'COMPENDIUM.Type'}}</h2>
+    {{#each documentTypes}}
+    <div class="form-group entity">
+      <label class="index">
+        {{localize title}}
+      </label>
+      <div class="form-fields">
+        {{#each values}}
+        <input type="checkbox" name="{{../type}}.{{role}}" id="{{../type}}.{{role}}"
+          {{#unless disabled}}checked{{/unless}}>
+        {{/each}}
+      </div>
+    </div>
+    {{/each}}
+
+    <h2>{{localize 'SIDEBAR.TabCompendium'}}</h2>
+    <div class="form-group">
+      <button class="select-all">Select all</button><button class="deselect-all">Deselect all</button>
+    </div>
+    {{#each compendiums}}
+    <div class="form-group pack">
+      <div class="row-label">
+        <input type="checkbox" data-disable="{{pack}}" class="disable-pack" checked>
+        <label class="index">
+          {{pack}}
+        </label>
+      </div>
+      <div class="form-fields">
+        {{#each values}}
+        <input type="checkbox" name="{{../pack}}.{{role}}" id="{{../pack}}.{{role}}"
+          {{#unless disabled}}checked{{/unless}}>
+        {{/each}}
+      </div>
+    </div>
+    {{/each}}
+  </div>
+
+  <button type="submit" name="submit"><i class="fas fa-save"></i> {{localize 'SETTINGS.Save'}}</button>
+</form>

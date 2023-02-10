@@ -13,5 +13,85 @@
   {
     "minimum": "10.291",
     "verified": "10.291"
-  }
+  },
+  "packs":
+  [
+    {
+      "name": "razas",
+      "label": "Razas (5e)",
+      "system": "dnd5e",
+      "path": "./packs/razas-5e.db",
+      "type": "Item"
+    },
+    {
+      "name": "atributos-raciales",
+      "label": "Atributos raciales (5e)",
+      "system": "dnd5e",
+      "path": "./packs/atributos-raciales-5e.db",
+      "type": "Item"
+    },
+    {
+      "name": "clases",
+      "label": "Clases (5e)",
+      "system": "dnd5e",
+      "path": "./packs/clases-5e.db",
+      "type": "Item"
+    },
+    {
+      "name": "subclases",
+      "label": "Subclases (5e)",
+      "system": "dnd5e",
+      "path": "./packs/subclases-5e.db",
+      "type": "Item"
+    },
+    {
+      "name": "rasgos-clase",
+      "label": "Rasgos de Clase (5e)",
+      "system": "dnd5e",
+      "path": "./packs/rasgos-clase-5e.db",
+      "type": "Item"
+    },
+    {
+      "name": "trasfondos",
+      "label": "Trasfondos (5e)",
+      "system": "dnd5e",
+      "path": "./packs/trasfondos-5e.db",
+      "type": "Item"
+    },
+    {
+      "name": "dotes",
+      "label": "Dotes (5e)",
+      "system": "dnd5e",
+      "path": "./packs/dotes-5e.db",
+      "type": "Item"
+    },
+    {
+      "name": "equipo",
+      "label": "Equipo (5e)",
+      "system": "dnd5e",
+      "path": "./packs/equipo-5e.db",
+      "type": "Item"
+    },
+    {
+      "name": "conjuros",
+      "label": "Conjuros (5e)",
+      "system": "dnd5e",
+      "path": "./packs/conjuros-5e.db",
+      "type": "Item"
+    },
+    {
+      "name": "monstruos",
+      "label": "Monstruos (5e)",
+      "system": "dnd5e",
+      "path": "./packs/monstruos-5e.db",
+      "type": "Actor"
+    },
+    {
+      "name": "personajes",
+      "label": "Personajes (5e)",
+      "system": "dnd5e",
+      "path": "./packs/personajes-5e.db",
+      "type": "Actor"
+    }
+  ]
 }

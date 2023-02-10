@@ -2,9 +2,10 @@
   "title": "Mundo Compartido 5e",
   "id": "mundo-compartido-5e",
   "system": "dnd5e",
-  "background": "mapas/CultOfTheForgottenGod/6.jpeg",
+  "background": "images/portadas/isometrico.jpg",
   "coreVersion": "10.291",
-  "compatibility": {
+  "compatibility":
+  {
     "minimum": "10",
     "verified": "10"
   },
