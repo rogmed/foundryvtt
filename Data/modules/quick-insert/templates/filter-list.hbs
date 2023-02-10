@@ -1,0 +1,40 @@
+<form style="display:none">{{! Foundry is really insistent that this is supposed to have a form }}</form>
+<div class="content-wrap">
+  <div class="table-header">
+    <div class="h-scope"><i class="fas fa-question-circle" title="Filter scope"></i></div>
+    <div class="h-tag">{{localize 'QUICKINSERT.FilterListHeaderTag'}}</div>
+    <div class="h-title">{{localize 'QUICKINSERT.FilterListHeaderTitle'}}</div>
+    <div class="h-options">{{localize 'QUICKINSERT.FilterListHeaderOptions'}}</div>
+  </div>
+  <div class="table-container">
+    <table>
+      <col class="scope">
+      <col class="tag">
+      <col class="title">
+      <col class="options">
+      <tbody>
+        {{#each filters}}
+        <tr {{#if disabled}}class="disabled" {{/if}} data-id="{{id}}">
+          <td>{{{icon}}}</td>
+          <td><span class="search-tag" title="@{{tag}}">@{{tag}}</span></td>
+          <td title="{{subTitle}}">
+            {{subTitle}}
+          </td>
+          <td class="options">
+            {{#if disabled}}
+            <i class="enable fas fa-toggle-off" title="{{localize 'QUICKINSERT.FilterListOptionEnable'}}"></i>
+            {{else}}
+            <i class="disable fas fa-toggle-on" title="{{localize 'QUICKINSERT.FilterListOptionDisable'}}"></i>
+            {{/if}}
+            <i class="edit fas fa-edit" title="{{localize 'QUICKINSERT.FilterListOptionEdit'}}"></i>
+            <i class="duplicate fas fa-clone" title="{{localize 'Duplicate'}}"></i>
+            {{#if deletable}}<i class="delete fas fa-trash" title="{{localize 'Delete'}}"></i>{{/if}}
+          </td>
+        </tr>
+        {{/each}}
+      </tbody>
+    </table>
+  </div>
+
+  <button class="create-filter"><i class='fas fa-plus'></i> {{localize 'QUICKINSERT.FilterListCreateFilter'}}</button>
+</div>

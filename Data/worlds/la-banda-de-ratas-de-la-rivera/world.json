@@ -2,7 +2,7 @@
   "title": "La Rueda Negra",
   "id": "la-banda-de-ratas-de-la-rivera",
   "system": "dnd5e",
-  "background": "gqDBYP9.jpg",
+  "background": "images/portadas/isometrico.jpg",
   "coreVersion": "10.291",
   "compatibility": {
     "minimum": "10",
@@ -11,15 +11,6 @@
   "systemVersion": "2.1.4",
   "nextSession": "2023-02-15T17:00:00.000Z",
   "packs": [
-    {
-      "name": "subclasses-srd",
-      "label": "Subclasses (SRD+)",
-      "path": "packs/subclasses-srd.db",
-      "private": false,
-      "type": "Item",
-      "system": "dnd5e",
-      "flags": {}
-    },
     {
       "name": "rasgos-de-clase-srd",
       "label": "Rasgos de Clase (SRD)",
@@ -36,8 +27,7 @@
       "private": false,
       "type": "Item",
       "system": "dnd5e",
-      "flags": {},
-      "package": "world"
+      "flags": {}
     }
   ]
 }

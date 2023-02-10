@@ -1,0 +1,19 @@
+<form action="#">
+  <div class="notes">
+    {{localize 'QUICKINSERT.SheetFiltersNote'}}
+  </div>
+  {{#each filters}}
+  <div class="form-group">
+    <label for="{{key}}">
+      {{key}}
+    </label>
+    <select name="{{key}}" id="{{key}}">
+      <option value="" {{#if noFilter}}selected{{/if}}>None</option>
+      {{#each options}}
+      <option value="{{id}}" {{#if selected}}selected{{/if}}>@{{tag}} - {{subTitle}}</option>
+      {{/each}}
+    </select>
+  </div>
+  {{/each}}
+  <button type="submit" name="submit"><i class="fas fa-save"></i> {{localize 'SETTINGS.Save'}}</button>
+</form>

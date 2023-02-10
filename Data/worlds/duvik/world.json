@@ -2,7 +2,7 @@
   "title": "Duvik",
   "id": "duvik",
   "system": "dnd5e",
-  "background": "Puerta%20de%20Baldur.png",
+  "background": "images/portadas/puerta-de-baldur.png",
   "coreVersion": "10.291",
   "compatibility": {
     "minimum": "10",
@@ -17,8 +17,7 @@
       "private": false,
       "type": "Item",
       "system": "dnd5e",
-      "flags": {},
-      "package": "world"
+      "flags": {}
     }
   ]
 }
