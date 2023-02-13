@@ -9,25 +9,5 @@
     "verified": "10"
   },
   "systemVersion": "2.1.4",
-  "nextSession": "2023-02-15T17:00:00.000Z",
-  "packs": [
-    {
-      "name": "rasgos-de-clase-srd",
-      "label": "Rasgos de Clase (SRD)",
-      "path": "packs/rasgos-de-clase-srd.db",
-      "private": false,
-      "type": "Item",
-      "system": "dnd5e",
-      "flags": {}
-    },
-    {
-      "name": "atributos-raciales-5e",
-      "label": "Atributos raciales (5e)",
-      "path": "packs/atributos-raciales-5e.db",
-      "private": false,
-      "type": "Item",
-      "system": "dnd5e",
-      "flags": {}
-    }
-  ]
+  "nextSession": "2023-02-15T17:00:00.000Z"
 }
