@@ -998,19 +998,7 @@ export class Workflow {
 			const target = this.targets.values().next().value;
 			let isHidden = false;
 			if (token && target) { // preferentially check CV isHidden
-				if (installedModules.get("conditional-visibility")) {
-					//@ts-ignore .api if cond vis active it will work out the vision rules for a token
-					isHidden = game.modules.get('conditional-visibility')?.api?.canSee(target, token) === false;
-					//@ts-ignore .api if cond vis active it will work out the vision rules for a token
-					if (game.modules.get('conditional-visibility')?.api?.canSee(token, target) === false) {
-						log(`Disadvantage given to ${this.actor.name} due to hidden/invisible target`);
-						this.attackAdvAttribution["DIS:hidden"] = true;
-						this.disadvantage = true;
-					}
-				}
-				else { // no cond vis so just assume can't see hidden or invis attacker
-					const hidden = hasCondition(token, "hidden");
-				}
+				const hidden = hasCondition(token, "hidden");
 				isHidden = isHidden || !canSense(target, token); // check normal foundry sight rules
 				if (!canSense(token, target)) {
 					// Attacker can't see target so disadvantage
@@ -1279,6 +1267,10 @@ export class Workflow {
 					wasExpired = true;
 					expriryReason.push(`isSaveFailure`);
 				}
+				if (this.saveItem.hasSave && expireList.includes("isSave") && specialDuration.includes(`isSave`)) {
+					wasExpired = true;
+					expriryReason.push(`isSave`);
+				}
 				const abl = this.item?.system.save?.ability;
 				if (this.saveItem.hasSave && expireList.includes(`isSaveSuccess`) && specialDuration.includes(`isSaveSuccess.${abl}`) && this.saves.has(target)) {
 					wasExpired = true;
@@ -1288,6 +1280,11 @@ export class Workflow {
 				if (this.saveItem.hasSave && expireList.includes(`isSaveFailure`) && specialDuration.includes(`isSaveFailure.${abl}`) && !this.saves.has(target)) {
 					wasExpired = true;
 					expriryReason.push(`isSaveFailure.${abl}`);
+				}
+				;
+				if (this.saveItem.hasSave && expireList.includes(`isSave`) && specialDuration.includes(`isSave.${abl}`)) {
+					wasExpired = true;
+					expriryReason.push(`isSave.${abl}`);
 				}
 				;
 				return wasExpired;

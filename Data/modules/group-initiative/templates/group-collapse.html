@@ -1,0 +1,40 @@
+<style>
+    details.group-initiative-header>summary { 
+        list-style: none;
+        position: relative;
+    }
+
+    details.group-initiative-header>summary::-webkit-details-marker {
+        display: none
+    }
+
+    details.group-initiative-header>summary::after {
+        content: ' ►';
+        position: absolute;
+        right: 47px;
+        margin-top: -34px;
+    }
+
+    details.group-initiative-header[open] summary:after {
+        content: ' ▼';
+        position: absolute;
+        right: 47px;
+        margin-top: -34px;
+    }
+</style>
+
+
+<summary>
+    <li class="combatant actor directory-item flexrow" >
+        <img class="token-image" src="{{ CombatantImage }}" title="{{ CombatantName }}">
+        <div class="token-name flexcol">
+            <h4>
+                {{ CombatantName }} {{#if ShowHiddenMask}} <span><i class="fas fa-mask" title="{{ToolTip}}"></i></span> {{/if}}
+            </h4>
+        </div>
+        <div class="token-initiative">
+            <span class="initiative">{{ CombatantInitiative }}</span>
+        </div>
+    </li>        
+</summary>
+

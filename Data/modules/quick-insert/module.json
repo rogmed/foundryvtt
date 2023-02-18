@@ -1,25 +1,50 @@
 {
-  "name": "quick-insert",
   "title": "Quick Insert - Search Widget",
-  "description": "Quickly find actors, items, spells etc. and insert them wherever you need them right now - the map, character sheets, roll tables, journals, you name it. <br> <ul><li>Open with <kbd>Ctrl</kbd> + <kbd>Space</kbd> (default)</li> <li>Hold <kbd>Shift</kbd> to select more than one result</li> <li>Drag and drop directly from the search results</li></ul>",
+  "description": "Quickly find actors, items, spells etc. and insert them wherever you need them right now - the map, character sheets, roll tables, journals, you name it. <br /> <ul><li>Open with Ctrl + Space (default)</li> <li>Hold Shift to select more than one result</li> <li>Drag and drop directly from the search results</li></ul>",
   "version": "2.8.0",
-  "authors": [{"name": "Sunspots", "url": "https://gitlab.com/sunspots"}],
-  "esmodules": ["quick-insert.js"],
-  "styles": ["./quick-insert.css"],
-  "packs": [],
-  "languages": [
-    {"lang": "en", "name": "English", "path": "lang/en.json"},
-    {"lang": "es", "name": "Español", "path": "lang/es.json"},
-    {"lang": "fr", "name": "Français", "path": "lang/fr.json"}
+  "authors": [
+    {
+      "name": "Sunspots",
+      "url": "https://gitlab.com/sunspots",
+      "flags": {}
+    }
   ],
-  "compatibility": {"minimum": "10.276", "verified": "10.288"},
-  "minimumCoreVersion": "10.276",
-  "compatibleCoreVersion": "10.288",
+  "esmodules": [
+    "quick-insert.js"
+  ],
+  "styles": [
+    "quick-insert.css"
+  ],
+  "languages": [
+    {
+      "lang": "en",
+      "name": "English",
+      "path": "lang/en.json",
+      "flags": {}
+    },
+    {
+      "lang": "es",
+      "name": "Español",
+      "path": "lang/es.json",
+      "flags": {}
+    },
+    {
+      "lang": "fr",
+      "name": "Français",
+      "path": "lang/fr.json",
+      "flags": {}
+    }
+  ],
+  "compatibility": {
+    "minimum": "10.276",
+    "verified": "10.291"
+  },
   "url": "https://gitlab.com/fvtt-modules-lab/quick-insert",
   "manifest": "https://gitlab.com/fvtt-modules-lab/quick-insert/-/jobs/artifacts/master/raw/module.json?job=build-module",
   "download": "https://gitlab.com/fvtt-modules-lab/quick-insert/-/jobs/artifacts/v2.8.0/raw/quick-insert-v2.8.0.zip?job=build-module",
   "license": "MIT",
   "readme": "https://gitlab.com/fvtt-modules-lab/quick-insert",
   "bugs": "https://gitlab.com/fvtt-modules-lab/quick-insert/-/issues",
-  "changelog": "https://gitlab.com/fvtt-modules-lab/quick-insert/-/blob/master/CHANGELOG.md"
+  "changelog": "https://gitlab.com/fvtt-modules-lab/quick-insert/-/blob/master/CHANGELOG.md",
+  "id": "quick-insert"
 }

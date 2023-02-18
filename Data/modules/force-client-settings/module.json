@@ -1,0 +1,48 @@
+{
+  "title": "Force Client Settings",
+  "description": "Allows to force chosen settings for all clients to the defaults provided by the GM.",
+  "version": "2.3.2",
+  "scripts": [
+    "force-client-settings.js"
+  ],
+  "manifest": "https://gitlab.com/kimitsu_desu/force-client-settings/-/raw/main/module.json",
+  "url": "https://gitlab.com/kimitsu_desu/force-client-settings",
+  "download": "https://gitlab.com/kimitsu_desu/force-client-settings/-/jobs/artifacts/2.3.2/raw/force-client-settings.zip?job=pack",
+  "bugs": "https://gitlab.com/kimitsu_desu/force-client-settings/-/issues",
+  "license": "https://gitlab.com/kimitsu_desu/force-client-settings/-/raw/main/LICENSE",
+  "languages": [
+    {
+      "lang": "en",
+      "name": "English",
+      "path": "lang/en.json",
+      "flags": {}
+    },
+    {
+      "lang": "es",
+      "name": "Español",
+      "path": "lang/es.json",
+      "flags": {}
+    }
+  ],
+  "id": "force-client-settings",
+  "authors": [
+    {
+      "name": "kimitsu",
+      "flags": {}
+    }
+  ],
+  "relationships": {
+    "requires": [
+      {
+        "id": "lib-wrapper",
+        "type": "module",
+        "manifest": "https://github.com/ruipin/fvtt-lib-wrapper/releases/latest/download/module.json",
+        "compatibility": {}
+      }
+    ]
+  },
+  "compatibility": {
+    "minimum": "0.6.5",
+    "verified": "10"
+  }
+}

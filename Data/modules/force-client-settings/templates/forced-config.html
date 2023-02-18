@@ -1,0 +1,36 @@
+{{#*inline "forcedPartial"}}
+<div class="form-group">
+  <label>
+    <span class="fas {{this.fa}}" title="{{this.hint}}" data-settings-key="{{this.namespace}}.{{this.key}}"
+      >&nbsp;</span
+    >
+    <strong>{{this.namespace}}.{{this.key}}</strong>
+    <span class="notes">{{localize this.name}}</span>
+  </label>
+</div>
+{{/inline}}
+
+<form class="flexcol" autocomplete="off" style="max-height: calc(100vh - 100px);">
+  <section class="content">
+    <div style="padding-bottom: 4px; border-bottom: 1px solid;">
+      <h3 class="notification error">{{localize 'FORCECLIENTSETTINGS.settings.forced-config.warning'}}</h3>
+      <input name="force-client-settings-filter" type="checkbox" {{checked data.filter}} /><label
+        >{{localize 'FORCECLIENTSETTINGS.settings.forced-config.filter'}}</label
+      >
+    </div>
+    <div class="settings-list" style="max-height: calc(100vh - 300px); overflow: scroll">
+      {{#each data.namespaces as |n|}}
+      <h2 class="module-header">{{n.namespace}}</h2>
+      {{#each n.keys}} {{> forcedPartial}} {{/each}} {{/each}}
+    </div>
+  </section>
+  <!-- Settings Footer -->
+  <footer class="sheet-footer flexrow">
+    <button type="button" name="unlock-all">
+      <i class="fas fa-lock-open"></i> {{localize 'FORCECLIENTSETTINGS.settings.forced-config.unlock-all'}}
+    </button>
+    <button type="submit" name="close">
+      <i class="fas fa-times"></i> {{localize 'FORCECLIENTSETTINGS.settings.forced-config.close'}}
+    </button>
+  </footer>
+</form>

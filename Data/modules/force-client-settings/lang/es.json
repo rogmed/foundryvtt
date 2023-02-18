@@ -1,0 +1,43 @@
+{
+  "FORCECLIENTSETTINGS": {
+    "settings": {
+      "forced-settings": {
+        "name": "(obsoleto) Lista de ajustes forzados (JSON)",
+        "hint": "Lista de ajustes forzados en el mundo."
+      },
+      "forced": {
+        "name": "Recopilación de ajustes forzados",
+        "hint": "Contiene información sobre la configuración forzada y los respectivos modos de forzado"
+      },
+      "unlocked": {
+        "name": "Recopilación de ajustes desbloqueados",
+        "hint": "Contiene información sobre configuraciones desbloqueadas con ajustes predeterminados editados"
+      },
+      "hide-forced": {
+        "name": "Ocultar configuraciones forzadas de los clientes",
+        "hint": "Los clientes que no sean GM no mostrarán ninguna de las configuraciones forzadas en la configuración de la aplicación"
+      },
+      "forced-config": {
+        "label": "Forzar el editor de ajustes del cliente",
+        "title": "Forzar el editor de ajustes del cliente",
+        "name": "",
+        "warning": "Aquí puede forzar todas las configuraciones, incluidas las no enumeradas. Esto puede permitirle forzar algunas de las configuraciones ocultas detrás de los submenús. TENGA EN CUENTA, sin embargo, que forzar ciertas configuraciones puede causar un comportamiento defectuoso o que la aplicación no responda. Consulte README.md para solucionar problemas.",
+        "filter": "Mostrar solo configuraciones no listadas",
+        "keybindings": "Es posible que desee utilizar el módulo \"Force Client Controls\" para esto",
+        "unlock-all": "Desbloquear todas las configuraciones",
+        "close": "Cerrar"
+      }
+    },
+    "ui": {
+      "yes": "Si",
+      "no": "No",
+      "open-gm-hint": "Estos son ajustes no forzados. Haga clic para cambiar el valor predeterminado.",
+      "soft-gm-hint": "Estos son ajustes predeterminados editables (pueden ser cambiados por los clientes). Haga clic para forzar estos ajustes.",
+      "hard-gm-hint": "Estos ajustes son obligatorios para todos los clientes. Haga clic para desbloquear.",
+      "hard-client-hint": "Estas son ajustes forzados por el GM y no se pueden editar.",
+      "soft-client-hint": "Estos son ajustes predeterminados por el GM. Haga clic para desbloquear.",
+      "unlocked-client-hint": "Estos ajustes están desbloqueados para este cliente. Haga clic para restablecer el valor predeterminado por el GM.",
+      "migration-note": "Forced Client Settings completó el proceso de migración de la configuración. Por favor refresque su navegador."
+    }
+  }
+}
