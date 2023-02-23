@@ -1,0 +1,56 @@
+{
+  "name": "toa",
+  "title": "Tomb of Annihilation",
+  "description": "<p>A shocking rumor buzzes through the Forgotten Realms; a mysterious affliction is targeting those who have been raised from the dead. This wasting disease, which marches its victims back toward the death they once defied, has been dubbed the &#34;death curse&#34;. When this wretched sorcery claims a life, divine magic no longer revives them. Any others who fall to their demise, through natural or unnatural causes, is similarly lost to the living realm.</p><p>Adventurers who wish to stop this devastation must travel to the peninsula of Chult to find the source of this death curse and destroy it. Chult is a tropical wilderness composed mostly of jungles, plateaus, impassable mountains, and belching volcanoes.</p><p>Tomb of Annihilation is a Dungeons &amp; Dragons fifth edition adventure designed to begin with a party of four to six 1st-level characters, who should advance to 11th level or higher by the story's conclusion.</p><p>&nbsp;</p><h3>Foundry Enhancements:</h3><ul><li>Rotating Map Tokens to represent spinning room features.</li><li>Players' map of Chult with revealable areas that become unveiled as the party explores this vast new land.</li><li>Interactive player puzzles.</li><li>Rollable Tables for all shapeshifters, and Rollable Tables and Macro Options for all random encounters.</li></ul><p>&nbsp;</p><h3>Product Information</h3><blockquote><ul><li>System: <strong>D&amp;D 5E (Forgotten Realms)</strong></li><li>Starting Level: <strong>Low (1)</strong></li><li>Length: <strong>Long Campaign</strong></li></ul></blockquote><p>&nbsp;</p><hr /><p><strong>DISCLAIMER:</strong> The use of this is meant for use for your personal use, and only if you legally possess such in accordance with your local laws.</p>",
+  "authors": [
+    {
+      "name": "Wizards of the Coast",
+      "url": "https://dnd.wizards.com/"
+    },
+    {
+      "name": "Worlds of the Community Team",
+      "url": "https://discord.gg/GTyjKHuKhx"
+    }
+  ],
+  "readme": "README.md",
+  "background": "worlds/toa/scenes/backgrounds/startlogin.webp",
+  "bugs": "https://discord.gg/GTyjKHuKhx",
+  "flags": {},
+  "version": "2.0.1",
+  "coreVersion": "9.269",
+  "minimumCoreVersion": "9.255",
+  "compatibleCoreVersion": "9.269",
+  "systemVersion": "1.6.1",
+  "minimumSystemVersion": "1.6.1",
+  "compatibleSystemVersion": "1.6.1",
+  "system": "dnd5e",
+  "scripts": [],
+  "esmodules": [],
+  "styles": [],
+  "languages": [],
+  "packs": [],
+  "dependencies": [
+    {
+      "name": "plutonium",
+      "title": "Plutonium",
+      "type": "module",
+      "manifest": "https://raw.githubusercontent.com/TheGiddyLimit/plutonium-next/master/module.json",
+      "version": "1.51.0"
+    },
+    {
+      "name": "dnd5e",
+      "title": "DnD5e - Fifth Edition System",
+      "type": "system",
+      "manifest": "https://gitlab.com/api/v4/projects/foundrynet%2Fdnd5e/packages/generic/dnd5e/latest/system.json",
+      "version": "1.6.1"
+    }
+  ],
+  "socket": false,
+  "protected": false,
+  "resetKeys": false,
+  "safeMode": false,
+  "manifest": "ipns://k51qzi5uqu5dl9338fpk7jrfx20ayprickx11r7fpyyna5v2982yk404c6q0mo/toa/toa-2.0.1/ipns.json",
+  "download": "ipns://k51qzi5uqu5dl9338fpk7jrfx20ayprickx11r7fpyyna5v2982yk404c6q0mo/toa/toa-2.0.1/toa-2.0.1.zip"
+}
+
+
