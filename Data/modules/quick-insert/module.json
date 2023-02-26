@@ -37,7 +37,7 @@
   ],
   "compatibility": {
     "minimum": "10.276",
-    "verified": "10.291"
+    "verified": "10.288"
   },
   "url": "https://gitlab.com/fvtt-modules-lab/quick-insert",
   "manifest": "https://gitlab.com/fvtt-modules-lab/quick-insert/-/jobs/artifacts/master/raw/module.json?job=build-module",

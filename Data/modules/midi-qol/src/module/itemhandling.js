@@ -1544,6 +1544,8 @@ async function resolveLateTargeting(item, options, pressedKeys) {
 	const lateTargetingSetting = getLateTargeting(workflow);
 	if (lateTargetingSetting === "none")
 		return true; // workflow options override the user settings
+	if (workflow)
+		workflow.targets = new Set();
 	if (workflow && lateTargetingSetting === "noTargetsSelected" && workflow.targets.size !== 0)
 		return true;
 	const savedSettings = { control: ui.controls?.control?.name, tool: ui.controls?.tool };

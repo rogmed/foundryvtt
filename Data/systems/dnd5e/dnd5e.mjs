@@ -8111,7 +8111,7 @@ class Item5e extends Item {
       name: `${game.i18n.localize("DND5E.SpellScroll")}: ${itemData.name}`,
       img: itemData.img,
       system: {
-        "description.value": desc.trim(), source, actionType, activation, duration, target, range, damage, formula,
+        description: {value: desc.trim()}, source, actionType, activation, duration, target, range, damage, formula,
         save, level, attackBonus
       }
     });
@@ -11441,7 +11441,7 @@ class Actor5e extends Actor {
     }, {renderSheet});
 
     // Create new Actor with transformed data
-    const newActor = await this.constructor.create(d, {renderSheet: true});
+    const newActor = await this.constructor.create(d, {renderSheet});
 
     // Update placed Token instances
     if ( !transformTokens ) return;
@@ -13031,7 +13031,8 @@ class ActorSheet5e extends ActorSheet {
     this._prepareItems(context);
     context.expandedData = {};
     for ( const id of this._expanded ) {
-      context.expandedData[id] = await this.actor.items.get(id).getChatData({secrets: this.actor.isOwner});
+      const item = this.actor.items.get(id);
+      if ( item ) context.expandedData[id] = await item.getChatData({secrets: this.actor.isOwner});
     }
 
     // Biography HTML enrichment
@@ -15224,6 +15225,15 @@ class ActorSheet5eVehicle extends ActorSheet5e {
  */
 class GroupActorSheet extends ActorSheet {
 
+  /**
+   * IDs for items on the sheet that have been expanded.
+   * @type {Set<string>}
+   * @protected
+   */
+  _expanded = new Set();
+
+  /* -------------------------------------------- */
+
   /** @inheritDoc */
   static get defaultOptions() {
     return foundry.utils.mergeObject(super.defaultOptions, {
@@ -15265,6 +15275,11 @@ class GroupActorSheet extends ActorSheet {
     // Inventory
     context.itemContext = {};
     context.inventory = this.#prepareInventory(context);
+    context.expandedData = {};
+    for ( const id of this._expanded ) {
+      const item = this.actor.items.get(id);
+      if ( item ) context.expandedData[id] = await item.getChatData({secrets: this.actor.isOwner});
+    }
     context.inventoryFilters = false;
     context.rollableClass = this.isEditable ? "rollable" : "";
 
@@ -15396,6 +15411,7 @@ class GroupActorSheet extends ActorSheet {
       const {quantity} = item.system;
       ctx.isStack = Number.isNumeric(quantity) && (quantity > 1);
       ctx.canToggle = false;
+      ctx.isExpanded = this._expanded.has(item.id);
       if ( (item.type in sections) && (item.type !== "loot") ) sections[item.type].items.push(item);
       else sections.loot.items.push(item);
     }
@@ -16781,6 +16797,8 @@ class JournalClassPageSheet extends JournalPageSheet {
     );
 
     const linked = await fromUuid(this.document.system.item);
+    context.subclasses = await this._getSubclasses(this.document.system.subclassItems);
+
     if ( !linked ) return context;
     context.linked = {
       document: linked,
@@ -16794,7 +16812,6 @@ class JournalClassPageSheet extends JournalPageSheet {
     context.optionalTable = await this._getOptionalTable(linked);
     context.features = await this._getFeatures(linked);
     context.optionalFeatures = await this._getFeatures(linked, true);
-    context.subclasses = await this._getSubclasses(this.document.system.subclassItems);
     context.subclasses?.sort((lhs, rhs) => lhs.name.localeCompare(rhs.name));
 
     return context;
@@ -17179,17 +17196,16 @@ class JournalClassPageSheet extends JournalPageSheet {
     switch ( item.type ) {
       case "class":
         await this.document.update({"system.item": item.uuid});
-        this.render();
+        return this.render();
       case "subclass":
         const itemSet = this.document.system.subclassItems;
         itemSet.add(item.uuid);
         await this.document.update({"system.subclassItems": Array.from(itemSet)});
-        this.render();
+        return this.render();
       default:
         return false;
     }
   }
-
 }
 
 class SRDCompendium extends Compendium {
@@ -18039,6 +18055,7 @@ class CommonTemplate extends SystemDataModel.mixin(CurrencyTemplate) {
 
   /** @inheritdoc */
   static migrateData(source) {
+    super.migrateData(source);
     CommonTemplate.#migrateACData(source);
     CommonTemplate.#migrateMovementData(source);
   }
@@ -18173,6 +18190,7 @@ class CreatureTemplate extends CommonTemplate {
 
   /** @inheritdoc */
   static migrateData(source) {
+    super.migrateData(source);
     CreatureTemplate.#migrateSensesData(source);
   }
 
@@ -21777,7 +21795,7 @@ var migrations = /*#__PURE__*/Object.freeze({
  * A system for playing the fifth edition of the world's most popular role-playing game.
  * Author: Atropos
  * Software License: MIT
- * Content License: https://media.wizards.com/2016/downloads/DND/SRD-OGL_V5.1.pdf
+ * Content License: https://www.dndbeyond.com/attachments/39j2li89/SRD5.1-CCBY4.0License.pdf
  * Repository: https://github.com/foundryvtt/dnd5e
  * Issue Tracker: https://github.com/foundryvtt/dnd5e/issues
  */
