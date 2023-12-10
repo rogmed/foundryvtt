@@ -1,3 +1,293 @@
+### 10.0.61
+* Fixes for dnd5e 2.4 compatibility
+
+### 10.0.60
+* Fix for sw5e getting "undefined" for ability strings (Wisdom etc).
+
+### 10.0.59
+* Fix for targeting failing when tokens with no actor are present in the world.
+* Implement flags["midi-qol"].neverTarget which when true means midi will never target the token
+* If a token is "hidden" (from the token hud top right) it will not be targeted
+* Fix for dfreds convenient effects throwing errors if other dfreds modules (besides dfreds convenient effects are installed).
+
+### 10.0.58
+* Fix for double concentration check - thanks @thatlonelybugbear
+* Fix for missing concentration sometimes on unlinked tokens.
+
+### 10.0.57
+* Fix for the duplicating flags/macros/effects stuck on/not being able to delete flags/item piles not working etc
+**BEFORE running the macros take a backup of your world - even if it is broken** We can always find out the problem and fix it but once you run the supplied macros there is no going back
+* Once you upgrade to 10.0.57 no further damage should be done, but any existing issues won't be resolved.
+  - Accordingly midi will create 3 macros for you (in your Macros Directory):
+    - MidiQOL.FixFlagsSelectedTokens - this will fix flags.midi-qol on any selected tokens
+    - MidiQOL.FixFlagsAllSceneTokens - this will fix flags.midi-qol on all scene tokens
+    - MidiQOL.FixFlagsAllWorldActors - this will fix flags.midi-qol for all world actors
+  - I strongly suggest you test with an unlinked token or two (FixFlagsSelectedTokens) in a scene you know has problems. Once you've verified that works for you you can run FixFlagsAllWorldActors then for each scene that has issues FixFlagsAllSceneTokens. 
+  - If you have not accessed a scene with one of the broken versions of mid (10.0.52->10.0.55) then you don't need to fix the tokens.
+  - The macros take a heavy handed approach to removing flags.midi-qol from tokens/actors so if they are not broken, don't fix them.
+  
+### 10.0.56
+* Undo the change in 10.0.55 so flags won't duplicate but item-piles will have a problem
+
+### 10.0.55
+* Fix for flags not being unset. Thanks @thatlonelybugbear
+
+### 10.0.54
+* Fix for save.fail bonus dialog being displayed even if there are not optional bonuses with useage left.
+
+## 10.0.53
+* Fix for healing triggering concentration checks
+* Temp Fix for reaction processing causing "ADD" effects to be applied multiple times pending resolution in dnd5e.
+* Fix for "When checking nearby foes, thrown weapons being used to do a mwak are getting flagged with disadvantage"
+
+## 10.0.52
+* Fix for duplicating of onUse macros applied via active effects.
+
+## 10.0.51
+* Fix for spell level being passed to macros thanks @thatlonelybugbear
+
+## 10.0.50
+* Fix for clearing of unlinked token flags when creating a token.
+
+## 10.0.49
+* Add "isMiss" target onUse macro call - called when an attack misses a target, called for each missed target.
+* Fix for @spellLevel arguments always being 0.
+* Fix for auto concentration not using CE custom effect.
+* Fix for occasional deadlock in removing removing effects.
+* Clean up for marking dead/wounded tokens.
+* Fix for toggle keyboard shortcut not overriding roll fast forward.
+* Added option to have long range attacks roll at disadvantage rather than failing.
+* Fix for skills not respecting roll mode in the roll options for skill rolls.
+* Added warning for Combat Utility Belt not being supported in foundry v11 and midi dropping support in midi v11.1
+  - Anonymous is supported by midi and replaces the CUB token name hiding.
+  - condition-lab-triggler is supported by midi (first midi release so may have bugs) and provides a direct replacement for CUB enhanced conditions.
+  - CE is supported by midi and provides an alternative to most features of CUB enhanced conditions
+* This will probably be the last found v10 release with new features. I still push updates for bug fixes but otherwise no more work on v10.
+
+## 10.0.48.3
+* find nearby has an additional option, includeToken whcih when set will include the source token in the returned array of tokens.
+* fix for Concentration in v11. Midi requires Convenient effects v5.0.1
+
+## 10.0.48.2
+* Fix for critical rolls not working
+* Fix for token macros isSave, isSaveSuccess and isSaveFail
+* Fix for concentration being removed on template removal even if the item placed no template.
+
+### 10.0.48.1
+* Fix for occasional damageListItem.damageDetail[1] is not iterable.
+
+### 10.0.48
+* Monkey patch of lmrtfy causing lmrtfy rolls to be ignored.
+* Fix for optional.name not rolling for saves/checks.
+* Pass additional damage information to DAE macro.execute and DAE macro.ItemMacro effects. 
+  - Arguments @damageComponents.damage type are supported, e.g. @damageComponents.necrotic.
+  - Correct @damage to be all of the damage done in the attack (base, other and bonus damage).
+  - Added @damageApplied which is the amount of damage applied to the token after reisitances etc.
+* Changed missing module messages to be flagged as optional module missing.
+* Fix for skill rolls dice so nice display being out of synch with the display.
+* Fix for completeItemUse ignoring autoRollAtttack, fastForwardAttack, autoRollDamage, fastForwardDamage
+
+### 10.0.47
+* Various fixes for the units field that was reinstated in 10.0.46
+* Fix for deleting then re-adding the same onUse macro
+* **Breaking** flags.midi-qol.optional.Name.save.fail now needs to be flags.midi-qol.optional.Name.save.fail.all. Added support for flags.midi-qol.optional.Name.save.fail.str/dex etc. e.g. flags.midi-qol.optional.Name.save.fail.dex OVERRIDE success will alow the saver to optionally convert a failed dex save to a success.
+* A patch so the LMRTFY 3.1.7 will work with dnd 2.2x - temporary until LMRTFY issues it's own fix.
+
+### 10.0.46
+* Fix for player save/check/skill checks blind rolls not working.
+* Added removing templates to undo workflow.
+* Removed some extraneous advantage labels when Advantage Reminder is in use.
+* Fix for self apply CE effects.
+* Added option for GM to see active defence rolls always.
+* Fixes for displaying saving throws too often for player rolls.
+* Fix for showing tool check dice for nice rolls twice.
+* Add another critical dice option, max base dice and explode critical dice.
+* Include player characters with race NoTarget in the check for ignorning those actors.
+* Stopgap fix for disappearing units in item target specification.
+* **Breaking** Actions/reactions and bonus actions are recorded in actor.flags["midi-qol"].actions.bonus/reaction/action true or false, the flag denoting the combat round the bonus action or reaction was use is stored in actor.flags["midi-qol"].actions.reactionCombatRound/bonusActionCombatRound.
+
+### 10.0.45
+* Fix for fey ancestry item macro typo - thanks @thatlonelybugber
+* Fix for shield macro typo - thanks @thatlonelybugear
+* Fix for broach of shielding and 10.0.45 argument calling.
+* Fix for erroneous preTargetdamageApplication macro call - thanks @Elwin
+* Fix for reaction/bonus action used icon not being added when enforce reactions set to display status icon.
+* (v11) Fix for unconscious/dead getting stuck on a token. Only fix once it occurs seems to be to delete and recreate the token.
+* fix dnd5e 2.2 generating deprecation warnings for CONFIG.DND5E.abilities.
+* Any items updated in the sample items compendium will have the version number moved to the description, rather than the name. This means you will need to watch the release notes/announcement for notification of changes.
+
+
+### 10.0.44
+* Fix for DR and slivered damage resistance. Incorrectly any item with a + to hit was considered silvered. Now obeys the midi config settings workflow tab.
+* Fix for incorrectly applying DR to temphp healing.
+* Support roll mode when presenting optional bonus dialogs, blindrolls won't display the dice roll that is being adjusted.
+* **BREAKING** Another change to macro execution. The workflow that triggered the macro is available via 'workflow' or 'scope.workflow'.
+  - Macros that reference the workflow via 'this' will throw a deprecation warning and will fail to execute after midi v11.1.0 is released.
+  - Macros that declare workflow [as in const workflow = MidiQOL.Workflow.getWorkflow(args[0].uuid))] will throw a deprecation warning but still operate. This will fail in midi version 11.1.0 and later.
+  - Hopefully this is the last change. In midi v11.1.0 macro calling will switch to core foundry v11 macro calling.
+* **BREAKING** preApplyTargetDamage renamed to preTargetDamageApplication and remains a target onUse macro. That is, the macro to be called is looked up on the target not the actor rolling the attack. It is called for each target that was damaged by using the item, not just those that were hit. So you'll need to check that in your macros.
+  - workflow.damageItem has the details of the damage to be applied and can be modified by the macro. In particular setting damageItem.hpDamage will set how much damage is done to the actor. Don't use this feature when di/dr/dv or DR.XXX will do what you need since the changes won't be obvious from the damage card.
+  - Sample Broach of Shielding item to neutralise magic missile damage included.
+* Actor onUse preDamageApplication macro fetches macros from the actor doing the attack. workflow.damageList has the damage details for all tokens that are attacked. Updated Mace of disruption to show how it can be used.
+* Updated Fey Ancestry (Elven) to implement advantage for saves against charm. Thanks @thatlonelybugbear#4393
+* Updated shield spell to provide immunity to magic missile.
+* Added export of async function reactionDialog. See readme for details.
+* For onUse macros, item, damageBonus and actor onUse macros args[0].tagis  set to "OnUse" and for target onUse macros the tag will be "TargetOnUse". This allows you to have a single macro that deals with both sorts of calls.
+* Readme.md updated with more information on macros, arguments and when they are called.
+* Added a helper function for macro writers who want to assist midi in cleaning the chat log when undoing a workflow. Midi monitors created chat messages whilst until the workflow is complete and adds them to the list of things to be removed when undoing the workflow However, macros that create chat messages escape the list. You can add a message to be deleted by calling MidiQOL.addUndoChatMessage(message: ChatMessage | Promise<ChatMessage>).
+  - Updated the shillelagh spell as an example.
+
+### 10.0.43
+* **BREAKING** added dae as a dependency.
+* When using ghost rolls for the GM or blind rolls for players the GM will see the dice so nice dice being rolled.
+* midi macro calling is now compatible with v11 argument handling. "scope" is defined meaning scope.args, scope.theWorkflow and scope.item are all defined (also available without the scope., so args, theWorkflow and item are all defined in the macro). args is, once again, an array.
+* Fix for an error when a save/check fails causing the workflow to fail instead of assuming 1 for the save. Should also fix the deadlock on concentration checks failing..
+* Added button color coding on the damage card - green the button is active, red the button is not.
+* Fix for inline rolls not working for unlinked tokens.
+* Added first cut of a UI for undoing workflows, start the app by calling MidiQOL.showUndoWorkflowApp() - only accessible to a GM client. 
+  - All undoable workflows will be displayed in the app. You may only undo/remove the top item from the list. Undoing the workflow will restore all affected actors/tokens to the state before the workflow started (including any changes done by hand after the workflow completed, e.g. adding an item to an actor, adjusting hit points etc) so keep that in mind. 
+  - You may remove the top item without undoing the workflow. However if you undo another workflow that references any of the same actors as the removed workflow, their backup was taken before the removed workflow, so undoing those workflows will undo any changes done by the removed workflow for those actors. Generally it is less confusing to undo to the point you want and then make any changes/rerolls from that point.
+  - Only the last 15 workflows are kept for undoing. The limit is arbitrary, but lots of data is kept so a limit seems prudent. Also after 15 completed workflows the likelihood is that there undoing changes is best handled by the GM. 
+
+### 10.0.42
+* Changed the preTargetSave hook call to be just before the roll is done and the passed workflow now includes saveDetails comprising
+```js
+saveDetails: { advantage: boolean | undefined,
+          disadvantage: boolean | undefined,
+          isFriendly: boolean | undefined,
+          isMagicSave: boolean | undefined,
+          isConcentrationCheck: boolean | undefined,
+          rollDC: number }
+```
+which can be changed in the preTargetSave Hook. Sample item Antitoxin in Midi sample items as an example for advantage against poison saves.
+* Added actionType to ReactionFilter hook call which be one of reaction, reactiondamage, reactionattack. As a reminder the hook will fire on both the attacking client and on the attackee client.
+* Reaction timeout changes. There is now a timeout for selecting the reaction and a timeout for finishing rolling the reaction item, both equal to the reaction timeout setting on the reaction tab.
+* findNearby will ignore tokens with system.details.type.custom set to "NoTarget".
+* findNearby now supports options canSee (the potential nearby token can see the designated token), and isSeen (the designated token can see the potential nearby token).
+* Changed the default for allowIncapacitated in overtime effects to true, rather than false.
+* Fix for flags.midi-qol.DR.all to not apply for healing/temphp - this is damage **reduction** not damage **resistance**.
+* Fix for flags.midi-qol.DR.non-adamant not working properly.
+* Effects that create a flags.midi-ol.onUseMacro can now just refer to ItemMacro in the change.value and midi will convert it to ItemMacro.ItemUuid when the effect is created. The ItemUuid is the uuid of the origin item (if there is one).
+* Added flags.midi-qol.optional.NAME.rollMode which will use the specified roll mode (pulbicroll, gmroll, blindroll, selfroll) for both the bonus and the save/check/skill roll that triggered it.
+* Added config setting All Player ability checks/save/skill checks are rolled blind. This allows you to force player rolls to be done as blind rolls. Useful if ask your players do do a perception roll, but don't want them to see the result and they forget to do the roll blind.
+* Critical Damage treatment is now configurable for players and GMs separately. GM setting will be copied form previous setting on first load.
+* Added ability to choose exploding critical dice for all, npcs only or characters only.
+* Merged change from @MrPrimate for Active Auras and not calling macros.
+* More work on undoing workflows. Should now delete most chat cards associated with a workflow, rather than just the item card and damage application card. Restoring concentration now works. Templates not looked at yet. Reminder this is EXPERIMENTAL and probably will do terrible things to your world. Always make a copy of any linked characters when testing.
+* There is now a dedicated discord server for my modules: https://discord.gg/Xd4NEvw5d7
+
+### 10.0.41
+* Reverted original change that caused applyTokenDamage problems. Added applyTokenDamage to my test cases, so should not happen again.
+* Fix for undoWorkflow to remove flags that should be removed. Thanks @thatlonelybugbear
+* More enhancements to undoing workflows.
+
+### 10.0.40
+* Fix for applyTokenDamageMany with a null/undefined item.
+* Added exports of displayDSNForRoll, playerFor(token), playerForActor(actor)
+* Fix for not colorising damage rolls when using dice so nice.
+* First implementation of undo workflow. **NOT SUITABLE FOR PRIME TIME**. Enable on the mechanics tab. If enabled midi records undo data for all item rolls in a stack stored on the GM client. You can undo item rolls via MidiQOL.undoMostRecentWorkflow() which must be executed on the GM client (there is currently no UI for undoing rolls), which restores affected actors to a state before the item roll was started - dropping **ALL** subsequent changes. The stack is cleared on a game reload (currently). Resotring concentration known not to work. Non-merge card attack/damage roll cards not removed, but merge cards and damage cards are. Does support undoing reaction effects which are included in undoing the roll that triggered them. Feedback from the brave appreciated.
+
+### 10.0.39
+* Put back definition of item when calling an onUse macro
+
+### 10.0.38
+* reenable flags.midi-qol.optional.NAME.criticalDamage which allows the bonus roll in the optional field to do critical damage if the damage roll is critical.
+* Reaction processing requires "enforce reaction checking" to be all/match the actor type for midi to prompt for reactions.
+* Some fixes for rolling damage with other damage when no token is on the map/no token targeted.
+* Some clean up for sw5e.
+* Added await for some of the triggerTargetMacro calls - thanks @Elwin
+* Additional feature for activation conditions and roll other damage. To be able to implement features/weapons that only do damage against a specific type of creature (or other activation condition), you can put 0 damage in the damage formula (not blank) and put all the damage in the other formula. Midi will evaluate the condition (per token) and if there is damage to apply the other damage will be displayed as the main damage and applied to targets for whom the activation condition evaluates to true, make sure to set roll other damage on the item. Have a look at the sample undead smite for how to set this up.
+
+### 10.0.37
+* Nearby foe rule now does not include incapacitated foes and checks to see that the foe can see the target.
+* Some cleanup of using ammunition with saving throws (use the ammo name for the save). If both the original item and ammo have other damage rolls/saving throws the ammo item will be used for saving throw type/dc and other damage roll.
+* Typo fix for template placing - thanks @elwin
+* Checks for tokens being incapacitated now will check for the CE condition incapacitated and core/CE stunned condition as well.
+* Additional option for overTime effects allowIncapacitated=true|false. If true overtime effect will still be processed for incapacitated actors. Useful for effects that allow a saving throw to remove a condition, e.g. power word stun.
+* Added Power Word Stun to midi sample items compendium.
+* Added Darkvision 60ft as an example of how to use ATL effects.
+* Added two versions of goggles of night, one that follows RAW and one that uses light amplification mode since it looks very cool. Equipping the item causes the effects to be applied, unequipping removes them.
+* target macros are now awaited. Thanks @Elwin
+* If the only damage type done on an attack is "none" do not display an apply damage card. Thanks @Elwin
+* Removed midi-qol item delete check support, since it is now covered by dnd5e/core and caused a compatibility issue when deleting classes.
+* Rewrite of midi dice so nice support. Midi will now display a dice so nice 3d dice whenever it is rolled and display subsequent dice as required. So if you roll and attack roll the d20 will be immediately displayed (unless hidden by gm settings) and then any optional bonus dice will be rolled when the optional bonus is used. The final formula will include the optional bonus. This removes the case where optional bonuses would cause the d20 to be rolled again with the same value.
+* Fixed a bug with optional bonuses which reroll the d20 not triggering criticals/funmbles.
+* Fixed a bug with reactions from magic item spells.
+ * if midi is checking the special duration (all of the isXXXX special durations), the first effect that triggers will cause all subsequently applied effects to trigger as well (no matter what there special duration is). 
+* New flags.midi-qol.damage.reroll-kh, flags.midi-qol.damage.reroll-kl which will roll damage and otherFormula (if required) twice and keep the highest/lowest of the two rolls.
+* First steps for v11 compatibility. Informal tests suggest that it more or less works but is NOT ready for prime time.
+
+
+### 10.0.36
+* Change so that neutral tokens NEVER contribute to flanking/flanked condition checking or get the flanking status. If you 
+want a token to contribute to flanking you must set it to be hostile to the target token.
+* Fix to allow oevertime effects action saves to support multiple skill rolls, e.g. actionSave=true, rollType=skill, saveAbility=acr|ath to allow an acrobatics or athletics check.
+* reduce number of "actor is incapacitated messages generated".
+* Fix for template spells provided by the magic items module not picking up targets.
+* Fix for flags.midi-qol.DR.all reducing healing
+* Slight change to damage application which treats the whole of the damage for the purposes of saving throws, rather than adjudicating the save per damage type (will increase damage by up to 1 point if there are two damage items each being an odd number - e.g. 3bludgeoning + 5cold and saved against, previously would be 3/2 + 5/2 = 1 + 2 = 3pts, now will be [3 + 5]/2=4 points).
+* Fix for late targeting being disabled after first roll.
+
+### 10.0.35
+* Bug fix for unable to roll damage/mark wounded if optional rules disabled.
+* Niche request, whereever you specify a an itemOnUseMacro or actorOnUseMacro midi now supports function.**functionName**, where function name is the name of any function available in the global scope. The function is called via
+```js
+functionName.bind(workflow)({ speaker, actor, token, character, item, args })
+```
+and gets the same argumens as would be passed to the macro function. So for example
+flags.midi-qol.onUseMacroName CUSTOM function.MidiQOL.log, preItemRoll
+* removed some left over debug error messages
+
+### 10.0.34
+* Fix for numeric values in concentrationSaveBonus throwing an error (i.e. 5 instead of +5).
+* Added flags.midi-qol.grants.max.damage.all/heal/mwak etc. Useful for Beacon of Hope, with flags.grants.max.damage.heal set on the target, healing actions (i.e. spells/potions/features marked as healing actions) will do max possible healing.
+* Added flags.midi-qol.grants.min.damage.all/heal/mwak etc
+As with the other flags.grants for attacks/damage rolls only the first target is checked and that is used for all targets.
+* Added rollMode to overtime effects settings. You can specify gmroll, blindroll, publicroll, selfroll and the rollmode will be applied to the overtime item roll
+* Fix for respecting the "don't auto roll ability rolls" setting when using monk's token bar.
+* Additional option for flags.midi-qol.absorption.type, you can now specify a numeric value instead of true false. The damage type will be converted to healing and the quantum of the damage will be multiplied by the specified value (e.g. flags.midi-qol.absorption.acid OVERRIDE 0.5 will convert incoming acid damage to heal 1/2 of the acid damage). Negative numbers can be specified. So flags.midi-qol.absorption.acid ADD -1.5 will cause acid damage to do 1.5 times as much damage and be of type healing so will ignore acid damage resistance/vulnerability.
+* By request included an optional game mechanic to re-roll initiative at the start of a round. **Warning** this may screw with the expiration of effects  with a duration in rounds/turns, since they will expire on the round/turn specified, even if the actor they are associated with has moved in the initiative order.
+* Fix for marking dead/unconscious misbehaving after 10.0.33
+* Added additional token actor macro calls for preApplyTargetDamage and preTargetSave, called before applying damage, but after damage is calculated so you can change the damage done, and before target saves are rolled to let you change things like advantage or bonuses etc.
+* Change to flags.midi-qol.DR.healing to allow negative values, which will increase healing. There may be some oddities if you have an item that both heals and does damage - so probably don't do that. flags.midi-qol.DR.heal (the action) is disabled, always use .healing to adjust the specific healing on the roll.
+
+
+### 10.0.33
+* Fix for not picking up Build a bonus save dc bonuses.
+* More changes for the new version of convenient effects, not setting duration correctly.
+* Fix for DamageOnlyWorkflow not displaying item card correctly.
+* Fix for "chat message" save handling not picking up the save rolls.
+* New Reaction option, reaction Pre Attack Roll. The reaction is processed after the attack roll is initiated but BEFORE the attack is actually rolled, so that effects that impose advantage/disadvantage on the attack roller can be implemented. 
+* Sample items Warding Flare which causes the attack to be made with disadvantage; Make Miss which causes the attack to miss.
+* Fix for item.displayCard() throwing an error.
+* Added hasUsedReaction(actor), setReactionUse(actor), hasUsedBonusAction(actor), setBonusActionUsed(actor) to MidiQOL exports.
+* Updated Sneak Attack and Rakish Audacity(10.0.33) to reflect all critical damage settings when rolling a sneak attack/rakish audacity attack. This uses the dnd5e DamageRoll and dnd5e settings to do the calc so can be a useful way to do other rolls that need to be aware of critical damage.
+* **Breaking** Currently when rolling 1 attack per target all workflows are removed at the end of the roll (since the workflow refers to a single target not all the targets). Now if there is only 1 target the workflow will be left.
+
+* Added optional rule for vitality (homebrew - first release). If enabled you can specify a field in the actor (usually a resource - system.resources.primary.value) to act as a vitality pool. Once HP are exhausted damage is done to vitality, if vitality is exhausted the character is dead. Characters suffer no penalties when hp drop to 0. Any incapacitated check **should** now look for vitality of 0. Vitality cannot be healed by cure spells.
+
+* There are some additional actor onUse macro triggers (but NOT item triggers) available when the actor is the target of an attack/spell/feature use:
+  - "isAttacked": the actor is a target of an attack
+  - "isHit": the actor is a target of a hit
+  - "isSave": the actor makes a successful save in response to being targeted
+  - "isSaveSuccess": the actor makes a successful save in response to being targeted
+  - "isSaveFailure": the actor makes a failed save in response to being targeted
+  - "isDamaged": "the actor is damaged by an item roll
+  * Be aware that the macroData is passed in the same way as for all other onuse macros, so args[0].actor will be the actor that made the attack/cast the spell/used the feature.
+  * args[0].options.actor, args[0].options.token will be the actor/token that was attackd/hit/damaged etc
+  * Added item Retribution which when added to an actor does 1d12 damage to the attacker when the target is damaged. Shows how to use the new actor onUse flags and references the item macro from the compendium.
+
+### 10.0.32
+* Turns out I missed quite a lot of changes needed for Convenient Effects 4.0.2. Should fix flanking, wounded/dead markingincapacitated checking. This is (hopefully) all of them.
+
+### 10.0.31
+* Midi merge cards should now be compatible with quick-reveal
+* Tool checks now benefit from optional bonuses that apply to ability checks.
+* Improved behaviour when checking flanked status and tokens are at different heights.
+* midi-qol is now compatible with and **requires** Convenient Effects v4.0.2. Backwards compatibility with previous versions is not supported.
+* **Breaking** Addition to findNearby to allow inclusion of incapacitated actors, MidiQOL.findNearby(disposition, token, distance, {maxSize, includeIncapacitated}). Only breaking if you were including a maxSize before, you'll need to use {maxSize: size} instead.
+* For @Elwin only register for the createTemplate hook if the item has areaTargets set.
+
 ### 10.0.30
 * Fix for cases where players end turn in combat causing over time errors.
 * Fix for es.json not supporting monk's token bar saving throw option

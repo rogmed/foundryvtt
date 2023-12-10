@@ -1,18 +1,20 @@
-import { registerSettings, fetchParams, configSettings, checkRule, enableWorkflow, midiSoundSettings, fetchSoundSettings, midiSoundSettingsBackup, disableWorkflowAutomation } from './module/settings.js';
+import { registerSettings, fetchParams, configSettings, checkRule, enableWorkflow, midiSoundSettings, fetchSoundSettings, midiSoundSettingsBackup, disableWorkflowAutomation, readySettingsSetup } from './module/settings.js';
 import { preloadTemplates } from './module/preloadTemplates.js';
 import { checkModules, installedModules, setupModules } from './module/setupModules.js';
 import { itemPatching, visionPatching, actorAbilityRollPatching, patchLMRTFY, readyPatching, initPatching, addDiceTermModifiers } from './module/patching.js';
 import { initHooks, overTimeJSONData, readyHooks, setupHooks } from './module/Hooks.js';
 import { initGMActionSetup, setupSocket, socketlibSocket } from './module/GMAction.js';
 import { setupSheetQol } from './module/sheetQOL.js';
-import { TrapWorkflow, DamageOnlyWorkflow, Workflow, DummyWorkflow } from './module/workflow.js';
-import { addConcentration, applyTokenDamage, canSense, checkNearby, checkRange, completeItemRoll, completeItemUse, computeCoverBonus, doConcentrationCheck, doOverTimeEffect, findNearby, getChanges, getConcentrationEffect, getDistanceSimple, getDistanceSimpleOld, getSystemCONFIG, getTraitMult, midiRenderRoll, MQfromActorUuid, MQfromUuid, reportMidiCriticalFlags, tokenForActor } from './module/utils.js';
+import { TrapWorkflow, DamageOnlyWorkflow, Workflow, DummyWorkflow, WORKFLOWSTATES } from './module/workflow.js';
+import { addConcentration, applyTokenDamage, canSense, checkNearby, checkRange, completeItemRoll, completeItemUse, computeCoverBonus, displayDSNForRoll, doConcentrationCheck, doOverTimeEffect, findNearby, getChanges, getConcentrationEffect, getDistanceSimple, getDistanceSimpleOld, getSystemCONFIG, getTraitMult, hasUsedBonusAction, hasUsedReaction, midiRenderRoll, MQfromActorUuid, MQfromUuid, playerFor, playerForActor, reactionDialog, reportMidiCriticalFlags, setBonusActionUsed, setReactionUsed, tokenForActor } from './module/utils.js';
 import { ConfigPanel } from './module/apps/ConfigPanel.js';
 import { showItemInfo, templateTokens } from './module/itemhandling.js';
 import { RollStats } from './module/RollStats.js';
 import { OnUseMacroOptions } from './module/apps/Item.js';
 import { MidiKeyManager } from './module/MidiKeyManager.js';
 import { MidiSounds } from './module/midi-sounds.js';
+import { addUndoChatMessage, getUndoQueue, removeMostRecentWorkflow, showUndoQueue, undoMostRecentWorkflow } from './module/undo.js';
+import { showUndoWorkflowApp } from './module/apps/UndowWorkflow.js';
 export let debugEnabled = 0;
 export let debugCallTiming = false;
 // 0 = none, warnings = 1, debug = 2, all = 3
@@ -171,6 +173,7 @@ Hooks.once('setup', function () {
 			//@ts-expect-error
 			game.system.config.traits.dv.configKey = "damageResistanceTypes";
 		}
+		config.abilityActivationTypes["reactionpreattack"] = `${i18n("DND5E.Reaction")} ${i18n("midi-qol.reactionPreAttack")}`;
 		config.abilityActivationTypes["reactiondamage"] = `${i18n("DND5E.Reaction")} ${i18n("midi-qol.reactionDamaged")}`;
 		config.abilityActivationTypes["reactionmanual"] = `${i18n("DND5E.Reaction")} ${i18n("midi-qol.reactionManual")}`;
 	}
@@ -226,6 +229,14 @@ Hooks.once('ready', function () {
 			"preDamageApplication": "Before Damage Application",
 			"preActiveEffects": "Before Active Effects",
 			"postActiveEffects": "After Active Effects ",
+			"isAttacked": "Actor is target of an attack",
+			"isHit": "Actor is target of a hit",
+			"preTargetSave": "Target is about to roll a saving throw",
+			"isSave": "Actor rolled a save",
+			"isSaveSuccess": "Actor rolled a successful save",
+			"isSaveFailure": "Actor failed a saving throw",
+			"preTargetDamageApplication": "Target is about to be damaged by an item",
+			"isDamaged": "Actor is damaged by an attack",
 			"all": "All"
 		};
 	OnUseMacroOptions.setOptions(MQOnUseOptions);
@@ -237,6 +248,24 @@ Hooks.once('ready', function () {
 			section: i18n("DND5E.Feats"),
 			type: Boolean
 		};
+		if (game.user?.isGM) {
+			const instanceId = game.settings.get("midi-qol", "instanceId");
+			//@ts-expect-error instanceId
+			if ([undefined, ""].includes(instanceId)) {
+				game.settings.set("midi-qol", "instanceId", randomID());
+			}
+			const oldVersion = game.settings.get("midi-qol", "last-run-version");
+			//@ts-expect-error version
+			const newVersion = game.modules.get("midi-qol")?.version;
+			//@ts-expect-error
+			if (isNewerVersion(newVersion, oldVersion)) {
+				console.warn(`midi-qol | instance ${game.settings.get("midi-qol", "instanceId")} version change from ${oldVersion} to ${newVersion}`);
+				game.settings.set("midi-qol", "last-run-version", newVersion);
+				// look at sending a new version has been installed.
+			}
+			readySettingsSetup();
+		}
+		createMidiMacros();
 	}
 	setupMidiQOLApi();
 	if (game.user?.isGM) {
@@ -295,6 +324,26 @@ Hooks.once('ready', function () {
 		setTimeout(disableWorkflowAutomation, 2000);
 	}
 	Hooks.callAll("midi-qol.midiReady");
+	if (installedModules.get("lmrtfy")
+		//@ts-expect-error
+		&& isNewerVersion("3.1.8", game.modules.get("lmrtfy").version)
+		//@ts-expect-error
+		&& isNewerVersion(game.system.version, "2.1.99")) {
+		let abbr = {};
+		//@ts-expect-error
+		for (let key in CONFIG.DND5E.abilities) {
+			//@ts-expect-error
+			let abb = game.i18n.localize(CONFIG.DND5E.abilities[key].abbreviation);
+			let upperFirstLetter = abb.charAt(0).toUpperCase() + abb.slice(1);
+			abbr[`${abb}`] = `DND5E.Ability${upperFirstLetter}`;
+		}
+		//@ts-expect-error
+		LMRTFY.saves = abbr;
+		//@ts-expect-error
+		LMRTFY.abilities = abbr;
+		//@ts-expect-error
+		LMRTFY.abilityModifiers = LMRTFY.parseAbilityModifiers();
+	}
 });
 import { setupMidiTests } from './module/tests/setupTest.js';
 Hooks.once("midi-qol.midiReady", () => {
@@ -318,12 +367,15 @@ function setupMidiQOLApi() {
 		checkRule: checkRule,
 		completeItemRoll,
 		completeItemUse,
+		computeCoverBonus,
+		computeDistance: getDistanceSimple,
 		ConfigPanel,
 		configSettings: () => { return configSettings; },
 		DamageOnlyWorkflow,
 		debug,
 		doConcentrationCheck,
 		doOverTimeEffect,
+		displayDSNForRoll,
 		DummyWorkflow,
 		enableWorkflow,
 		findNearby,
@@ -331,9 +383,9 @@ function setupMidiQOLApi() {
 		getChanges,
 		getConcentrationEffect,
 		getDistance: getDistanceSimpleOld,
-		computeDistance: getDistanceSimple,
-		computeCoverBonus,
 		getTraitMult: getTraitMult,
+		hasUsedBonusAction,
+		hasUsedReaction,
 		log,
 		midiFlags,
 		midiRenderRoll,
@@ -343,16 +395,32 @@ function setupMidiQOLApi() {
 		MQFromUuid: MQfromUuid,
 		MQOnUseOptions,
 		overTimeJSONData,
+		playerFor,
+		playerForActor,
+		reactionDialog,
 		reportMidiCriticalFlags: reportMidiCriticalFlags,
 		selectTargetsForTemplate: templateTokens,
+		setBonusActionUsed,
+		setReactionUsed,
 		showItemInfo,
 		socket: () => { return socketlibSocket; },
 		tokenForActor,
 		TrapWorkflow,
 		warn,
 		Workflow,
+		WORKFLOWSTATES,
+		showUndoQueue,
+		getUndoQueue,
+		undoMostRecentWorkflow,
+		removeMostRecentWorkflow,
+		showUndoWorkflowApp,
+		addUndoChatMessage,
+		testfunc
 	};
 	globalThis.MidiQOL.actionQueue = new Semaphore();
+}
+export function testfunc(args) {
+	console.error(args);
 }
 export function checkConcentrationSettings() {
 	const needToUpdateCubSettings = installedModules.get("combat-utility-belt") && (game.settings.get("combat-utility-belt", "enableConcentrator"));
@@ -427,6 +495,8 @@ function setupMidiFlags() {
 	midiFlags.push("flags.midi-qol.critical.all");
 	midiFlags.push(`flags.midi-qol.max.damage.all`);
 	midiFlags.push(`flags.midi-qol.min.damage.all`);
+	midiFlags.push(`flags.midi-qol.grants.max.damage.all`);
+	midiFlags.push(`flags.midi-qol.grants.min.damage.all`);
 	midiFlags.push("flags.midi-qol.noCritical.all");
 	midiFlags.push("flags.midi-qol.fail.all");
 	midiFlags.push("flags.midi-qol.fail.attack.all");
@@ -434,6 +504,7 @@ function setupMidiFlags() {
 	midiFlags.push(`flags.midi-qol.grants.disadvantage.attack.all`);
 	// TODO work out how to do grants damage.max
 	midiFlags.push(`flags.midi-qol.grants.attack.success.all`);
+	midiFlags.push(`flags.midi-qol.grants.attack.fail.all`);
 	midiFlags.push(`flags.midi-qol.grants.attack.bonus.all`);
 	midiFlags.push(`flags.midi-qol.grants.critical.all`);
 	midiFlags.push(`flags.midi-qol.grants.critical.range`);
@@ -449,6 +520,7 @@ function setupMidiFlags() {
 	midiFlags.push(`flags.midi-qol.carefulSpells`);
 	midiFlags.push("flags.midi-qol.magicResistance.all");
 	midiFlags.push("flags.midi-qol.magicVulnerability.all");
+	midiFlags.push("flags.midi-qol.rangeOverride.attack.all");
 	let attackTypes = allAttackTypes.concat(["heal", "other", "save", "util"]);
 	attackTypes.forEach(at => {
 		midiFlags.push(`flags.midi-qol.advantage.attack.${at}`);
@@ -462,11 +534,15 @@ function setupMidiFlags() {
 		midiFlags.push(`flags.midi-qol.fail.critical.${at}`);
 		midiFlags.push(`flags.midi-qol.grants.attack.bonus.${at}`);
 		midiFlags.push(`flags.midi-qol.grants.attack.success.${at}`);
-		midiFlags.push(`flags.midi-qol.DR.${at}`);
+		if (at !== "heal")
+			midiFlags.push(`flags.midi-qol.DR.${at}`);
 		midiFlags.push(`flags.midi-qol.max.damage.${at}`);
 		midiFlags.push(`flags.midi-qol.min.damage.${at}`);
+		midiFlags.push(`flags.midi-qol.grants.max.damage.${at}`);
+		midiFlags.push(`flags.midi-qol.grants.min.damage.${at}`);
 		midiFlags.push(`flags.midi-qol.optional.NAME.attack.${at}`);
 		midiFlags.push(`flags.midi-qol.optional.NAME.damage.${at}`);
+		midiFlags.push(`flags.midi-qol.rangeOverride.attack.${at}`);
 	});
 	midiFlags.push("flags.midi-qol.advantage.ability.all");
 	midiFlags.push("flags.midi-qol.advantage.ability.check.all");
@@ -501,7 +577,9 @@ function setupMidiFlags() {
 		midiFlags.push(`flags.midi-qol.max.ability.check.${abl}`);
 		midiFlags.push(`flags.midi-qol.min.ability.check.${abl}`);
 		midiFlags.push(`flags.midi-qol.optional.NAME.save.${abl}`);
+		midiFlags.push(`flags.midi-qol.optional.NAME.save.fail.${abl}`);
 		midiFlags.push(`flags.midi-qol.optional.NAME.check.${abl}`);
+		midiFlags.push(`flags.midi-qol.optional.NAME.check.fail.${abl}`);
 		midiFlags.push(`flags.midi-qol.magicResistance.${abl}`);
 		midiFlags.push(`flags.midi-qol.magicVulnerability.all.${abl}`);
 	});
@@ -527,10 +605,13 @@ function setupMidiFlags() {
 		});
 		midiFlags.push(`flags.midi-qol.DR.all`);
 		midiFlags.push(`flags.midi-qol.DR.non-magical`);
+		midiFlags.push(`flags.midi-qol.DR.non-magical-physical`);
 		midiFlags.push(`flags.midi-qol.DR.non-silver`);
 		midiFlags.push(`flags.midi-qol.DR.non-adamant`);
 		midiFlags.push(`flags.midi-qol.DR.non-physical`);
 		midiFlags.push(`flags.midi-qol.DR.final`);
+		midiFlags.push(`flags.midi-qol.damage.reroll-kh`);
+		midiFlags.push(`flags.midi-qol.damage.reroll-kl`);
 		Object.keys(config.damageResistanceTypes).forEach(dt => {
 			midiFlags.push(`flags.midi-qol.DR.${dt}`);
 		});
@@ -551,15 +632,15 @@ function setupMidiFlags() {
 	midiFlags.push(`flags.midi-qol.optional.NAME.damage.all`);
 	midiFlags.push(`flags.midi-qol.optional.NAME.check.all`);
 	midiFlags.push(`flags.midi-qol.optional.NAME.save.all`);
-	midiFlags.push(`flags.midi-qol.optional.NAME.check.fail`);
-	midiFlags.push(`flags.midi-qol.optional.NAME.save.fail`);
+	midiFlags.push(`flags.midi-qol.optional.NAME.check.fail.all`);
+	midiFlags.push(`flags.midi-qol.optional.NAME.save.fail.all`);
 	midiFlags.push(`flags.midi-qol.optional.NAME.label`);
 	midiFlags.push(`flags.midi-qol.optional.NAME.skill.all`);
-	midiFlags.push(`flags.midi-qol.optional.NAME.skill.fail`);
+	midiFlags.push(`flags.midi-qol.optional.NAME.skill.fail.all`);
 	midiFlags.push(`flags.midi-qol.optional.NAME.count`);
 	midiFlags.push(`flags.midi-qol.optional.NAME.countAlt`);
 	midiFlags.push(`flags.midi-qol.optional.NAME.ac`);
-	//   midiFlags.push(`flags.midi-qol.optional.NAME.criticalDamage`);
+	midiFlags.push(`flags.midi-qol.optional.NAME.criticalDamage`);
 	midiFlags.push(`flags.midi-qol.optional.Name.onUse`);
 	midiFlags.push(`flags.midi-qol.optional.NAME.macroToCall`);
 	midiFlags.push(`flags.midi-qol.uncanny-dodge`);
@@ -604,31 +685,87 @@ const MQMacros = [
 	const theActor = await fromUuid(args[0]);
 	if (!theActor || isNaN(args[1])) return;
 	await theActor.update({"system.attributes.hp.value": Number(args[1])}, {onUpdateCalled: true});`
+	}, {
+		name: "MidiQOL.FixFlagsSelectedTokens",
+		commandText: `
+	console.warn("Clearing midi-qol flags for all selected tokens")
+
+	for (let token of canvas.tokens.controlled) {
+	const actor = token.actor;
+	if (!actor) continue;
+		console.log("Chekcing ", actor.name);
+	if (!(actor?._source.flags && actor._source.flags["midi-qol"])) continue;
+	keys = Object.keys(actor._source.flags["midi-qol"]);
+	for (let key of keys) {
+		if (["concentration-data", "concentration-damage", "actions"].includes(key)) continue;
+		result = await actor.unsetFlag("midi-qol", key);
+		console.warn("Removing key ", key, "from", actor.name)
+	}
+	}`
+	},
+	{
+		name: "MidiQOL.FixFlagsAllSceneTokens",
+		commandText: `
+	console.warn("Clearing midi-qol flags for all tokens in the current scene")
+	for (let token of canvas.tokens.placeables) {
+	const actor = token.actor;
+	if (!actor) continue;
+		console.log("Chekcing ", actor.name);
+	if (!(actor?._source.flags && actor._source.flags["midi-qol"])) continue;
+	keys = Object.keys(actor._source.flags["midi-qol"]);
+	for (let key of keys) {
+		if (["concentration-data", "concentration-damage", "actions"].includes(key)) continue;
+		result = await actor.unsetFlag("midi-qol", key);
+		console.warn("Removing key ", key, "from", actor.name)
+	}
+	}`
+	},
+	{
+		name: "MidiQOL.FixFlagsAllWorldActors",
+		commandText: `  
+	console.warn("Clearing midi-qol flags for all world actors")
+	for (let actor of game.actors) {
+	console.log("Chekcing ", actor.name);
+		if (!(actor?._source.flags && actor._source.flags["midi-qol"])) continue;
+		keys = Object.keys(actor._source.flags["midi-qol"]);
+		for (let key of keys) {
+			if (["concentration-data", "concentration-damage", "actions"].includes(key)) continue;
+			result = await actor.unsetFlag("midi-qol", key);
+			console.warn("Removing key ", key, "from", actor.name)
+		}
+	}`
 	}
 ];
-export function createMidiMacros() {
+export async function createMidiMacros() {
 	if (game?.user?.isGM) {
 		for (let macroSpec of MQMacros) {
 			let macro = game.macros?.getName(macroSpec.name);
-			while (macro) {
-				macro.delete();
-				macro = game.macros?.getName(macroSpec.name);
+			try {
+				while (macro) {
+					await macro.delete();
+					macro = game.macros?.getName(macroSpec.name);
+				}
+				const macroData = {
+					_id: null,
+					name: macroSpec.name,
+					type: "script",
+					author: game.user.id,
+					img: 'icons/svg/dice-target.svg',
+					scope: 'global',
+					command: macroSpec.commandText,
+					folder: null,
+					sort: 0,
+					permission: {
+						default: 0,
+					},
+					flags: {},
+				};
+				//@ts-expect-error
+				await Macro.createDocuments([macroData]);
 			}
-			const macroData = {
-				_id: null,
-				name: macroSpec.name,
-				type: 'script',
-				author: game.user.id,
-				img: 'icons/svg/dice-target.svg',
-				scope: 'global',
-				command: macroSpec.commandText,
-				folder: null,
-				sort: 0,
-				permission: {
-					default: 0,
-				},
-				flags: {},
-			};
+			catch (err) {
+				console.error("Failed to create ", macroSpec.name);
+			}
 		}
 	}
 }

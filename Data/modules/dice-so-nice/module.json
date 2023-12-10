@@ -2,10 +2,10 @@
   "id": "dice-so-nice",
   "title": "Dice So Nice!",
   "description": "Adds customizable 3D dice to Foundry VTT with lots of options to fit your playstyle.",
-  "version": "4.6.5",
+  "version": "4.6.8",
   "compatibility": {
     "minimum": "10",
-    "verified": "10.288"
+    "verified": "11.305"
   },
   "authors": [
     {
@@ -127,6 +127,18 @@
       "name": "polski",
       "path": "lang/pl.json",
       "flags": {}
+    },
+    {
+      "lang": "cn",
+      "name": "中文（简体）",
+      "path": "lang/zh_Hans.json",
+      "flags": {}
+    },
+    {
+      "lang": "hu",
+      "name": "Magyar",
+      "path": "lang/hu.json",
+      "flags": {}
     }
   ],
   "media": [
@@ -168,7 +180,7 @@
   ],
   "url": "https://gitlab.com/riccisi/foundryvtt-dice-so-nice",
   "manifest": "https://gitlab.com/riccisi/foundryvtt-dice-so-nice/-/raw/master/module/module.json",
-  "download": "https://gitlab.com/riccisi/foundryvtt-dice-so-nice/-/jobs/artifacts/4.6.5/raw/dist/dice-so-nice.zip?job=build",
+  "download": "https://gitlab.com/riccisi/foundryvtt-dice-so-nice/-/jobs/artifacts/4.6.8/raw/dist/dice-so-nice.zip?job=build",
   "bugs": "https://gitlab.com/riccisi/foundryvtt-dice-so-nice/-/issues",
   "readme": "https://gitlab.com/riccisi/foundryvtt-dice-so-nice/-/blob/master/README.md",
   "flags": {

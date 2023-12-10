@@ -7,6 +7,7 @@
           "str": {
             "value": 10,
             "proficient": 0,
+            "max": null,
             "bonuses": {
               "check": "",
               "save": ""
@@ -15,6 +16,7 @@
           "dex": {
             "value": 10,
             "proficient": 0,
+            "max": null,
             "bonuses": {
               "check": "",
               "save": ""
@@ -23,6 +25,7 @@
           "con": {
             "value": 10,
             "proficient": 0,
+            "max": null,
             "bonuses": {
               "check": "",
               "save": ""
@@ -31,6 +34,7 @@
           "int": {
             "value": 10,
             "proficient": 0,
+            "max": null,
             "bonuses": {
               "check": "",
               "save": ""
@@ -39,6 +43,7 @@
           "wis": {
             "value": 10,
             "proficient": 0,
+            "max": null,
             "bonuses": {
               "check": "",
               "save": ""
@@ -47,6 +52,7 @@
           "cha": {
             "value": 10,
             "proficient": 0,
+            "max": null,
             "bonuses": {
               "check": "",
               "save": ""
@@ -70,12 +76,12 @@
             "bonus": ""
           },
           "movement": {
-            "burrow": 0,
-            "climb": 0,
-            "fly": 0,
-            "swim": 0,
-            "walk": 30,
-            "units": "ft",
+            "burrow": null,
+            "climb": null,
+            "fly": null,
+            "swim": null,
+            "walk": null,
+            "units": null,
             "hover": false
           }
         },
@@ -121,11 +127,11 @@
             "max": 3
           },
           "senses": {
-            "darkvision": 0,
-            "blindsight": 0,
-            "tremorsense": 0,
-            "truesight": 0,
-            "units": "ft",
+            "darkvision": null,
+            "blindsight": null,
+            "tremorsense": null,
+            "truesight": null,
+            "units": null,
             "special": ""
           },
           "spellcasting": "int"
@@ -280,54 +286,14 @@
             }
           }
         },
+        "tools": {},
         "traits": {
           "languages": {
             "value": [],
             "custom": ""
           }
         },
-        "spells": {
-          "spell1": {
-            "value": 0,
-            "override": null
-          },
-          "spell2": {
-            "value": 0,
-            "override": null
-          },
-          "spell3": {
-            "value": 0,
-            "override": null
-          },
-          "spell4": {
-            "value": 0,
-            "override": null
-          },
-          "spell5": {
-            "value": 0,
-            "override": null
-          },
-          "spell6": {
-            "value": 0,
-            "override": null
-          },
-          "spell7": {
-            "value": 0,
-            "override": null
-          },
-          "spell8": {
-            "value": 0,
-            "override": null
-          },
-          "spell9": {
-            "value": 0,
-            "override": null
-          },
-          "pact": {
-            "value": 0,
-            "override": null
-          }
-        },
+        "spells": {},
         "bonuses": {
           "mwak": {
             "attack": "",
@@ -536,7 +502,7 @@
     }
   },
   "Item": {
-    "types": ["weapon", "equipment", "consumable", "tool", "loot", "background", "class", "subclass", "spell", "feat", "backpack"],
+    "types": ["weapon", "equipment", "consumable", "tool", "loot", "race", "background", "class", "subclass", "spell", "feat", "backpack"],
     "templates": {
       "itemDescription": {
         "description": {
@@ -544,7 +510,7 @@
           "chat": "",
           "unidentified": ""
         },
-        "source": ""
+        "source": {}
       },
       "physicalItem": {
         "quantity": 1,
@@ -569,6 +535,7 @@
           "units": ""
         },
         "cover": null,
+        "crewed": false,
         "target": {
           "value": null,
           "width": null,
@@ -651,12 +618,6 @@
       "hitDice": "d6",
       "hitDiceUsed": 0,
       "advancement": [],
-      "saves": [],
-      "skills": {
-        "number": 2,
-        "choices": [],
-        "value": []
-      },
       "spellcasting": {
         "progression": "none",
         "ability": ""
@@ -683,7 +644,7 @@
       },
       "strength": null,
       "stealth": false,
-      "proficient": true
+      "proficient": null
     },
     "feat": {
       "templates": ["itemDescription", "activatedEffect", "action"],
@@ -706,9 +667,10 @@
       "baseItem": "",
       "ability": "int",
       "chatFlavor": "",
-      "proficient": 0,
+      "proficient": null,
       "bonus": ""
     },
+    "race": {},
     "spell": {
       "templates": ["itemDescription", "activatedEffect", "action"],
       "level": 1,
@@ -750,7 +712,7 @@
       "weaponType": "simpleM",
       "baseItem": "",
       "properties": {},
-      "proficient": true
+      "proficient": null
     }
   },
   "JournalEntryPage": {

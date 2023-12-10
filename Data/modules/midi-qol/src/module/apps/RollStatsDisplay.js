@@ -29,9 +29,7 @@ export class RollStatsDisplay extends FormApplication {
 		return i18n("midi-qol.StatsTitle");
 	}
 	async close(options = {}) {
-		//@ts-ignore
 		Hooks.off("midi-qol.StatsUpdated", this.statsHookId);
-		//@ts-ignore
 		return super.close(options);
 	}
 	getData() {

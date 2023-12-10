@@ -1,4 +1,4 @@
-import {isV10orNewer, log} from './config.js';
+import {isV10orNewer, name as moduleName} from './config.js';
 
 export default class Setting {
   /**
@@ -20,12 +20,16 @@ export default class Setting {
     } else if (data.name) {
       this.type = Setting.PlayerType;
       this.value = new PlayerSetting(this.data);
+    } else if (data.type === Setting.SupportingDataType) {
+      this.type = Setting.SupportingDataType;
+      this.value = data.value;
     }
   }
 
   static UnknownType = '_unknownType';
   static PlayerType = '_playerType';
   static WorldType = '_worldType';
+  static SupportingDataType = '_supportingDataType';
 
   isWorldSetting() {
     return this.type === Setting.WorldType;
@@ -33,6 +37,10 @@ export default class Setting {
 
   isPlayerSetting() {
     return this.type === Setting.PlayerType;
+  }
+
+  isSupportingDataSetting() {
+    return this.type === Setting.SupportingDataType;
   }
 
   hasChanges() {
@@ -214,10 +222,21 @@ export class Difference {
   constructor(name, oldValue, newValue) {
     this.name = name;
     if (oldValue !== newValue) {
+      let diffSize = game.settings.get(moduleName, "diff-length");
+      if (diffSize < 0) {
+        diffSize = 0;
+      }
+
       this.oldVal = oldValue;
       this.oldString = JSON.stringify(oldValue);
+      if (diffSize && this.oldString?.length > diffSize) {
+        this.oldString = this.oldString.substring(0, diffSize) + '...';
+      }
       this.newVal = newValue;
       this.newString = JSON.stringify(newValue);
+      if (diffSize && this.newString?.length > diffSize) {
+        this.newString = this.newString.substring(0, diffSize) + '...';
+      }
     }
   }
 

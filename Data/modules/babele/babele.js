@@ -110,8 +110,13 @@ Hooks.once('ready', async () => {
             }
             pack.index.set(i._id, i);
         }
+
+        game.babele.translatePackFolders(pack);
     });
-    Hooks.callAll(`babele.ready`);
+
+    game.babele.translateSystemPackFolders();
+
+    Hooks.callAll('babele.ready');
     ui.sidebar.tabs.compendium.render();
 });
 
@@ -134,27 +139,29 @@ Hooks.on('renderCompendium', (app, html, data) => {
         });
     }
 
-    const showOriginalName = game.settings.get('babele', 'showOriginalName');
-    if(showOriginalName) {
-        const items = html[0].querySelector(".directory-list")?.children;
-        if(items) {
-            for (let li of items) {
-                const entryName = li.querySelector(".entry-name")||li.querySelector(".document-name");
-                const entry = data.index.find(i => i.name === entryName.textContent);
-                if(entry && entry.translated && entry.hasTranslation) {
-                    const entryNameText = li.querySelector('.entry-name > a')||li.querySelector('.document-name > a');
-                    entryName.setAttribute("style", "display: flex; flex-direction: column;");
-                    entryNameText.setAttribute("style", "line-height: normal; padding-top: 10px;");
-                    const entryNameOriginalText = $(
-                        `<div style="line-height: normal; font-size: 12px; color: gray;">
-                        ${entry.originalName}
-                    </div>`
-                    );
-                    entryNameOriginalText.insertAfter(entryNameText);
-                }
+    if (game.settings.get('babele', 'showOriginalName')) {
+        html[0].querySelectorAll('.directory-list .entry-name, .directory-list .document-name').forEach((item) => {
+            const entry = item.textContent?.length ? data.index.find(i => i.name === item.textContent) : null;
+
+            if (entry && entry.translated && entry.hasTranslation) {
+                const entryNameText = item.querySelector('.entry-name > a, .document-name > a');
+                item.setAttribute('style', 'display: flex; flex-direction: column;');
+                entryNameText.setAttribute('style', 'line-height: normal; padding-top: 10px;');
+                entryNameText.innerHTML += `<div style="line-height: normal; font-size: 12px; color: gray;">${entry.originalName}</div>`;
             }
-        }
+        });
     }
+});
+
+Hooks.on('importAdventure', () => {
+    game.scenes.forEach(scene => {
+        scene.tokens.forEach(token => {
+            const actor = game.actors.get(token.actorId);
+            if (actor) {
+                token.update({ name: actor.name });
+            }
+        });
+    });
 });
 
 /**
@@ -185,29 +192,48 @@ class Converters {
     static fromPack(mapping, entityType = 'Item') {
         let dynamicMapping = new CompendiumMapping(entityType, mapping);
         return function(items, translations) {
-            return items.map(data => {
-
-                if(translations) {
-
-                    let translation;
-                    if(Array.isArray(translations)) {
-                        translation = translations.find(t => t.id === data._id || t.id === data.name);
-                    } else {
-                        translation = translations[data._id] || translations[data.name];
-                    }
-                    if(translation) {
-                        let translatedData = dynamicMapping.map(data, translation);
-                        return mergeObject(data, mergeObject(translatedData, { translated: true }));
-                    }
-                }
-
-                let pack = game.babele.packs.find(pack => pack.translated && pack.hasTranslation(data));
-                if(pack) {
-                    return pack.translate(data);
-                }
-                return data;
-            });
+            return Converters._fromPack(items, translations, dynamicMapping);
         }
+    }
+
+    static fromDefaultMapping(entityType, mappingKey) {
+        return function (entities, translations, data, tc) {
+            const babeleTranslations = game.babele.translations.find((item) => item.collection === tc.metadata.id);
+            const customMapping = babeleTranslations && babeleTranslations.mapping
+                ? babeleTranslations?.mapping[mappingKey] ?? {}
+                : {};
+            const dynamicMapping = new CompendiumMapping(
+                entityType,
+                customMapping,
+                game.babele.packs.find(pack => pack.translated)
+            );
+
+            return Converters._fromPack(entities, translations, dynamicMapping);
+        };
+    }
+
+    static _fromPack(entities, translations, dynamicMapping) {
+        return entities.map((data) => {
+            if (translations) {
+                let translation;
+
+                if (Array.isArray(translations)) {
+                    translation = translations.find(t => t.id === data._id || t.id === data.name);
+                } else {
+                    translation = translations[data._id] || translations[data.name];
+                }
+
+                if (translation) {
+                    const translatedData = dynamicMapping.map(data, translation);
+
+                    return mergeObject(data, mergeObject(translatedData, { translated: true }));
+                }
+            }
+
+            const pack = game.babele.packs.find(pack => pack.translated && pack.hasTranslation(data));
+
+            return pack ? pack.translate(data) : data;
+        });
     }
 
     /**
@@ -221,44 +247,160 @@ class Converters {
         }
     }
 
+    static fieldCollection(field) {
+        return function (collection, translations) {
+            if (!translations) {
+                return collection;
+            }
+
+            return collection.map(data => {
+                const translation = translations[data[field]];
+                if (!translation) {
+                    return data;
+                }
+
+                return mergeObject(data, { [field]: translation, translated: true });
+            });
+        };
+    }
+
+    static _tableResults(results, translations) {
+        return results.map(data => {
+            if (translations) {
+                const translation = translations[`${data.range[0]}-${data.range[1]}`];
+                if (translation) {
+                    return mergeObject(data, mergeObject({ 'text': translation }, { translated: true }));
+                }
+            }
+            if (data.documentCollection) {
+                const text = game.babele.translateField('name', data.documentCollection, { 'name': data.text });
+                if (text) {
+                    return mergeObject(data, mergeObject({ 'text': text }, { translated: true }));
+                } else {
+                    return data;
+                }
+            }
+            return data;
+        });
+    }
+
     static tableResults() {
         return function (results, translations) {
-            return results.map(data => {
-                if(translations) {
-                    let translation = translations[`${data.range[0]}-${data.range[1]}`];
-                    if(translation) {
-                        return mergeObject(data, mergeObject({ "text": translation}, { translated: true }));
-                    }
+            return Converters._tableResults(results, translations);
+        };
+    }
+
+    static tableResultsCollection() {
+        return function (collection, translations) {
+            if (!translations) {
+                return collection;
+            }
+
+            return collection.map(data => {
+                const translation = translations[data.name];
+                if (!translation) {
+                    return data;
                 }
-                if(data.documentCollection) {
-                    let text = game.babele.translateField("name", data.documentCollection, { "name": data.text });
-                    if(text) {
-                        return mergeObject(data, mergeObject({ "text": text}, { translated: true }));
-                    } else {
-                        return data;
-                    }
-                }
-                return data;
+
+                return mergeObject(data, {
+                    name: translation.name ?? data.name,
+                    description: translation.description ?? data.description,
+                    results: Converters._tableResults(data.results, translation.results),
+                    translated: true,
+                });
             });
-        }
+        };
+    }
+
+    static _pages(pages, translations) {
+        return pages.map(data => {
+            if (!translations) {
+                return data;
+            }
+
+            const translation = translations[data.name];
+            if (!translation) {
+                return data;
+            }
+
+            return mergeObject(data, {
+                name: translation.name,
+                image: { caption: translation.caption ?? data.image.caption },
+                src: translation.src ?? data.src,
+                text: { content: translation.text ?? data.text.content },
+                video: {
+                    width: translation.width ?? data.video.width,
+                    height: translation.height ?? data.video.height,
+                },
+                translated: true,
+            });
+        });
     }
 
     static pages() {
         return function (pages, translations) {
-            return pages.map(data => {
-                if(translations) {
-                    let translation = translations[data.name];
-                    if(translation) {
-                        return mergeObject(data, {
-                            name: translation.name,
-                            text: { content: translation.text },
-                            translated: true
-                        });
-                    }
-                }
-                return data;
-            });
+            return Converters._pages(pages, translations);
+        };
+    }
+
+    static deckCards() {
+        return function (cards, translations) {
+            return Converters._deckCards(cards, translations);
         }
+    }
+
+    static _deckCards(cards, translations) {
+        return cards.map(data => {
+            if (translations) {
+                const translation = translations[data.name];
+                if (translation) {
+                    return mergeObject(data, {
+                        name: translation.name ?? data.name,
+                        description: translation.description ?? data.description,
+                        suit: translation.suit ?? data.suit,
+                        faces: (translation.faces ?? []).map((face, faceIndex) => {
+                            const faceData = data.faces[faceIndex];
+                            return mergeObject(faceData ?? {}, {
+                                img: face.img ?? faceData.img,
+                                name: face.name ?? faceData.name,
+                                text: face.text ?? faceData.text,
+                            });
+                        }),
+                        back: {
+                            img: translation.back?.img ?? data.back.img,
+                            name: translation.back?.name ?? data.back.name,
+                            text: translation.back?.text ?? data.back.text,
+                        },
+                        translated: true,
+                    });
+                }
+            }
+
+            return data;
+        });
+    }
+
+    static playlistSounds() {
+        return function (sounds, translations) {
+            return Converters._playlistSounds(sounds, translations);
+        }
+    }
+
+    static _playlistSounds(sounds, translations) {
+        return sounds.map(data => {
+            if (translations) {
+                const translation = translations[data.name];
+                if (translation) {
+                    return mergeObject(data, {
+                        name: translation.name ?? data.name,
+                        description: translation.description ?? data.description,
+                        translated: true,
+                    });
+                }
+            }
+
+            return data;
+        });
     }
 }
 
@@ -267,12 +409,57 @@ class Converters {
  */
 class Babele {
 
+    static get PACK_FOLDER_TRANSLATION_NAME_SUFFIX() {
+        return '_packs-folders';
+    }
+
     static get SUPPORTED_PACKS() {
-        return ['Actor', 'Item', 'JournalEntry', 'RollTable', 'Scene'];
+        return ['Adventure', 'Actor', 'Cards', 'Folder', 'Item', 'JournalEntry', 'Macro', 'Playlist', 'RollTable', 'Scene'];
     }
 
     static get DEFAULT_MAPPINGS() {
         return {
+            "Adventure": {
+                "name": "name",
+                "description": "description",
+                "caption": "caption",
+                "folders": {
+                    "path": "folders",
+                    "converter": "nameCollection"
+                },
+                "journals": {
+                    "path": "journal",
+                    "converter": "adventureJournals"
+                },
+                "scenes": {
+                    "path": "scenes",
+                    "converter": "adventureScenes"
+                },
+                "macros": {
+                    "path": "macros",
+                    "converter": "adventureMacros"
+                },
+                "playlists": {
+                    "path": "playlists",
+                    "converter": "adventurePlaylists"
+                },
+                "tables": {
+                    "path": "tables",
+                    "converter": "tableResultsCollection"
+                },
+                "items": {
+                    "path": "items",
+                    "converter": "adventureItems"
+                },
+                "actors": {
+                    "path": "actors",
+                    "converter": "adventureActors"
+                },
+                "cards": {
+                    "path": "cards",
+                    "converter": "adventureCards"
+                }
+            },
             "Actor": {
                 "name": "name",
                 "description": "system.details.biography.value",
@@ -285,6 +472,15 @@ class Babele {
                     "converter": "name"
                 }
             },
+            "Cards": {
+                "name": "name",
+                "description": "description",
+                "cards": {
+                    "path": "cards",
+                    "converter": "deckCards"
+                }
+            },
+            "Folder": {},
             "Item": {
                 "name": "name",
                 "description": "system.description.value"
@@ -297,6 +493,18 @@ class Babele {
                     "converter": "pages"
                 }
             },
+            "Macro": {
+                "name": "name",
+                "command": "command"
+            },
+            "Playlist": {
+                "name": "name",
+                "description": "description",
+                "sounds": {
+                    "path": "sounds",
+                    "converter": "playlistSounds"
+                }
+            },
             "RollTable": {
                 "name": "name",
                 "description": "description",
@@ -306,7 +514,15 @@ class Babele {
                 }
             },
             "Scene": {
-                "name": "name"
+                "name": "name",
+                "drawings": {
+                    "path": "drawings",
+                    "converter": "textCollection"
+                },
+                "notes": {
+                    "path": "notes",
+                    "converter": "textCollection"
+                }
             }
         }
     }
@@ -339,8 +555,20 @@ class Babele {
         this.registerConverters({
             "fromPack": Converters.fromPack(),
             "name": Converters.mappedField("name"),
+            "nameCollection": Converters.fieldCollection("name"),
+            "textCollection": Converters.fieldCollection("text"),
             "tableResults": Converters.tableResults(),
-            "pages": Converters.pages()
+            "tableResultsCollection": Converters.tableResultsCollection(),
+            "pages": Converters.pages(),
+            "playlistSounds": Converters.playlistSounds(),
+            "deckCards": Converters.deckCards(),
+            "adventureItems": Converters.fromDefaultMapping("Item", "items"),
+            "adventureActors": Converters.fromDefaultMapping("Actor", "actors"),
+            "adventureCards": Converters.fromDefaultMapping("Cards", "card"),
+            "adventureJournals": Converters.fromDefaultMapping("JournalEntry", "journals"),
+            "adventurePlaylists": Converters.fromDefaultMapping("Playlist", "playlists"),
+            "adventureMacros": Converters.fromDefaultMapping("Macro", "macros"),
+            "adventureScenes": Converters.fromDefaultMapping("Scene", "scenes")
         })
     }
 
@@ -384,20 +612,45 @@ class Babele {
      * @returns {Promise<void>}
      */
     async init() {
-        if(!this.translations) {
+        if (!this.translations) {
             this.translations = await this.loadTranslations();
         }
+
         this.packs = new foundry.utils.Collection();
-        for ( let metadata of game.data.packs ) {
-            const collection = `${metadata.packageName}.${metadata.name}`;
-            if(this.supported(metadata)) {
+
+        const addTranslations = (metadata) => {
+            const collection = this.getCollection(metadata);
+
+            if (this.supported(metadata)) {
                 let translation = this.translations.find(t => t.collection === collection);
                 this.packs.set(collection, new TranslatedCompendium(metadata, translation));
             }
+        };
+
+        for (const metadata of game.data.packs) {
+            addTranslations(metadata);
         }
+
+        // Handle specific files for pack folders
+        this.folders = game.data.folders;
+
+        if (this.folders) {
+            const files = await this.#getTranslationsFiles();
+
+            // Handle specific files for pack folders
+            for (const file of files.filter((file) => file.endsWith(`${Babele.PACK_FOLDER_TRANSLATION_NAME_SUFFIX}.json`))) {
+                addTranslations(this.#getSpecialPacksFoldersMetadata(file.split('/').pop()));
+            }
+        }
+
         this.initialized = true;
-        Hooks.callAll(`babele.ready`);
+        Hooks.callAll('babele.ready');
     }
+
+	getCollection(metadata) {
+		const collectionPrefix = metadata.packageType === "world" ? "world" : metadata.packageName;
+		return `${collectionPrefix}.${metadata.name}`;
+	}
 
     /**
      * Find and download the translation files for each compendium present on the world.
@@ -406,66 +659,55 @@ class Babele {
      * @returns {Promise<[]>}
      */
     async loadTranslations() {
-        const lang = game.settings.get('core', 'language');
-        const directory = game.settings.get('babele', 'directory');
-        const directories = this.modules
-            .filter(module => module.lang === lang)
-            .map(module => `modules/${module.module}/${module.dir}`);
+        const files = await this.#getTranslationsFiles();
 
-        if(directory && directory.trim && directory.trim()) {
-            directories.push(`${directory}/${lang}`);
+        if (files.length === 0) {
+            console.log(`Babele | no compendium translation files found for ${game.settings.get('core', 'language')} language.`);
+
+            return [];
         }
 
-        if(this.systemTranslationsDir) {
-            directories.push(`systems/${game.system.data.name}/${this.systemTranslationsDir}/${lang}`);
-        }
+        const allTranslations = [];
+        const loadTranslations = async (collection, urls) => {
+            if (urls.length === 0) {
+                console.log(`Babele | no translation file found for ${collection} pack`);
+            } else {
+                const [translations] = await Promise.all(
+                    [Promise.all(urls.map((url) => fetch(url).then((r) => r.json()).catch(e => {
+                    })))],
+                );
 
-        let files = [];
-        if(game.user.hasPermission('FILES_BROWSE')) {
-            for(let i=0; i<directories.length; i++) {
-                try {
-                    let result = await FilePicker.browse("data", directories[i]);
-                    result.files.forEach(file => files.push(file));
-                } catch (err) {
-                    console.warn("Babele: " + err)
-                }
-            }
-            if(game.user.isGM) {
-                game.settings.set('babele', 'translationFiles', files);
-            }
-        } else {
-            files = game.settings.get('babele', 'translationFiles');
-        }
-
-        let allTranslations = [];
-        if(files.length === 0) {
-            console.log(`Babele | no compendium translation files found for ${lang} language.`);
-        } else {
-            for ( let metadata of game.data.packs ) {
-                const collection = `${metadata.packageName}.${metadata.name}`;
-                if(this.supported(metadata)) {
-                    const urls = files.filter(file => file.endsWith(`${collection}.json`));
-                    if(urls.length === 0) {
-                        console.log(`Babele | no translation file found for ${collection} pack`);
-                    } else {
-                        const [translations] = await Promise.all(
-                                [Promise.all(urls.map((url) => fetch(url).then((r) => r.json()).catch(e => {})))]
-                        );
-
-                        let translation;
-                        translations.forEach(t => {
-                            if(t) {
-                                translation = t; // the last valid
-                            }
-                        });
-                        if(translation) {
-                            console.log(`Babele | translation for ${collection} pack successfully loaded`);
-                            allTranslations.push(mergeObject(translation, { collection: collection }));
-                        }
+                let translation;
+                translations.forEach(t => {
+                    if (t) {
+                        translation = t; // the last valid
                     }
+                });
+
+                if (translation) {
+                    console.log(`Babele | translation for ${collection} pack successfully loaded`);
+                    allTranslations.push(mergeObject(translation, { collection: collection }));
                 }
             }
+        };
+
+        for (const metadata of game.data.packs) {
+            if (this.supported(metadata)) {
+                const collection = this.getCollection(metadata);
+                const collectionFileName = encodeURI(`${collection}.json`);
+                const urls = files.filter(file => file.endsWith(collectionFileName));
+
+                await loadTranslations(collection, urls);
+            }
         }
+
+        // Handle specific files for pack folders
+        for (const file of files.filter((file) => file.endsWith(`${Babele.PACK_FOLDER_TRANSLATION_NAME_SUFFIX}.json`))) {
+            const fileName = file.split('/').pop();
+
+            await loadTranslations(fileName.replace('.json', ''), [file]);
+        }
+
         return allTranslations;
     }
 
@@ -580,10 +822,10 @@ class Babele {
                     entities.forEach((entity, idx) => {
                         const name = entity.getFlag("babele", "translated") ? entity.getFlag("babele", "originalName") : entity.name;
                         if (conf.format === 'legacy') {
-                            let entry = mergeObject({id: name}, this.extract(pack.collection, entity.data));
+                            let entry = mergeObject({id: name}, this.extract(pack.collection, entity));
                             file.entries.push(entry);
                         } else {
-                            file.entries[`${name}`] = this.extract(pack.collection, entity.data);
+                            file.entries[`${name}`] = this.extract(pack.collection, entity);
                         }
                     });
 
@@ -640,6 +882,78 @@ class Babele {
             });
         }
     }
+
+    translatePackFolders(pack) {
+        if (!pack?.folders?.size) {
+            return;
+        }
+
+        const tcFolders = this.packs.get(pack.metadata.id)?.folders ?? [];
+
+        pack.folders.forEach((folder) => folder.name = tcFolders[folder.name] ?? folder.name);
+    }
+
+    translateSystemPackFolders() {
+        if (!game.data.folders?.length) {
+            return;
+        }
+
+        const translations = {};
+
+        this.packs
+            .filter((pack) => pack.metadata.name === Babele.PACK_FOLDER_TRANSLATION_NAME_SUFFIX)
+            .forEach((pack) => Object.assign(translations, pack.translations));
+
+        game.collections.get('Folder').forEach((folder) => folder.name = translations[folder.name] ?? folder.name);
+    }
+
+    async #getTranslationsFiles() {
+        if (!game.user.hasPermission('FILES_BROWSE')) {
+            return game.settings.get('babele', 'translationFiles');
+        }
+
+        const lang = game.settings.get('core', 'language');
+        const directory = game.settings.get('babele', 'directory');
+        const directories = this.modules
+            .filter(module => module.lang === lang)
+            .map(module => `modules/${module.module}/${module.dir}`);
+
+        if (directory && directory.trim && directory.trim()) {
+            directories.push(`${directory}/${lang}`);
+        }
+
+        if (this.systemTranslationsDir) {
+            directories.push(`systems/${game.system.id}/${this.systemTranslationsDir}/${lang}`);
+        }
+
+        const files = [];
+
+        for (let i = 0; i < directories.length; i++) {
+            try {
+                let result = await FilePicker.browse('data', directories[i]);
+                result.files.forEach(file => files.push(file));
+            } catch (err) {
+                console.warn('Babele: ' + err);
+            }
+        }
+
+        if (game.user.isGM) {
+            game.settings.set('babele', 'translationFiles', files);
+        }
+
+        return files;
+    }
+
+    #getSpecialPacksFoldersMetadata(file) {
+        const [packageName, name] = file.split('.');
+
+        return {
+            packageType: 'system',
+            type: 'Folder',
+            packageName,
+            name,
+        };
+    }
 }
 
 /**
@@ -674,9 +988,9 @@ class FieldMapping {
         const map = {};
         const value = this.translate(data, translations);
         if(value) {
-            this.path.split('.').reduce((a,f,i,r) => { a[f] = (i<r.length-1) ? {} : value; return a[f]; }, map);    
+            this.path.split('.').reduce((a,f,i,r) => { a[f] = (i<r.length-1) ? {} : value; return a[f]; }, map);
         }
-        return map;    
+        return map;
     }
 
     /**
@@ -818,6 +1132,10 @@ class TranslatedCompendium {
                 } else {
                     this.translations = translations.entries;
                 }
+            }
+
+            if (translations.folders) {
+                this.folders = translations.folders;
             }
         }
     }
@@ -975,7 +1293,7 @@ class ExportTranslationsDialog extends Dialog {
                         label: game.i18n.localize("BABELE.ExportTranslationBtn"),
                         callback: html => {
                             const fd = new FormDataExtended(html[0].querySelector("form"));
-                            resolve(fd.toObject());
+                            resolve(fd);
                         }
                     }
                 },

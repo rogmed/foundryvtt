@@ -1,7 +1,7 @@
-import { log, i18n, error, i18nFormat } from "../midi-qol.js";
+import { log, debug, i18n, error, i18nFormat } from "../midi-qol.js";
 import { doAttackRoll, doDamageRoll, templateTokens, doItemUse, wrappedDisplayCard } from "./itemhandling.js";
-import { configSettings, autoFastForwardAbilityRolls, criticalDamage, checkRule } from "./settings.js";
-import { bonusDialog, ConvenientEffectsHasEffect, createConditionData, evalCondition, expireRollEffect, getConvenientEffectsBonusAction, getConvenientEffectsDead, getConvenientEffectsReaction, getConvenientEffectsUnconscious, getOptionalCountRemainingShortFlag, getSpeaker, getSystemCONFIG, hasUsedBonusAction, hasUsedReaction, mergeKeyboardOptions, midiRenderRoll, MQfromActorUuid, MQfromUuid, notificationNotify, processOverTime, removeBonusActionUsed, removeReactionUsed } from "./utils.js";
+import { configSettings, autoFastForwardAbilityRolls, checkRule } from "./settings.js";
+import { bonusDialog, checkIncapacitated, ConvenientEffectsHasEffect, createConditionData, displayDSNForRoll, evalCondition, expireRollEffect, getConvenientEffectsDead, getConvenientEffectsUnconscious, getCriticalDamage, getOptionalCountRemainingShortFlag, getSpeaker, getSystemCONFIG, hasUsedAction, hasUsedBonusAction, hasUsedReaction, mergeKeyboardOptions, midiRenderRoll, MQfromUuid, notificationNotify, processOverTime, removeActionUsed, removeBonusActionUsed, removeReactionUsed } from "./utils.js";
 import { installedModules } from "./setupModules.js";
 import { OnUseMacro, OnUseMacros } from "./apps/Item.js";
 import { mapSpeedKeys } from "./MidiKeyManager.js";
@@ -50,7 +50,11 @@ export function collectBonusFlags(actor, category, detail) {
 			const checkFlag = actor.flags["midi-qol"].optional[flag][category];
 			if (checkFlag === undefined)
 				return false;
-			if (!(typeof checkFlag === "string" || checkFlag[detail] || (detail !== "fail" && checkFlag["all"]) !== undefined))
+			if (detail.startsWith("fail")) {
+				const [_, type] = detail.split(".");
+				return checkFlag.fail && checkFlag.fail[type] ? getOptionalCountRemainingShortFlag(actor, flag) > 0 : false;
+			}
+			else if (!(typeof checkFlag === "string" || checkFlag[detail] || checkFlag["all"] !== undefined))
 				return false;
 			if (actor.flags["midi-qol"].optional[flag].count === undefined)
 				return true;
@@ -70,12 +74,6 @@ export function collectBonusFlags(actor, category, detail) {
 export async function bonusCheck(actor, result, category, detail) {
 	if (!installedModules.get("betterrolls5e")) {
 		let bonusFlags = collectBonusFlags(actor, category, detail);
-		/* causes strange behaviour when enabled
-		if (category === "skill") {
-		const abl = actor.system.skills[detail].ability;
-		bonusFlags = bonusFlags.concat(collectBonusFlags(actor, "check", "abl"));
-		}
-		*/
 		if (bonusFlags.length > 0) {
 			const data = {
 				actor,
@@ -88,16 +86,25 @@ export async function bonusCheck(actor, result, category, detail) {
 			let title;
 			let config = getSystemCONFIG();
 			let systemString = game.system.id.toUpperCase();
-			switch (category) {
-				case "check":
+			if (config.abilities[detail]?.label) {
+				if (detail.startsWith("fail"))
+					title = "Failed Save Check";
+				else if (category.startsWith("check"))
+					title = i18nFormat(`${systemString}.AbilityPromptTitle`, { ability: config.abilities[detail].label ?? "" });
+				else if (category.startsWith("save"))
+					title = i18nFormat(`${systemString}.SavePromptTitle`, { ability: config.abilities[detail].label ?? "" });
+				else if (category.startsWith("skill)"))
+					title = i18nFormat(`${systemString}.SkillPromptTitle`, { skill: config.skills[detail].label ?? "" });
+			}
+			else {
+				if (detail.startsWith("fail"))
+					title = "Failed Save Check";
+				else if (category.startsWith("check"))
 					title = i18nFormat(`${systemString}.AbilityPromptTitle`, { ability: config.abilities[detail] ?? "" });
-					break;
-				case "save":
+				else if (category.startsWith("save"))
 					title = i18nFormat(`${systemString}.SavePromptTitle`, { ability: config.abilities[detail] ?? "" });
-					break;
-				case "skill":
+				else if (category.startsWith("skill"))
 					title = i18nFormat(`${systemString}.SkillPromptTitle`, { skill: config.skills[detail] ?? "" });
-					break;
 			}
 			await bonusDialog.bind(data)(bonusFlags, detail ? `${category}.${detail}` : category, true, `${actor.name} - ${title}`, "roll", "rollTotal", "rollHTML");
 			result = data.roll;
@@ -157,7 +164,7 @@ async function doRollSkill(wrapped, ...args) {
 		return result;
 	const flavor = result.options?.flavor;
 	const maxflags = getProperty(this.flags, "midi-qol.max") ?? {};
-	const maxValue = (maxflags.skill && (maxflags.skill.all || maxflags.check[skillId])) ?? false;
+	const maxValue = (maxflags.skill && (maxflags.skill.all || (maxflags.check && maxflags.check[skillId]))) ?? false;
 	if (maxValue && Number.isNumeric(maxValue)) {
 		result.terms[0].modifiers.unshift(`max${maxValue}`);
 		//@ts-ignore
@@ -170,15 +177,24 @@ async function doRollSkill(wrapped, ...args) {
 		//@ts-ignore
 		result = await new Roll(Roll.getFormula(result.terms)).evaluate({ async: true });
 	}
+	let rollMode = result.options.rollMode ?? game.settings.get("core", "rollMode");
+	if (chatMessage !== false)
+		await displayDSNForRoll(result, "skill", rollMode);
 	if (!options.simulate) {
 		result = await bonusCheck(this, result, "skill", skillId);
 	}
 	if (chatMessage !== false && result) {
+		const saveRollMode = game.settings.get("core", "rollMode");
+		if (!game.user?.isGM && configSettings.rollSkillsBlind && ["publicroll", "roll"].includes(rollMode)) {
+			rollMode = "blindroll";
+			game.settings.set("core", "rollMode", "blindroll");
+		}
 		const args = { "speaker": getSpeaker(this), flavor };
 		setProperty(args, `flags.${game.system.id}.roll`, { type: "skill", skillId });
 		if (game.system.id === "sw5e")
 			setProperty(args, "flags.sw5e.roll", { type: "skill", skillId });
-		await result.toMessage(args);
+		await result.toMessage(args, { rollMode });
+		game.settings.set("core", "rollMode", saveRollMode);
 	}
 	let success = undefined;
 	if (rollTarget !== undefined)
@@ -204,7 +220,10 @@ export function addDiceTermModifiers() {
 	setProperty(Die.prototype, "multiply", multiply);
 }
 function configureDamage(wrapped) {
-	if (!this.isCritical || criticalDamage === "default") {
+	let useDefaultCritical = getCriticalDamage() === "default";
+	useDefaultCritical || (useDefaultCritical = getCriticalDamage() === "explodeCharacter" && this.data.actorType !== "character");
+	useDefaultCritical || (useDefaultCritical = getCriticalDamage() === "explodeNPC" && this.data.actorType !== "npc");
+	if (!this.isCritical || useDefaultCritical) {
 		while (this.terms.length > 0 && this.terms[this.terms.length - 1] instanceof OperatorTerm)
 			this.terms.pop();
 		return wrapped();
@@ -214,27 +233,44 @@ function configureDamage(wrapped) {
 	/* criticalDamage is one of
 	"default": "DND5e Settings Only",
 	"maxDamage": "Max Normal Damage",
-	"maxCrit": "Max Critical Dice",
+	"maxCrit": "Max Critical Dice (flat number)",
+	"maxCritRoll": "Max Critical Dice (roll dice)",
 	"maxAll": "Max All Dice",
 	"doubleDice": "Double Rolled Damage",
-	"explode": "Explode critical dice",
-	"baseDamage": "No Bonus"
-	*/
+	"explode": "Explode all critical dice",
+	"explodePlayer": "Explode Player critical dice",
+	"explodeGM": "Explode GM crtical dice",
+	"baseDamage": "Only Weapon Extra Critical"
+	},
+*/
 	// if (criticalDamage === "doubleDice") this.options.multiplyNumeric = true;
 	for (let [i, term] of this.terms.entries()) {
 		let cm = this.options.criticalMultiplier ?? 2;
 		let cb = (this.options.criticalBonusDice && (i === 0)) ? this.options.criticalBonusDice : 0;
-		switch (criticalDamage) {
+		switch (getCriticalDamage()) {
 			case "maxDamage":
 				if (term instanceof DiceTerm)
 					term.modifiers.push(`min${term.faces}`);
+				break;
+			case "maxDamageExplode":
+				if (term instanceof DiceTerm)
+					term.modifiers.push(`min${term.faces}`);
+				if (term instanceof DiceTerm) {
+					bonusTerms.push(new OperatorTerm({ operator: "+" }));
+					//@ts-ignore
+					const newTerm = new Die({ number: term.number + cb, faces: term.faces });
+					newTerm.modifiers.push(`x${term.faces}`);
+					newTerm.options = term.options;
+					// setProperty(newTerm.options, "sourceTerm", term);
+					bonusTerms.push(newTerm);
+				}
 				break;
 			case "maxCrit": // Powerful critical
 			case "maxCritRoll":
 				if (term instanceof DiceTerm) {
 					let critTerm;
 					bonusTerms.push(new OperatorTerm({ operator: "+" }));
-					if (criticalDamage === "maxCrit")
+					if (getCriticalDamage() === "maxCrit")
 						critTerm = new NumericTerm({ number: (term.number + cb) * term.faces });
 					else {
 						critTerm = new Die({ number: term.number + cb, faces: term.faces });
@@ -267,6 +303,8 @@ function configureDamage(wrapped) {
 				}
 				break;
 			case "explode":
+			case "explodeCharacter":
+			case "explodeNPC":
 				if (term instanceof DiceTerm) {
 					bonusTerms.push(new OperatorTerm({ operator: "+" }));
 					//@ts-ignore
@@ -301,11 +339,18 @@ function configureDamage(wrapped) {
 	this.options.configured = true;
 }
 async function doAbilityRoll(wrapped, rollType, ...args) {
-	let [abilityId, options = { event: {}, parts: [], chatMessage: undefined, simulate: false, targetValue: undefined }] = args;
+	let [abilityId, options = { event: {}, parts: [], chatMessage: undefined, simulate: false, targetValue: undefined, isMagicalSave: false }] = args;
 	const rollTarget = options.targetValue;
 	if (procAutoFail(this, rollType, abilityId)) {
 		options.parts = ["-100"];
 	}
+	// Hack for MTB bug
+	if (options.event?.advantage || options.event?.altKey)
+		options.advantage = true;
+	if (options.event?.disadvantage || options.event?.ctrlKey)
+		options.disadvantage = true;
+	if (options.fromMars5eChatCard)
+		options.fastForward = autoFastForwardAbilityRolls;
 	const chatMessage = options.chatMessage;
 	const keyOptions = mapSpeedKeys(undefined, "ability");
 	if (options.mapKeys !== false) {
@@ -315,12 +360,9 @@ async function doAbilityRoll(wrapped, rollType, ...args) {
 			options.disadvantage = options.disadvantage || keyOptions.disadvantage;
 		if (keyOptions?.fastForwardAbility === true)
 			options.fastForward = options.fastForward || keyOptions.fastForwardAbility;
+		if (keyOptions?.advantage || keyOptions?.disadvantage)
+			options.fastForward = true;
 	}
-	// Hack for MTB bug
-	if (options.event?.advantage)
-		options.advantage = options.event.advantage || options.advantage;
-	if (options.event?.disadvantage)
-		options.disadvantage = options.event.disadvantage || options.disadvantage;
 	options.event = {};
 	let procOptions = procAbilityAdvantage(this, rollType, abilityId, options);
 	if (procOptions.advantage && procOptions.disadvantage) {
@@ -349,13 +391,47 @@ async function doAbilityRoll(wrapped, rollType, ...args) {
 		//@ts-ignore
 		result = await new Roll(Roll.getFormula(result.terms)).evaluate({ async: true });
 	}
-	if (!options.simulate)
+	let rollMode = result.options.rollMode ?? game.settings.get("core", "rollMode");
+	if (!game.user?.isGM && ["publicroll", "roll"].includes(rollMode))
+		switch (rollType) {
+			case "check":
+				if (configSettings.rollChecksBlind)
+					rollMode = "blindroll";
+				break;
+			case "save":
+				if (configSettings.rollSavesBlind)
+					rollMode = "blindroll";
+				break;
+		}
+	await displayDSNForRoll(result, rollType, rollMode);
+	if (!options.simulate) {
 		result = await bonusCheck(this, result, rollType, abilityId);
+		if (result.options.rollMode === "blindroll")
+			rollMode = "blindroll";
+	}
 	if (chatMessage !== false && result) {
-		const args = { "speaker": getSpeaker(this), flavor };
-		setProperty(args, `flags.${game.system.id}.roll`, { type: rollType, abilityId });
-		args.template = "modules/midi-qol/templates/roll.html";
-		await result.toMessage(args);
+		const messageData = { "speaker": getSpeaker(this), flavor };
+		setProperty(messageData, "flags", options.flags ?? {});
+		setProperty(messageData, `flags.${game.system.id}.roll`, { type: rollType, abilityId });
+		setProperty(messageData, "flags.midi-qol.lmrtfy.requestId", options.flags?.lmrtfy?.data?.requestId);
+		messageData.template = "modules/midi-qol/templates/roll.html";
+		if (!game.user?.isGM && ["publicroll", "roll"].includes(rollMode))
+			switch (rollType) {
+				case "check":
+					if (configSettings.rollChecksBlind)
+						rollMode = "blindroll";
+					break;
+				case "save":
+					if (configSettings.rollSavesBlind)
+						rollMode = "blindroll";
+					break;
+			}
+		const saveRollMode = game.settings.get("core", "rollMode");
+		if (rollMode === "blindroll") {
+			game.settings.set("core", "rollMode", rollMode);
+		}
+		await result.toMessage(messageData, { rollMode });
+		game.settings.set("core", "rollMode", saveRollMode);
 	}
 	let success = undefined;
 	if (rollTarget !== undefined)
@@ -493,6 +569,19 @@ export function procAbilityAdvantage(actor, rollType, abilityId, options) {
 	var withAdvantage = options.advantage;
 	var withDisadvantage = options.disadvantage;
 	//options.fastForward = options.fastForward || (autoFastForwardAbilityRolls ? !options.event?.fastKey : options.event?.fastKey);
+	if (rollType === "save" && options.isMagicSave) {
+		if ((actor?.system.traits?.dr?.custom || "").includes(i18n("midi-qol.MagicResistant").trim()))
+			withAdvantage = true;
+		;
+		const magicResistanceFlags = getProperty(actor, "flags.midi-qol.magicResistance");
+		if (magicResistanceFlags && (magicResistanceFlags?.all || getProperty(magicResistanceFlags, abilityId))) {
+			withAdvantage = true;
+		}
+		const magicVulnerabilityFlags = getProperty(actor, "flags.midi-qol.magicVulnerability");
+		if (magicVulnerabilityFlags && (magicVulnerabilityFlags?.all || getProperty(magicVulnerabilityFlags, abilityId))) {
+			withDisadvantage = true;
+		}
+	}
 	options.fastForward = options.fastForward || options.event?.fastKey;
 	if (advantage || disadvantage) {
 		const conditionData = createConditionData({ workflow: undefined, target: undefined, actor: this });
@@ -591,8 +680,9 @@ function _midiATIRefresh(template) {
 			if (centerDist > distance + maxExtension)
 				return false;
 			//@ts-ignore
-			if (["alwaysIgnoreDefeated", "wallsBlockIgnoreDefeated"].includes(configSettings.autoTarget) && tk.actor?.system.attributes.hp.value <= 0)
-				return false;
+			if (["alwaysIgnoreDefeated", "wallsBlockIgnoreDefeated"].includes(configSettings.autoTarget) && checkIncapacitated(tk.actor, undefined, undefined))
+				;
+			return false;
 			return true;
 		});
 		if (tokensToCheck.length > 0) {
@@ -678,6 +768,7 @@ export function initPatching() {
 	libWrapper.register("midi-qol", "CONFIG.Item.documentClass.prototype.prepareData", itemPrepareData, "WRAPPER");
 	libWrapper.register("midi-qol", "CONFIG.Actor.documentClass.prototype.prepareData", actorPrepareData, "WRAPPER");
 	libWrapper.register("midi-qol", "KeyboardManager.prototype._onFocusIn", _onFocusIn, "OVERRIDE");
+	libWrapper.register("midi-qol", "CONFIG.Actor.documentClass.prototype.getRollData", getRollData, "WRAPPER");
 }
 export function _onFocusIn(event) {
 	const formElements = [
@@ -688,6 +779,7 @@ export function _onFocusIn(event) {
 }
 export function actorPrepareData(wrapped) {
 	try {
+		setProperty(this, "flags.midi-qol.onUseMacroName", getProperty(this._source, "flags.midi-qol.onUseMacroName"));
 		wrapped();
 		prepareOnUseMacroData(this);
 	}
@@ -695,6 +787,7 @@ export function actorPrepareData(wrapped) {
 	}
 }
 export function itemPrepareData(wrapped) {
+	setProperty(this, "flags.midi-qol.onUseMacroName", getProperty(this._source, "flags.midi-qol.onUseMacroName"));
 	wrapped();
 	prepareOnUseMacroData(this);
 }
@@ -706,6 +799,23 @@ export function prepareOnUseMacroData(actorOrItem) {
 	catch (err) {
 		console.warn("midi-qol | failed to prepare onUse macro data", err);
 	}
+}
+export function lookupItemMacro(...args) {
+	let [candidate, data, options, user] = args;
+	if (!candidate.origin || !data.changes)
+		return true;
+	let newChanges = candidate.changes?.map(change => {
+		if (change.key === "flags.midi-qol.onUseMacroName") {
+			const parts = change.value.split(",").map(s => s.trim());
+			if (parts[0] === "ItemMacro") {
+				parts[0] = `ItemMacro.${candidate.origin}`;
+				change.value = parts.join(",");
+			}
+		}
+		return change;
+	});
+	candidate.updateSource({ "changes": newChanges });
+	return true;
 }
 export function preUpdateItemActorOnUseMacro(itemOrActor, changes, options, user) {
 	try {
@@ -734,9 +844,12 @@ export function preUpdateItemActorOnUseMacro(itemOrActor, changes, options, user
 			}
 		}
 		let macroString = OnUseMacros.parseParts(macroParts).items.map(oum => oum.toString()).join(",");
-		changes.flags["midi-qol"].onUseMacroName = macroString;
-		delete changes.flags["midi-qol"].onUseMacroParts;
-		itemOrActor.updateSource({ "flags.midi-qol.-=onUseMacroParts": null });
+		if (!itemOrActor.isToken)
+			changes["flags.midi-qol.onUseMacroName"] = macroString;
+		else
+			changes.flags = mergeObject({ "midi-qol.onUseMacroName": macroString }, itemOrActor._source.flags, { overwrite: false });
+		// delete changes.flags["midi-qol"].onUseMacroParts;
+		// itemOrActor.updateSource({ "flags.midi-qol.-=onUseMacroParts": null });
 	}
 	catch (err) {
 		delete changes.flags["midi-qol"].onUseMacroParts;
@@ -840,81 +953,13 @@ export function _getInitiativeFormula(wrapped) {
 	return parts.filter(p => p !== null).join(" + ");
 }
 ;
-async function _preDeleteActiveEffect(wrapped, ...args) {
-	try {
-		if ((this.parent instanceof CONFIG.Actor.documentClass)) {
-			let [options, user] = args;
-			const effect = this;
-			// Handle removal of reaction effect
-			if (installedModules.get("dfreds-convenient-effects") && getConvenientEffectsReaction()?._id === this.flags?.core?.statusId) {
-				await this.parent.unsetFlag("midi-qol", "reactionCombatRound");
-			}
-			// Handle removal of bonus action effect
-			if (installedModules.get("dfreds-convenient-effects") && getConvenientEffectsBonusAction()?._id === this.flags?.core?.statusId) {
-				await this.parent.unsetFlag("midi-qol", "bonusActionCombatRound");
-			}
-			const checkConcentration = globalThis.MidiQOL?.configSettings()?.concentrationAutomation;
-			if (!checkConcentration)
-				return;
-			let concentrationLabel = i18n("midi-qol.Concentrating");
-			if (installedModules.get("dfreds-convenient-effects")) {
-				let concentrationId = "Convenient Effect: Concentrating";
-				let statusEffect = CONFIG.statusEffects.find(se => se.id === concentrationId);
-				if (statusEffect)
-					concentrationLabel = statusEffect.label;
-			}
-			else if (installedModules.get("combat-utility-belt")) {
-				concentrationLabel = game.settings.get("combat-utility-belt", "concentratorConditionName");
-			}
-			let isConcentration = effect.label === concentrationLabel;
-			const origin = MQfromUuid(effect.origin);
-			if (isConcentration)
-				await removeConcentration(effect.parent, this.uuid);
-			else if (origin instanceof CONFIG.Item.documentClass && origin.parent instanceof CONFIG.Actor.documentClass) {
-				const concentrationData = getProperty(origin.parent, "flags.midi-qol.concentration-data");
-				if (concentrationData && effect.origin === concentrationData.uuid) {
-					const allConcentrationTargets = concentrationData.targets.filter(target => {
-						let actor = MQfromActorUuid(target.actorUuid);
-						const hasEffects = actor.effects.some(effect => effect.origin === concentrationData.uuid
-							&& !effect.flags.dae.transfer
-							&& effect.uuid !== this.uuid);
-						return hasEffects;
-					});
-					const concentrationTargets = concentrationData.targets.filter(target => {
-						let actor = MQfromActorUuid(target.actorUuid);
-						const hasEffects = actor.effects.some(effect => effect.origin === concentrationData.uuid
-							&& !effect.flags.dae.transfer
-							&& effect.uuid !== this.uuid
-							&& effect.label !== concentrationLabel);
-						return hasEffects;
-					});
-					if (["effects", "effectsTemplates"].includes(configSettings.removeConcentrationEffects)
-						&& concentrationTargets.length < 1
-						&& concentrationTargets.length < concentrationData.targets.length
-						&& concentrationData.templates.length === 0
-						&& concentrationData.removeUuids.length === 0) {
-						// non concentration effects left
-						await removeConcentration(origin.parent, this.uuid);
-					}
-					else if (concentrationData.targets.length !== allConcentrationTargets.length) {
-						// update the concentration data
-						concentrationData.targets = allConcentrationTargets;
-						await origin.parent.setFlag("midi-qol", "concentration-data", concentrationData);
-					}
-				}
-			}
-		}
-	}
-	catch (err) {
-		console.warn("midi-qol | error deleting effect: ", err);
-	}
-	finally {
-		return wrapped(...args);
-	}
-}
 export async function removeConcentration(actor, concentrationUuid) {
 	let result;
 	try {
+		//@ts-expect-error fromUuidSync
+		const concentrationEffect = fromUuidSync(concentrationUuid);
+		if (concentrationEffect)
+			await concentrationEffect.delete();
 		const concentrationData = actor.getFlag("midi-qol", "concentration-data");
 		if (!concentrationData) {
 			return;
@@ -927,22 +972,26 @@ export async function removeConcentration(actor, concentrationUuid) {
 					await template.delete();
 			}
 		}
-		for (let removeUuid of concentrationData.removeUuids) {
-			const entity = await fromUuid(removeUuid);
-			if (entity)
-				await entity.delete(); // TODO check if this needs to be run as GM
-		}
-		if (actor.isToken)
-			setTimeout(() => socketlibSocket.executeAsGM("deleteItemEffects", { ignore: [concentrationUuid], targets: concentrationData.targets, origin: concentrationData.uuid, ignoreTransfer: true }), 200);
-		else
+		if (concentrationData.removeUuids)
+			for (let removeUuid of concentrationData.removeUuids) {
+				const entity = await fromUuid(removeUuid);
+				if (entity && globalThis.DAE?.actionQueue)
+					await globalThis.DAE?.actionQueue.add(entity?.delete.bind(entity));
+				else if (entity)
+					await entity.delete(); // TODO check if this needs to be run as GM
+			}
+		if (concentrationData.targets) {
+			debug("About to remove concentration effects", actor?.name);
 			result = await socketlibSocket.executeAsGM("deleteItemEffects", { ignore: [concentrationUuid], targets: concentrationData.targets, origin: concentrationData.uuid, ignoreTransfer: true });
+			debug("finsihed remove concentration effects", actor?.name);
+		}
 	}
 	catch (err) {
 		error("error when attempting to remove concentration ", err);
 	}
 	return result;
 }
-async function zeroHPExpiry(actor, update, options, user) {
+export async function zeroHPExpiry(actor, update, options, user) {
 	const hpUpdate = getProperty(update, "system.attributes.hp.value");
 	if (hpUpdate !== 0)
 		return;
@@ -954,22 +1003,30 @@ async function zeroHPExpiry(actor, update, options, user) {
 	if (expiredEffects.length > 0)
 		await actor.deleteEmbeddedDocuments("ActiveEffect", expiredEffects, { "expiry-reason": "midi-qol:zeroHP" });
 }
-async function checkWounded(actor, update, options, user) {
+export async function checkWounded(actor, update, options, user) {
 	const hpUpdate = getProperty(update, "system.attributes.hp.value");
+	const vitalityResource = checkRule("vitalityResource");
+	//@ts-expect-error
+	const dfreds = game.dfreds;
+	let vitalityUpdate = vitalityResource && getProperty(update, vitalityResource.trim());
 	// return wrapped(update,options,user);
-	if (hpUpdate === undefined)
+	if (hpUpdate === undefined && (!vitalityResource || vitalityUpdate === undefined))
 		return;
 	const attributes = actor.system.attributes;
-	if (configSettings.addWounded > 0) {
-		//@ts-ignore
-		const CEWounded = game.dfreds?.effects?._wounded;
+	const needsBeaten = vitalityResource ? vitalityUpdate <= 0 : hpUpdate <= 0;
+	if (configSettings.addWounded > 0 && hpUpdate !== undefined) {
 		const woundedLevel = attributes.hp.max * configSettings.addWounded / 100;
-		const needsWounded = hpUpdate > 0 && hpUpdate < woundedLevel;
-		if (installedModules.get("dfreds-convenient-effects") && CEWounded) {
-			const wounded = await ConvenientEffectsHasEffect(CEWounded.name, actor, false);
+		const needsWounded = hpUpdate > 0 && hpUpdate < woundedLevel && !needsBeaten;
+		if (installedModules.get("dfreds-convenient-effects")) {
+			const CEWoundedName = dfreds?.effects?._wounded.name ?? dfreds?.effects?._wounded.label;
+			const CEWounded = dfreds.effectInterface.findEffectByName(CEWoundedName)?.toObject();
+			const wounded = await ConvenientEffectsHasEffect((CEWoundedName), actor, false);
 			if (wounded !== needsWounded) {
-				//@ts-ignore
-				await game.dfreds?.effectInterface.toggleEffect(CEWounded.name, { overlay: false, uuids: [actor.uuid] });
+				if (needsWounded)
+					await actor.createEmbeddedDocuments("ActiveEffect", [CEWounded]);
+				else
+					await actor.effects.find(ef => (ef.name ?? ef.label) === CEWoundedName)?.delete();
+				//await dfreds?.effectInterface.toggleEffect((CEWounded.name ?? CEWounded.label), { overlay: false, uuids: [actor.uuid] });
 			}
 		}
 		else {
@@ -981,37 +1038,55 @@ async function checkWounded(actor, update, options, user) {
 				await token.toggleEffect(bleeding.icon, { overlay: false, active: needsWounded });
 		}
 	}
-	if (configSettings.addDead !== "none") {
-		const needsDead = hpUpdate <= 0;
-		if (installedModules.get("dfreds-convenient-effects") && game.settings.get("dfreds-convenient-effects", "modifyStatusEffects") !== "none") {
-			const effectName = (actor.type === "character" || actor.hasPlayerOwner) ? getConvenientEffectsUnconscious().name : getConvenientEffectsDead().name;
-			const hasEffect = await ConvenientEffectsHasEffect(effectName, actor, false);
-			if ((needsDead !== hasEffect)) {
-				if (actor.type !== "character" && !actor.hasPlayerOwner) { // For CE dnd5e does not treat dead as dead for the combat tracker so update it by hand as well
-					let combatant;
-					if (actor.token)
-						combatant = game.combat?.getCombatantByToken(actor.token.id);
-					//@ts-ignore
-					else
-						combatant = game.combat?.getCombatantByActor(actor.id);
-					if (combatant)
-						await combatant.update({ defeated: needsDead });
-				}
-				//@ts-ignore
-				await game.dfreds?.effectInterface.toggleEffect(effectName, { overlay: configSettings.addDead === "overlay", uuids: [actor.uuid] });
-			}
+	if (configSettings.addDead !== "none" && installedModules.get("dfreds-convenient-effects")) {
+		let effect;
+		let useDefeated;
+		if ((actor.type === "character" || actor.hasPlayerOwner) && !vitalityResource) {
+			effect = getConvenientEffectsUnconscious();
+			useDefeated = false;
 		}
 		else {
-			const tokens = actor.getActiveTokens();
-			const controlled = tokens.filter(t => t._controlled);
-			const token = controlled.length ? controlled.shift() : tokens.shift();
-			if (token) {
-				if (actor.type === "character" || actor.hasPlayerOwner) {
-					await token.toggleEffect("/icons/svg/unconscious.svg", { overlay: configSettings.addDead === "overlay", active: needsDead });
-				}
-				else {
-					await token.toggleEffect(CONFIG.controlIcons.defeated, { overlay: configSettings.addDead === "overlay", active: needsDead });
-				}
+			effect = getConvenientEffectsDead();
+			useDefeated = true;
+		}
+		// TODO this relies on the defeated condition having the sanme name/label as the CE dead condition
+		const isBeaten = actor.effects.find(ef => (ef.name || ef.label) === (effect.name ?? effect.label)) !== undefined;
+		if ((needsBeaten !== isBeaten)) {
+			let combatant;
+			if (actor.token)
+				combatant = game.combat?.getCombatantByToken(actor.token.id);
+			//@ts-ignore
+			else
+				combatant = game.combat?.getCombatantByActor(actor.id);
+			if (combatant && useDefeated) {
+				await combatant.update({ defeated: needsBeaten });
+			}
+			if (needsBeaten) {
+				await dfreds.effectInterface?.addEffectWith({ effectData: effect.toObject(), uuid: actor.uuid, overlay: configSettings.addDead === "overlay" });
+			}
+			else { // remove beaten condition
+				await dfreds.effectInterface.removeEffect({ effectName: (effect.name ?? effect.label), uuid: actor.uuid });
+			}
+		}
+	}
+	else if (configSettings.addDead !== "none") {
+		const tokens = actor.getActiveTokens();
+		const controlled = tokens.filter(t => t._controlled);
+		const token = controlled.length ? controlled.shift() : tokens.shift();
+		const effectId = actor.type === "character" ? "unconscious" : "dead";
+		const effect = CONFIG.statusEffects.find(se => se.id === effectId);
+		if (token && effect) {
+			const isBeaten = actor.effects.find(ef => (ef.name || ef.label) === (i18n(effect?.label ?? ""))) !== undefined;
+			if (isBeaten !== needsBeaten) {
+				let combatant;
+				if (actor.token)
+					combatant = game.combat?.getCombatantByToken(actor.token.id);
+				//@ts-expect-error
+				else
+					combatant = game.combat?.getCombatantByActor(actor.id);
+				if (combatant && effectId === "dead")
+					await combatant.update({ defeated: needsBeaten });
+				await token.toggleEffect(effect, { overlay: configSettings.addDead === "overlay", active: needsBeaten });
 			}
 		}
 	}
@@ -1045,16 +1120,16 @@ export function readyPatching() {
 	else {
 		libWrapper.register("midi-qol", "CONFIG.Actor.documentClass.prototype.getInitiativeRoll", getInitiativeRoll, "WRAPPER");
 	}
-	libWrapper.register("midi-qol", "CONFIG.ActiveEffect.documentClass.prototype._preDelete", _preDeleteActiveEffect, "WRAPPER");
-	libWrapper.register("midi-qol", "CONFIG.Actor.documentClass.prototype._preUpdate", _preUpdateActor, "WRAPPER");
-	libWrapper.register("midi-qol", "game.system.applications.DamageTraitSelector.prototype.getData", preDamageTraitSelectorGetData, "WRAPPER");
+	// libWrapper.register("midi-qol", "CONFIG.ActiveEffect.documentClass.prototype._preDelete", _preDeleteActiveEffect, "WRAPPER");
+	// libWrapper.register("midi-qol", "CONFIG.Actor.documentClass.prototype._preUpdate", _preUpdateActor, "WRAPPER");
+	libWrapper.register("midi-qol", "game.system.applications.actor.TraitSelector.prototype.getData", preDamageTraitSelectorGetData, "WRAPPER");
 }
 export let visionPatching = () => {
 	//@ts-ignore game.version
 	const patchVision = isNewerVersion(game.version ?? game?.version, "0.7.0") && game.settings.get("midi-qol", "playerControlsInvisibleTokens");
 	if (patchVision) {
-		ui.notifications?.warn("Player control vision is deprecated please use the module Your Tokens Visible");
-		console.warn("midi-qol | Player control vision is deprecated please use the module Your Tokens Visible");
+		ui.notifications?.warn("Player control vision is deprecated, use it at your own risk");
+		console.warn("midi-qol | Player control vision is deprecated, use it at your own risk");
 		log("Patching Token._isVisionSource");
 		libWrapper.register("midi-qol", "Token.prototype._isVisionSource", _isVisionSource, "WRAPPER");
 		log("Patching Token.isVisible");
@@ -1096,15 +1171,13 @@ export async function preDeleteTemplate(templateDocument, options, user) {
 		if (!(actor instanceof CONFIG.Actor.documentClass))
 			return true;
 		const concentrationData = getProperty(actor, "flags.midi-qol.concentration-data");
-		if (!concentrationData)
+		if (!concentrationData || concentrationData.templates.length === 0)
 			return true;
 		const concentrationTemplates = concentrationData.templates.filter(templateUuid => templateUuid !== templateDocument.uuid);
-		// if (concentrationTemplates.length === concentrationData.templates.length) return true;
-		if (concentrationTemplates.length === 0
-			&& concentrationData.targets.length === 1
-			&& concentrationData.removeUuids.length === 0
+		if (concentrationTemplates.length === 0 // no templates left
+			&& concentrationData.targets.length === 1 // only one target left - me
+			&& concentrationData.removeUuids.length === 0 // no remove uuids left
 			&& ["effectsTemplates"].includes(configSettings.removeConcentrationEffects)) {
-			// non concentration effects left
 			await removeConcentration(actor, "no ignore");
 		}
 		else if (concentrationData.templates.length >= 1) {
@@ -1130,15 +1203,29 @@ export let actorAbilityRollPatching = () => {
 	// TODO come back and add these
 	log("Patching rollSkill");
 	libWrapper.register("midi-qol", "CONFIG.Actor.documentClass.prototype.rollSkill", doRollSkill, "WRAPPER");
+	libWrapper.register("midi-qol", "CONFIG.Item.documentClass.prototype.rollToolCheck", rollToolCheck, "WRAPPER");
 	// 10.0.19 rollDeath save now implemented via the preRollDeathSave Hook
 };
+export async function rollToolCheck(wrapped, options = {}) {
+	const chatMessage = options.chatMessage;
+	options.chatMessage = false;
+	let result = await wrapped(options);
+	await displayDSNForRoll(result, "toolCheck");
+	result = await bonusCheck(this.actor, result, "check", this.system.ability ?? "");
+	if (chatMessage !== false && result) {
+		const title = `${this.name} - ${game.i18n.localize("DND5E.ToolCheck")}`;
+		const args = { "speaker": getSpeaker(this.actor), title, flavor: title };
+		setProperty(args, `flags.${game.system.id}.roll`, { type: "tool", itemId: this.id, itemUuid: this.uuid });
+		args.template = "modules/midi-qol/templates/roll.html";
+		await result.toMessage(args);
+	}
+	return result;
+}
 export function patchLMRTFY() {
 	if (installedModules.get("lmrtfy")) {
 		log("Patching lmrtfy");
-		// libWrapper.register("midi-qol", "LMRTFYRoller.prototype._makeRoll", _makeRoll, "OVERRIDE");
+		libWrapper.register("midi-qol", "LMRTFYRoller.prototype._makeRoll", LMRTFYMakeRoll, "OVERRIDE");
 		libWrapper.register("midi-qol", "LMRTFY.onMessage", LMRTFYOnMessage, "OVERRIDE");
-		// the _tagMessage has been updated in LMRTFY libWrapper.register("midi-qol", "LMRTFYRoller.prototype._tagMessage", _tagMessage, "OVERRIDE");
-		// libWrapper.register("midi-qol", "ChatMessage.create", filterChatMessageCreate, "WRAPPER")
 	}
 }
 function LMRTFYOnMessage(data) {
@@ -1171,6 +1258,25 @@ function LMRTFYOnMessage(data) {
 		return;
 	//@ts-ignore
 	new LMRTFYRoller(actors, data).render(true);
+}
+async function LMRTFYMakeRoll(event, rollMethod, failRoll, ...args) {
+	let options = this._getRollOptions(event, failRoll);
+	// save the current roll mode to reset it after this roll
+	const rollMode = game.settings.get("core", "rollMode");
+	game.settings.set("core", "rollMode", this.mode || CONST.DICE_ROLL_MODES);
+	for (let actor of this.actors) {
+		Hooks.once("preCreateChatMessage", this._tagMessage.bind(this));
+		// system specific roll handling
+		switch (game.system.id) {
+			default: {
+				setProperty(options, "flags.lmrtfy", { "message": this.data.message, "data": this.data.attach });
+				actor[rollMethod].call(actor, ...args, options);
+			}
+		}
+	}
+	game.settings.set("core", "rollMode", rollMode);
+	this._disableButtons(event);
+	this._checkClose();
 }
 function filterChatMessageCreate(wrapped, data, context) {
 	if (!(data instanceof Array))
@@ -1235,6 +1341,8 @@ export async function _preDeleteCombat(wrapped, ...args) {
 					await removeReactionUsed(combatant.actor, true);
 				if (await hasUsedBonusAction(combatant.actor))
 					await removeBonusActionUsed(combatant.actor, true);
+				if (await hasUsedAction(combatant.actor))
+					await removeActionUsed(combatant.actor);
 			}
 		}
 	}
@@ -1385,7 +1493,7 @@ export function migrateTraits(actor) {
 			let baseTrait = baseData.system.traits[traitId];
 			if (!trait)
 				continue;
-			trait.value = [];
+			trait.value = new Set();
 			if (trait.bypasses instanceof Set) {
 				for (let traitString of baseTrait.value) {
 					switch (traitString) {
@@ -1551,4 +1659,15 @@ function preDamageTraitSelectorGetData(wrapped) {
 	finally {
 		return wrapped();
 	}
+}
+function getRollData(wrapped, ...args) {
+	const data = wrapped(...args);
+	data.actorType = this.type;
+	if (game.system.id === "dnd5e") {
+		data.cfg = {};
+		data.cfg.armorClasses = getSystemCONFIG().armorClasses;
+		data.cfg.actorSizes = getSystemCONFIG().actorSizes;
+		data.cfg.skills = getSystemCONFIG().skills;
+	}
+	return data;
 }

@@ -7,8 +7,8 @@ Allows to force chosen settings for all clients to the defaults provided by the 
 This module adds a lock icons next to the client settings in the settings configuration app. Clicking these icons changes the behavior of the settings:
 
 - "Unlocked" icons mean that the settings are free to be changed by the individual clients.
-- "Locked" icons mean that the settings will be forced to those set by the GM.
-- "Half-locked" icons mean that the settings will be defaulted to those set by the GM, however any client may optionally "unlock" these settings and adjust them if necessary.
+- "Half-locked (with visible keyhole)" icons mean that the settings will be defaulted to those set by the GM, however any client may optionally "unlock" these settings and adjust them if necessary.
+- "Locked (with no visible keyhole)" icons mean that the settings will be forced to those set by the GM and may not be changed by clients.
 
 This allows the GM to either force chosen critical settings to ensure they will not be altered, or "soft-force" other settings that the GM finds helpful to be set to new defaults, but still let the players alter them if they choose to.
 The GM may also choose to either leave the forced settings visible, or hide all of them away from the clients, in order to reduce clutter, via a global setting.
@@ -18,7 +18,7 @@ The GM may also choose to either leave the forced settings visible, or hide all 
 ## Current Limitations
 
 - The clients may be required to refresh their browser before any alterations to the forced settings made by the GM will take effect.
-- Neither the GM, nor any client with the permission to modify world settings, would be able to opt-out and individually alter any of the "soft-forced" settings.
+- The GM themselves may not opt-out and individually alter any of the "soft-forced" settings. That means whatever values the GM sets as "soft" defaults for other clients, they themselves must use these values.
 
 ## Compatibility and issues
 
@@ -36,12 +36,11 @@ The GM may also choose to either leave the forced settings visible, or hide all 
 
 #### Illandril's Tidy Module Settings
 
-- _Annoyance:_ All settings sections will collapse when you click on a lock icon. This happens because Illandril's Tidy Module Settings does not store the state of collapsable sections between renderings.
+- _Fully compatible_
 
 #### DF Settings Clarity
 
-- _Recent change:_ Force Client Settings no longer changes the actual scope of the settings, so the "Per World"/"Per Player" icons and tooltips provided by DF Settings Clarity would not change when you toggle the locks. The settings should still be forced properly.
-- _Micro issue:_ Lock icons will not show up when you use this module's search bar. The changes to the settings will still be applied (or ignored) correctly.
+- _Issue:_ Lock icons will disappear when you use the settings filter.
 
 #### SocketSettings by Blitz
 

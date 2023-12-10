@@ -1,31 +1,54 @@
-import { configSettings } from "./settings.js";
-import { i18n, log, warn, gameStats, getCanvas, error, debugEnabled, debugCallTiming } from "../midi-qol.js";
+import { checkRule, configSettings } from "./settings.js";
+import { i18n, log, warn, gameStats, getCanvas, error, debugEnabled, debugCallTiming, debug } from "../midi-qol.js";
 import { canSense, completeItemUse, gmExpirePerTurnBonusActions, gmOverTimeEffect, MQfromActorUuid, MQfromUuid, promptReactions } from "./utils.js";
 import { ddbglPendingFired } from "./chatMesssageHandling.js";
 import { Workflow, WORKFLOWSTATES } from "./workflow.js";
 import { bonusCheck } from "./patching.js";
+import { queueUndoData, startUndoWorkflow, updateUndoChatCardUuids, _removeMostRecentWorkflow, _undoMostRecentWorkflow } from "./undo.js";
 export var socketlibSocket = undefined;
 var traitList = { di: {}, dr: {}, dv: {} };
 function paranoidCheck(action, actor, data) {
 	return true;
 }
 export async function removeEffects(data) {
-	const actor = MQfromActorUuid(data.actorUuid);
-	if (configSettings.paranoidGM && !paranoidCheck("removeEffects", actor, data))
-		return "gmBlocked";
-	return await actor?.deleteEmbeddedDocuments("ActiveEffect", data.effects, data.options);
+	debug("removeEffects started");
+	let removeFunc = async () => {
+		try {
+			debug("removeFunc: remove effects started");
+			const actor = MQfromActorUuid(data.actorUuid);
+			if (configSettings.paranoidGM && !paranoidCheck("removeEffects", actor, data))
+				return "gmBlocked";
+			const effectIds = data.effects.filter(efId => actor.effects.find(effect => efId === effect.id));
+			if (effectIds?.length > 0)
+				return actor?.deleteEmbeddedDocuments("ActiveEffect", effectIds, data.options);
+		}
+		finally {
+			warn("removeFunc: remove effects completed");
+		}
+	};
+	// Using the seamphore queue leads to quite a few potential cases of deadlock - disabling for now
+	// if (globalThis.DAE?.actionQueue) return globalThis.DAE.actionQueue.add(removeFunc)
+	// else return removeFunc();
+	return removeFunc();
 }
 export async function createEffects(data) {
-	const actor = MQfromActorUuid(data.actorUuid);
-	for (let effect of data.effects) { // override default foundry behaviour of blank being transfer
-		if (effect.transfer === undefined)
-			effect.transfer = false;
-	}
-	await actor?.createEmbeddedDocuments("ActiveEffect", data.effects);
+	const createEffectsFunc = async () => {
+		const actor = MQfromActorUuid(data.actorUuid);
+		for (let effect of data.effects) { // override default foundry behaviour of blank being transfer
+			if (effect.transfer === undefined)
+				effect.transfer = false;
+		}
+		return actor?.createEmbeddedDocuments("ActiveEffect", data.effects);
+	};
+	return await createEffectsFunc();
+	/* This seems to cause a deadlock
+	if (globalThis.DAE?.actionQueue) return globalThis.DAE.actionQueue.add(createEffectsFunc)
+	else return createEffectsFunc();
+	*/
 }
 export async function updateEffects(data) {
 	const actor = MQfromActorUuid(data.actorUuid);
-	await actor.updateEmbeddedDocuments("ActiveEffect", data.updates);
+	return actor.updateEmbeddedDocuments("ActiveEffect", data.updates);
 }
 export function removeActorStats(data) {
 	return gameStats.GMremoveActorStats(data.actorId);
@@ -74,6 +97,11 @@ export let setupSocket = () => {
 	socketlibSocket.register("_gmExpirePerTurnBonusActions", gmExpirePerTurnBonusActions);
 	socketlibSocket.register("_gmUnsetFlag", _gmUnsetFlag);
 	socketlibSocket.register("_gmSetFlag", _gmSetFlag);
+	socketlibSocket.register("startUndoWorkflow", startUndoWorkflow);
+	socketlibSocket.register("queueUndoData", queueUndoData);
+	socketlibSocket.register("updateUndoChatCardUuids", updateUndoChatCardUuids);
+	socketlibSocket.register("undoMostRecentWorkflow", _undoMostRecentWorkflow);
+	socketlibSocket.register("removeMostRecentWorkflow", _removeMostRecentWorkflow);
 	// socketlibSocket.register("canSense", _canSense);
 };
 export async function _gmUnsetFlag(data) {
@@ -124,8 +152,8 @@ export async function _canSense(data) {
 export async function _gmOverTimeEffect(data) {
 	const actor = MQfromActorUuid(data.actorUuid);
 	const effect = MQfromUuid(data.effectUuid);
-	console.log("Called _gmOvertime", actor.name, effect.label);
-	return await gmOverTimeEffect(actor, effect, data.startTurn, data.options);
+	log("Called _gmOvertime", actor.name, effect.name ?? effect.label);
+	return gmOverTimeEffect(actor, effect, data.startTurn, data.options);
 }
 export async function _bonusCheck(data) {
 	const tokenOrActor = await fromUuid(data.actorUuid);
@@ -142,7 +170,7 @@ export async function _applyEffects(data) {
 		const workflow = Workflow.getWorkflow(data.workflowId);
 		if (!workflow)
 			return result;
-		workflow.forceApplyEffects = true; // don't overwrite the application targets
+		workflow.forceApplyEffects = true;
 		const targets = new Set();
 		//@ts-ignore
 		for (let targetUuid of data.targets)
@@ -167,7 +195,10 @@ async function _completeItemUse(data) {
 	//@ts-ignore v10
 	let ownedItem = new CONFIG.Item.documentClass(itemData, { parent: actor, keepId: true });
 	const workflow = await completeItemUse(ownedItem, config, options);
-	return true; // can't return the workflow
+	if (data.options?.workflowData)
+		return workflow.getMacroData(); // can't return the workflow
+	else
+		return true;
 }
 async function createActor(data) {
 	await CONFIG.Actor.documentClass.createDocuments([data.actorData]);
@@ -179,33 +210,41 @@ async function deleteToken(data) {
 	}
 }
 export async function deleteItemEffects(data) {
-	let { targets, origin, ignore } = data;
-	for (let idData of targets) {
-		let actor = idData.tokenUuid ? MQfromActorUuid(idData.tokenUuid) : idData.actorUuid ? MQfromUuid(idData.actorUuid) : undefined;
-		if (actor?.actor)
-			actor = actor.actor;
-		if (!actor) {
-			warn("could not find actor for ", idData.tokenUuid);
-			continue;
-		}
-		const effectsToDelete = actor?.effects?.filter(ef => {
-			return ef.origin === origin && !ignore.includes(ef.uuid) && (!data.ignoreTransfer || ef.flags?.dae?.transfer !== true);
-		});
-		if (effectsToDelete?.length > 0) {
-			try {
-				await actor.deleteEmbeddedDocuments("ActiveEffect", effectsToDelete.map(ef => ef.id));
+	debug("deleteItemEffects: started", globalThis.DAE?.actionQueue);
+	let deleteFunc = async () => {
+		let { targets, origin, ignore } = data;
+		for (let idData of targets) {
+			let actor = idData.tokenUuid ? MQfromActorUuid(idData.tokenUuid) : idData.actorUuid ? MQfromUuid(idData.actorUuid) : undefined;
+			if (actor?.actor)
+				actor = actor.actor;
+			if (!actor) {
+				warn("could not find actor for ", idData.tokenUuid);
+				continue;
 			}
-			catch (err) {
-				console.warn("delete effects failed ", err);
-				if (debugEnabled > 0)
-					warn("delete effects failed ", err);
-				// TODO can get thrown since more than one thing tries to delete an effect
+			const effectsToDelete = actor?.effects?.filter(ef => {
+				return ef.origin === origin && !ignore.includes(ef.uuid) && (!data.ignoreTransfer || ef.flags?.dae?.transfer !== true);
+			});
+			debug("deleteItemEffects: effectsToDelete ", actor.name, effectsToDelete);
+			if (effectsToDelete?.length > 0) {
+				try {
+					// for (let ef of effectsToDelete) ef.delete();
+					await ActiveEffect.deleteDocuments(effectsToDelete.map(ef => ef.id), { parent: actor });
+					// await actor.deleteEmbeddedDocuments("ActiveEffect", effectsToDelete.map(ef => ef.id), {strict: false, invalid: false});
+				}
+				catch (err) {
+					console.warn("delete item effects failed ", actor.name, err);
+				}
+				;
 			}
-			;
+			debug("deleteItemEffects: completed", actor.name);
 		}
-	}
-	if (globalThis.Sequencer)
-		await globalThis.Sequencer.EffectManager.endEffects({ origin });
+		if (globalThis.Sequencer)
+			await globalThis.Sequencer.EffectManager.endEffects({ origin });
+	};
+	if (globalThis.DAE?.actionQueue)
+		return globalThis.DAE.actionQueue.add(deleteFunc);
+	else
+		return deleteFunc();
 }
 async function addConvenientEffect(options) {
 	let { effectName, actorUuid, origin } = options;
@@ -219,7 +258,8 @@ async function localDoReactions(data) {
 	if (data.options.itemUuid) {
 		data.options.item = MQfromUuid(data.options.itemUuid);
 	}
-	const result = await promptReactions(data.tokenUuid, data.reactionItemUuidList, data.triggerTokenUuid, data.reactionFlavor, data.triggerType, data.options);
+	// reactonItemUuidList can't used since magic items don't have a uuid, so must always look them up locally.
+	const result = await promptReactions(data.tokenUuid, [] /*data.reactionItemUuidList */, data.triggerTokenUuid, data.reactionFlavor, data.triggerType, data.options);
 	return result;
 }
 export function initGMActionSetup() {
@@ -256,18 +296,25 @@ export function monksTokenBarSaves(data) {
 		request: data.request,
 		silent: data.silent,
 		rollmode: data.rollMode,
-		dc: data.dc
+		dc: data.dc,
+		isMagicSave: data.isMagicSave
 	});
 }
 async function createReverseDamageCard(data) {
-	createPlayerDamageCard(data);
-	return createGMReverseDamageCard(data);
+	let cardIds = [];
+	let id = await createPlayerDamageCard(data);
+	if (id)
+		cardIds.push(id);
+	id = await createGMReverseDamageCard(data);
+	if (id)
+		cardIds.push(id);
+	return cardIds;
 }
 async function prepareDamageListItems(data, templateData, tokenIdList, createPromises = false, showNPC = true) {
 	const damageList = data.damageList;
 	let promises = [];
 	for (let damageItem of damageList) {
-		let { tokenId, tokenUuid, actorId, actorUuid, oldHP, oldTempHP, newTempHP, tempDamage, hpDamage, totalDamage, appliedDamage, sceneId } = damageItem;
+		let { tokenId, tokenUuid, actorId, actorUuid, oldHP, oldTempHP, newTempHP, tempDamage, hpDamage, totalDamage, appliedDamage, sceneId, oldVitality, newVitality } = damageItem;
 		let tokenDocument;
 		let actor;
 		if (tokenUuid) {
@@ -292,8 +339,13 @@ async function prepareDamageListItems(data, templateData, tokenIdList, createPro
 					promises.push(actor.update({ "system.attributes.hp.temp": newTempHP, "system.attributes.hp.value": newHP, "flags.dae.damageApplied": appliedDamage }, updateContext));
 				}
 			}
+			else if (oldVitality !== newVitality && actor.isOwner) {
+				const resource = checkRule("vitalityResource")?.trim();
+				if (resource)
+					promises.push(actor.update({ [resource]: newVitality }));
+			}
 		}
-		tokenIdList.push({ tokenId, tokenUuid, actorUuid, actorId, oldTempHP: oldTempHP, oldHP, totalDamage: Math.abs(totalDamage), newHP, newTempHP, damageItem });
+		tokenIdList.push({ tokenId, tokenUuid, actorUuid, actorId, oldTempHP: oldTempHP, oldHP, totalDamage: Math.abs(totalDamage), newHP, newTempHP, damageItem, oldVitality, newVitality });
 		let img = tokenDocument?.texture.src || actor.img;
 		if (configSettings.usePlayerPortrait && actor.type === "character")
 			img = actor?.img || tokenDocument?.texture.src;
@@ -324,6 +376,8 @@ async function prepareDamageListItems(data, templateData, tokenIdList, createPro
 			newTempHP,
 			oldTempHP,
 			oldHP,
+			oldVitality,
+			newVitality,
 			buttonId: tokenUuid,
 			iconPrefix: (data.autoApplyDamage === "yesCardNPC" && actor.type === "character") ? "*" : "",
 			updateContext: data.updateContext
@@ -356,6 +410,7 @@ async function prepareDamageListItems(data, templateData, tokenIdList, createPro
 // Fetch the token, then use the tokenData.actor.id
 async function createPlayerDamageCard(data) {
 	let shouldShow = true;
+	let chatCardUuid;
 	if (configSettings.playerCardDamageDifferent) {
 		shouldShow = false;
 		for (let damageItem of data.damageList) {
@@ -403,9 +458,10 @@ async function createPlayerDamageCard(data) {
 		};
 		if (data.flagTags)
 			chatData.flags = mergeObject(chatData.flags ?? "", data.flagTags);
-		ChatMessage.create(chatData);
+		chatCardUuid = (await ChatMessage.create(chatData))?.uuid;
 	}
 	log(`createPlayerReverseDamageCard elapsed: ${Date.now() - startTime}ms`);
+	return chatCardUuid;
 }
 // Fetch the token, then use the tokenData.actor.id
 async function createGMReverseDamageCard(data) {
@@ -414,10 +470,11 @@ async function createGMReverseDamageCard(data) {
 	const startTime = Date.now();
 	let promises = [];
 	let tokenIdList = [];
+	let chatCardUuid;
+	const damageWasApplied = ["yes", "yesCard"].includes(data.autoApplyDamage) || data.forceApply;
 	let templateData = {
-		damageApplied: (["yes", "yesCard"].includes(data.autoApplyDamage) || data.forceApply) ?
-			i18n("midi-qol.HPUpdated") :
-			data.autoApplyDamage === "yesCardNPC" ? i18n("midi-qol.HPNPCUpdated") : i18n("midi-qol.HPNotUpdated"),
+		damageWasApplied,
+		damageApplied: damageWasApplied ? i18n("midi-qol.HPUpdated") : data.autoApplyDamage === "yesCardNPC" ? i18n("midi-qol.HPNPCUpdated") : i18n("midi-qol.HPNotUpdated"),
 		damageList: [],
 		needsButtonAll: false
 	};
@@ -441,9 +498,10 @@ async function createGMReverseDamageCard(data) {
 		};
 		if (data.flagTags)
 			chatData.flags = mergeObject(chatData.flags ?? "", data.flagTags);
-		ChatMessage.create(chatData);
+		chatCardUuid = (await ChatMessage.create(chatData))?.uuid;
 	}
 	log(`createGMReverseDamageCard elapsed: ${Date.now() - startTime}ms`);
+	return chatCardUuid;
 }
 async function doClick(event, actorUuid, totalDamage, mult, data) {
 	let actor = MQfromActorUuid(actorUuid);
@@ -451,12 +509,20 @@ async function doClick(event, actorUuid, totalDamage, mult, data) {
 	await actor.applyDamage(totalDamage, mult);
 	event.stopPropagation();
 }
-async function doMidiClick(ev, actorUuid, newTempHP, newHP, mult, data) {
+async function doMidiClick(ev, actorUuid, newTempHP, newHP, newVitality, mult, data) {
 	let actor = MQfromActorUuid(actorUuid);
 	log(`Setting HP to ${newTempHP} and ${newHP}`);
-	const updateContext = mergeObject({ dhp: (newHP - actor.system.attributes.hp.value) }, data.updateContext);
-	if (actor.owner)
-		await actor.update({ "system.attributes.hp.temp": newTempHP, "system.attributes.hp.value": newHP }, updateContext);
+	let updateContext = mergeObject({ dhp: (newHP - actor.system.attributes.hp.value) }, data.updateContext);
+	if (actor.isOwner) {
+		const update = { "system.attributes.hp.temp": newTempHP, "system.attributes.hp.value": newHP };
+		if (checkRule("vitalityResource")) {
+			const resource = checkRule("vitalityResource")?.trim();
+			update[resource] = newVitality;
+			const vitalityResource = getProperty(actor, resource);
+			context["dvital"] = newVitality - vitalityResource;
+		}
+		await actor?.update(update, context);
+	}
 }
 export let processUndoDamageCard = (message, html, data) => {
 	if (!message.flags?.midiqol?.undoDamage)
@@ -464,13 +530,26 @@ export let processUndoDamageCard = (message, html, data) => {
 	let button = html.find("#all-reverse");
 	button.click((ev) => {
 		(async () => {
-			for (let { actorUuid, oldTempHP, oldHP, totalDamage, newHP, newTempHP, damageItem } of message.flags.midiqol.undoDamage) {
+			for (let { actorUuid, oldTempHP, oldHP, totalDamage, newHP, newTempHP, oldVitality, newVitality, damageItem } of message.flags.midiqol.undoDamage) {
 				//message.flags.midiqol.undoDamage.forEach(async ({ actorUuid, oldTempHP, oldHP, totalDamage, newHP, newTempHP, damageItem }) => {
 				if (!actorUuid)
 					continue;
+				const applyButton = html.find(`#apply-${actorUuid.replaceAll(".", "")}`);
+				applyButton.children()[0].classList.add("midi-qol-enable-damage-button");
+				applyButton.children()[0].classList.remove("midi-qol-disable-damage-button");
+				const reverseButton = html.find(`#reverse-${actorUuid.replaceAll(".", "")}`);
+				reverseButton.children()[0].classList.remove("midi-qol-enable-damage-button");
+				reverseButton.children()[0].classList.add("midi-qol-disable-damage-button");
 				let actor = MQfromActorUuid(actorUuid);
 				log(`Setting HP back to ${oldTempHP} and ${oldHP}`, actor);
-				await actor?.update({ "system.attributes.hp.temp": oldTempHP ?? 0, "system.attributes.hp.value": oldHP ?? 0 }, { dhp: (oldHP ?? 0) - (actor.system.attributes.hp.value ?? 0), damageItem });
+				const update = { "system.attributes.hp.temp": oldTempHP ?? 0, "system.attributes.hp.value": oldHP ?? 0 };
+				const context = { dhp: (oldHP ?? 0) - (actor.system.attributes.hp.value ?? 0), damageItem };
+				if (checkRule("vitalityResource")) {
+					const resource = checkRule("vitalityResource")?.trim();
+					update[resource] = oldVitality;
+					context["dvital"] = oldVitality - newVitality;
+				}
+				await actor?.update(update, context);
 				ev.stopPropagation();
 			}
 		})();
@@ -478,51 +557,102 @@ export let processUndoDamageCard = (message, html, data) => {
 	button = html.find("#all-apply");
 	button.click((ev) => {
 		(async () => {
-			for (let { actorUuid, oldTempHP, oldHP, totalDamage, newHP, newTempHP, damageItem } of message.flags.midiqol.undoDamage) {
+			for (let { actorUuid, oldTempHP, oldHP, totalDamage, newHP, newTempHP, damageItem, oldVitality, newVitality } of message.flags.midiqol.undoDamage) {
 				if (!actorUuid)
 					continue;
 				let actor = MQfromActorUuid(actorUuid);
+				const applyButton = html.find(`#apply-${actorUuid.replaceAll(".", "")}`);
+				applyButton.children()[0].classList.add("midi-qol-disable-damage-button");
+				applyButton.children()[0].classList.remove("midi-qol-enable-damage-button");
+				const reverseButton = html.find(`#reverse-${actorUuid.replaceAll(".", "")}`);
+				reverseButton.children()[0].classList.remove("midi-qol-disable-damage-button");
+				reverseButton.children()[0].classList.add("midi-qol-enable-damage-button");
 				log(`Setting HP to ${newTempHP} and ${newHP}`);
-				await actor?.update({ "system.attributes.hp.temp": newTempHP, "system.attributes.hp.value": newHP, }, { dhp: newHP - actor.system.attributes.hp.value, damageItem });
+				const update = { "system.attributes.hp.temp": newTempHP, "system.attributes.hp.value": newHP };
+				const context = { dhp: newHP - actor.system.attributes.hp.value, damageItem };
+				if (checkRule("vitalityResource")) {
+					const resource = checkRule("vitalityResource")?.trim();
+					update[resource] = newVitality;
+					context["dvital"] = oldVitality - newVitality;
+				}
+				if (actor.isOwner)
+					await actor.update(update, context);
 				ev.stopPropagation();
 			}
 		})();
 	});
-	message.flags.midiqol.undoDamage.forEach(({ actorUuid, oldTempHP, oldHP, totalDamage, newHP, newTempHP, damageItem }) => {
+	message.flags.midiqol.undoDamage.forEach(({ actorUuid, oldTempHP, oldHP, totalDamage, newHP, newTempHP, oldVitality, newVitality, damageItem }) => {
 		if (!actorUuid)
 			return;
 		// ids should not have "." in the or it's id.class
 		let button = html.find(`#reverse-${actorUuid.replaceAll(".", "")}`);
+		// button.click((ev: { stopPropagation: () => void; }) => {
 		button.click((ev) => {
+			ev.currentTarget.children[0].classList.add("midi-qol-disable-damage-button");
+			ev.currentTarget.children[0].classList.remove("midi-qol-enable-damage-button");
+			const otherButton = html.find(`#apply-${actorUuid.replaceAll(".", "")}`);
+			otherButton.children()[0].classList.remove("midi-qol-disable-damage-button");
+			otherButton.children()[0].classList.add("midi-qol-enable-damage-button");
 			(async () => {
 				let actor = MQfromActorUuid(actorUuid);
 				log(`Setting HP back to ${oldTempHP} and ${oldHP}`, data.updateContext);
+				const update = { "system.attributes.hp.temp": oldTempHP ?? 0, "system.attributes.hp.value": oldHP ?? 0 };
+				const context = { dhp: (oldHP ?? 0) - (actor.system.attributes.hp.value ?? 0), damageItem };
+				if (checkRule("vitalityResource")) {
+					const resource = checkRule("vitalityResource")?.trim();
+					update[resource] = oldVitality;
+					context["dvital"] = newVitality - oldVitality;
+				}
 				if (actor.isOwner)
-					await actor.update({ "system.attributes.hp.temp": oldTempHP, "system.attributes.hp.value": oldHP }, { dhp: oldHP - actor.system.attributes.hp.value, damageItem });
+					await actor.update(update, context);
 				ev.stopPropagation();
 			})();
 		});
 		// Default action of button is to do midi damage
 		button = html.find(`#apply-${actorUuid.replaceAll(".", "")}`);
 		button.click((ev) => {
+			ev.currentTarget.children[0].classList.add("midi-qol-disable-damage-button");
+			ev.currentTarget.children[0].classList.remove("midi-qol-enable-damage-button");
+			const otherButton = html.find(`#reverse-${actorUuid.replaceAll(".", "")}`);
+			otherButton.children()[0].classList.remove("midi-qol-disable-damage-button");
+			otherButton.children()[0].classList.add("midi-qol-enable-damage-button");
+			let multiplierString = html.find(`#dmg-multiplier-${actorUuid.replaceAll(".", "")}`).val();
+			const mults = { "-1": -1, "x1": 1, "x0.25": 0.25, "x0.5": 0.5, "x2": 2 };
+			let multiplier = 1;
 			(async () => {
 				let actor = MQfromActorUuid(actorUuid);
 				log(`Setting HP to ${newTempHP} and ${newHP}`, data.updateContext);
-				if (actor.isOwner)
-					await actor.update({ "system.attributes.hp.temp": newTempHP, "system.attributes.hp.value": newHP }, { dhp: newHP - actor.system.attributes.hp.value, damageItem });
+				if (mults[multiplierString]) {
+					multiplier = mults[multiplierString];
+					await actor.applyDamage(totalDamage, multiplier);
+				}
+				else {
+					const update = { "system.attributes.hp.temp": newTempHP, "system.attributes.hp.value": newHP };
+					const context = { dhp: newHP - actor.system.attributes.hp.value, damageItem };
+					if (checkRule("vitalityResource")) {
+						const resource = checkRule("vitalityResource")?.trim();
+						update[resource] = newVitality;
+						context["dvital"] = oldVitality - newVitality;
+					}
+					if (actor.isOwner)
+						await actor.update(update, context);
+				}
 				ev.stopPropagation();
 			})();
 		});
 		let select = html.find(`#dmg-multiplier-${actorUuid.replaceAll(".", "")}`);
 		select.change((ev) => {
+			return true;
 			let multiplier = html.find(`#dmg-multiplier-${actorUuid.replaceAll(".", "")}`).val();
 			button = html.find(`#apply-${actorUuid.replaceAll(".", "")}`);
 			button.off('click');
 			const mults = { "-1": -1, "x1": 1, "x0.25": 0.25, "x0.5": 0.5, "x2": 2 };
 			if (multiplier === "calc")
-				button.click(async (ev) => await doMidiClick(ev, actorUuid, newTempHP, newHP, 1, data));
+				// button.click(async (ev: any) => await doMidiClick(ev, actorUuid, newTempHP, newHP, newVitality, 1, data));
+				doMidiClick(ev, actorUuid, newTempHP, newHP, newVitality, 1, data);
 			else if (mults[multiplier])
-				button.click(async (ev) => await doClick(ev, actorUuid, totalDamage, mults[multiplier], data));
+				// button.click(async (ev: any) => await doClick(ev, actorUuid, totalDamage, mults[multiplier], data));
+				doClick(ev, actorUuid, totalDamage, mults[multiplier], data);
 		});
 	});
 	return true;

@@ -2,7 +2,7 @@
 // window.Azzu.ExtendedSettingsConfig is guaranteed to be initialized after Hooks->ready
 
 const SETTINGS_EXTENDER_VERSION = {
-	version: `1.2.1`,
+	version: `1.2.2`,
 	get major() {
 		return this.version.split(`.`)[0];
 	},

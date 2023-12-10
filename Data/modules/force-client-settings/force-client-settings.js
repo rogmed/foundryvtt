@@ -77,7 +77,7 @@ class ForceClientSettings {
       ForceClientSettings.moduleName,
       "ClientSettings.prototype.get",
       ForceClientSettings.settingsGet,
-      "WRAPPER"
+      "MIXED"
     );
     libWrapper.register(
       ForceClientSettings.moduleName,
@@ -158,12 +158,8 @@ class ForceClientSettings {
         return await wrapped(namespace, key, value, ...args);
       } else {
         if (forced.mode !== "soft" || !ForceClientSettings.unlocked.has(`${namespace}.${key}`)) {
-          return await wrapped(
-            namespace,
-            key,
-            game.settings.get(ForceClientSettings.moduleName, `_${namespace}.${key}`),
-            ...args
-          );
+          let forcedValue = game.settings.get(ForceClientSettings.moduleName, `_${namespace}.${key}`);
+          return await wrapped(namespace, key, forcedValue, ...args);
         } else {
           return await wrapped(namespace, key, value, ...args);
         }
@@ -180,11 +176,11 @@ class ForceClientSettings {
     const isGM = ForceClientSettings.isGM();
     const fa = {
       "hard-gm": "fa-lock",
-      "soft-gm": "fa-unlock",
-      "open-gm": "fa-lock-open",
+      "soft-gm": "fa-unlock-keyhole",
+      "open-gm": "fa-lock-keyhole-open",
       "hard-client": "fa-lock",
-      "soft-client": "fa-unlock",
-      "unlocked-client": "fa-lock-open",
+      "soft-client": "fa-unlock-keyhole",
+      "unlocked-client": "fa-lock-keyhole-open",
     };
 
     const elem = html.find(".form-group:not(.submenu)");
@@ -373,8 +369,8 @@ class ForceClientSettingsConfig extends FormApplication {
   getData(options) {
     const fa = {
       hard: "fa-lock",
-      soft: "fa-unlock",
-      open: "fa-lock-open",
+      soft: "fa-unlock-keyhole",
+      open: "fa-lock-keyhole-open",
     };
     const namespace_blacklist = ["force-client-settings", "force-client-controls"];
     return {

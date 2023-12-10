@@ -2,13 +2,20 @@
   "id": "midi-qol",
   "title": "Midi QOL",
   "description": "Automates rolling weapon/spell attacks and applying damage",
-
-  "version": "10.0.30",
-  "authors": [{ "name": "tposney" }],
+  "version": "10.0.61",
+  "authors": [
+    {
+      "name": "tposney",
+      "flags": {}
+    }
+  ],
   "socket": true,
-  "scripts": [],
-  "esmodules": ["src/midi-qol.js"],
-  "styles": ["css/styles.css"],
+  "esmodules": [
+    "src/midi-qol.js"
+  ],
+  "styles": [
+    "css/styles.css"
+  ],
   "relationships": {
     "systems": [
       {
@@ -22,19 +29,25 @@
         "id": "sw5e",
         "type": "system",
         "compatibility": {
-          "minimum": "2.0.2.2.2.5",
-          "compatible": "2.0.2.2.2.5"
+          "minimum": "2.0.2.2.2.5"
         }
       }
     ],
     "requires": [
       {
         "id": "socketlib",
-        "type": "module"
+        "type": "module",
+        "compatibility": {}
       },
       {
         "id": "lib-wrapper",
-        "type": "module"
+        "type": "module",
+        "compatibility": {}
+      },
+      {
+        "id": "dae",
+        "type": "module",
+        "compatibility": {}
       }
     ]
   },
@@ -42,59 +55,67 @@
     {
       "name": "midiqol-sample-items",
       "label": "MidiQOL Sample Items",
-      "path": "./packs/sampleitems.db",
-      "module": "world",
+      "path": "packs/sampleitems.db",
+      "private": false,
       "type": "Item",
       "system": "dnd5e",
-      "lang": []
+      "flags": {}
     }
   ],
   "languages": [
     {
       "lang": "en",
       "name": "English",
-      "path": "lang/en.json"
+      "path": "lang/en.json",
+      "flags": {}
     },
     {
       "lang": "ja",
-      "name": " 日本語",
-      "path": "lang/ja.json"
+      "name": "日本語",
+      "path": "lang/ja.json",
+      "flags": {}
     },
     {
       "lang": "ko",
       "name": "Korean",
-      "path": "lang/ko.json"
+      "path": "lang/ko.json",
+      "flags": {}
     },
     {
       "lang": "fr",
       "name": "Français",
-      "path": "lang/fr.json"
+      "path": "lang/fr.json",
+      "flags": {}
     },
     {
       "lang": "pt-BR",
       "name": "Português (Brasil)",
-      "path": "lang/pt-BR.json"
+      "path": "lang/pt-BR.json",
+      "flags": {}
     },
     {
       "lang": "es",
       "name": "Spanish",
-      "path": "lang/es.json"
+      "path": "lang/es.json",
+      "flags": {}
     },
     {
       "lang": "de",
       "name": "Deutsch",
-      "path": "lang/de.json"
+      "path": "lang/de.json",
+      "flags": {}
     },
     {
       "lang": "it",
       "name": "Italian",
-      "path": "lang/it.json"
+      "path": "lang/it.json",
+      "flags": {}
     }
   ],
   "compatibility": {
-    "minimum": 10.286,
-    "verified": 10,
-    "maximum": 10
+    "minimum": "10.286",
+    "verified": "10.999",
+    "maximum": "11.999"
   },
   "bugs": "https://gitlab.com/tposney/midi-qol/-/issues",
   "flags": {
@@ -102,6 +123,6 @@
   },
   "url": "https://gitlab.com/tposney/midi-qol",
   "manifest": "https://gitlab.com/tposney/midi-qol/raw/v10/package/module.json",
-  "download": "https://gitlab.com/tposney/midi-qol/raw/v10/package/midi-qol-v10.0.30.zip",
+  "download": "https://gitlab.com/tposney/midi-qol/raw/v10/package/midi-qol-v10.0.61.zip",
   "changelog": "https://gitlab.com/tposney/midi-qol/raw/v10/Changelog.md"
 }

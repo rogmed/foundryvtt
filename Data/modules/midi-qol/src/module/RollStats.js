@@ -25,19 +25,6 @@ let blankStats = {
 	itemStats: {}
 };
 export class RollStats {
-	constructor() {
-		this.headerLine = `"Actor", "Item Name", "#Attacks", "# Nat20", "#Fumbles", "#Critical", "Attack Roll Dice Total", "Attack Roll Total", "Damage Rolls", "Total Damage Applied", "Damage Total"`;
-		game.settings.register("midi-qol", "RollStats", {
-			scope: "world",
-			default: {},
-			type: Object,
-			config: false,
-			onChange: fetchStats
-		});
-		//@ts-ignore
-		this.currentStats = game.settings.get("midi-qol", "RollStats");
-		this.rollCount = 0;
-	}
 	showStats() {
 		new RollStatsDisplay(this, { playersOnly: configSettings.playerStatsOnly }).render(true);
 	}
@@ -89,6 +76,19 @@ export class RollStats {
 			currentStats.itemStats[item.name] = { name: item.name, session: duplicate(blankStat) };
 		}
 		return currentStats.itemStats[item.name];
+	}
+	constructor() {
+		this.headerLine = `"Actor", "Item Name", "#Attacks", "# Nat20", "#Fumbles", "#Critical", "Attack Roll Dice Total", "Attack Roll Total", "Damage Rolls", "Total Damage Applied", "Damage Total"`;
+		game.settings.register("midi-qol", "RollStats", {
+			scope: "world",
+			default: {},
+			type: Object,
+			config: false,
+			onChange: fetchStats
+		});
+		//@ts-ignore
+		this.currentStats = game.settings.get("midi-qol", "RollStats");
+		this.rollCount = 0;
 	}
 	async endSession() {
 		if (!game.user?.isGM)

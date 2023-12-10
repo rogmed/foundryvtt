@@ -1,5 +1,10 @@
 # Force Client Settings
 
+## Release 2.3.3
+
+- Fix module manifest for v10 and v11 compatibility
+- Change open and soft-lock icons for clarity
+
 ## Release 2.3.2
 
 - Fix minor UI garbage

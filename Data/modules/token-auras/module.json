@@ -2,10 +2,10 @@
   "id": "token-auras",
   "title": "Token Auras",
   "description": "Provide options for configuring token auras.",
-  "version": "2.3",
+  "version": "2.7",
   "compatibility": {
     "minimum": "10",
-    "verified": "10"
+    "verified": "11"
   },
   "authors": [
     {
@@ -18,7 +18,7 @@
   ],
   "url": "https://bitbucket.org/Fyorl/token-auras",
   "manifest": "https://bitbucket.org/Fyorl/token-auras/raw/master/module.json",
-  "download": "https://bitbucket.org/Fyorl/token-auras/get/2.3.zip",
+  "download": "https://bitbucket.org/Fyorl/token-auras/get/2.7.zip",
   "languages": [
     {
       "lang": "en",

@@ -1,13 +1,13 @@
 {
   "title": "Force Client Settings",
   "description": "Allows to force chosen settings for all clients to the defaults provided by the GM.",
-  "version": "2.3.2",
+  "version": "2.3.3",
   "scripts": [
     "force-client-settings.js"
   ],
   "manifest": "https://gitlab.com/kimitsu_desu/force-client-settings/-/raw/main/module.json",
   "url": "https://gitlab.com/kimitsu_desu/force-client-settings",
-  "download": "https://gitlab.com/kimitsu_desu/force-client-settings/-/jobs/artifacts/2.3.2/raw/force-client-settings.zip?job=pack",
+  "download": "https://gitlab.com/kimitsu_desu/force-client-settings/-/jobs/artifacts/2.3.3/raw/force-client-settings.zip?job=pack",
   "bugs": "https://gitlab.com/kimitsu_desu/force-client-settings/-/issues",
   "license": "https://gitlab.com/kimitsu_desu/force-client-settings/-/raw/main/LICENSE",
   "languages": [
@@ -42,7 +42,7 @@
     ]
   },
   "compatibility": {
-    "minimum": "0.6.5",
-    "verified": "10"
+    "minimum": "10",
+    "verified": "11"
   }
 }

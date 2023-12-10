@@ -1,8 +1,8 @@
 import { debug, warn, i18n, error, gameStats, debugEnabled, MQdefaultDamageType, i18nFormat } from "../midi-qol.js";
-import { dice3dEnabled, installedModules } from "./setupModules.js";
+import { installedModules } from "./setupModules.js";
 import { BetterRollsWorkflow, DDBGameLogWorkflow, Workflow, WORKFLOWSTATES } from "./workflow.js";
 import { nsaFlag, coloredBorders, addChatDamageButtons, configSettings, forceHideRoll } from "./settings.js";
-import { createDamageList, MQfromUuid, playerFor, playerForActor, applyTokenDamage, doOverTimeEffect, isInCombat } from "./utils.js";
+import { createDamageList, MQfromUuid, playerFor, playerForActor, applyTokenDamage, doOverTimeEffect, isInCombat, getConcentrationLabel } from "./utils.js";
 import { shouldRollOtherDamage } from "./itemhandling.js";
 import { socketlibSocket } from "./GMAction.js";
 export const MAESTRO_MODULE_NAME = "maestro";
@@ -184,13 +184,11 @@ export let processCreateBetterRollsMessage = (message, user) => {
 	if (!workflow.tokenId)
 		workflow.tokenId = token?.id;
 	if (configSettings.concentrationAutomation) {
-		const concentrationName = installedModules.get("combat-utility-belt")
-			? game.settings.get("combat-utility-belt", "concentratorConditionName")
-			: i18n("midi-qol.Concentrating");
+		const concentrationLabel = getConcentrationLabel();
 		const needsConcentration = workflow.item?.system.components?.concentration || workflow.item?.system.activation?.condition?.includes("Concentration");
 		const checkConcentration = configSettings.concentrationAutomation;
 		if (needsConcentration && checkConcentration) {
-			const concentrationCheck = item.actor.effects.find(i => i.label === concentrationName);
+			const concentrationCheck = item.actor.effects.find(i => (i.name || i.label) === concentrationLabel);
 			if (concentrationCheck)
 				concentrationCheck.delete();
 			// if (needsConcentration)addConcentration({workflow});
@@ -221,55 +219,6 @@ export let processCreateBetterRollsMessage = (message, user) => {
 	}
 	if (!workflow.needTemplate)
 		workflow.next(WORKFLOWSTATES.NONE);
-	return true;
-};
-export let diceSoNiceHandler = async (message, html, data) => {
-	//@ts-ignore game.dice3d
-	if (!dice3dEnabled())
-		return;
-	if (debugEnabled > 1)
-		debug("Dice so nice handler ", message, html, data);
-	// Roll the 3d dice if we are a gm, or the message is not blind and we are the author or a recipient (includes public)
-	let rollDice = game.user?.isGM ||
-		(!message.blind && (message.isAuthor || message.whisper.length === 0 || message.whisper?.includes(game.user?.id)));
-	if (!rollDice) {
-		return;
-	}
-	if (configSettings.mergeCard) {
-		return;
-	}
-	if (!getProperty(message, "flags.midi-qol.waitForDiceSoNice"))
-		return;
-	if (debugEnabled > 1)
-		debug("dice so nice handler - non-merge card", html);
-	// better rolls handles delaying the chat card until complete.
-	if (!configSettings.mergeCard && installedModules.get("betterrolls5e"))
-		return;
-	html.hide();
-	Hooks.once("diceSoNiceRollComplete", (id) => {
-		let savesDisplay = $(html).find(".midi-qol-saves-display").length === 1;
-		let hitsDisplay = configSettings.mergeCard ?
-			$(html).find(".midi-qol-hits-display").length === 1
-			: $(html).find(".midi-qol-single-hit-card").length === 1;
-		if (savesDisplay) {
-			if (game.user?.isGM || (configSettings.autoCheckSaves !== "whisper" && !message.blind))
-				html.show();
-		}
-		else if (hitsDisplay) {
-			if (game.user?.isGM || (configSettings.autoCheckHit !== "whisper" && !message.blind))
-				html.show();
-		}
-		else {
-			html.show();
-			//@ts-ignore
-			ui.chat.scrollBottom();
-			setTimeout(() => {
-				html.show();
-				//@ts-ignore
-				ui.chat.scrollBottom();
-			}, 3000); // backup display of messages
-		}
-	});
 	return true;
 };
 export let colorChatMessageHandler = (message, html, data) => {
@@ -410,8 +359,7 @@ export let hideRollUpdate = (message, data, diff, id) => {
 export let hideStuffHandler = (message, html, data) => {
 	if (debugEnabled > 1)
 		debug("hideStuffHandler message: ", message.id, message);
-	if (getProperty(message, "flags.monks-tokenbar"))
-		return;
+	// if (getProperty(message, "flags.monks-tokenbar")) return;
 	const midiqolFlags = getProperty(message, "flags.midi-qol");
 	// Hide non midi rolls which are blind and not the GM if force hide is true
 	if (forceHideRoll && !midiqolFlags && message.blind && !game.user?.isGM) {
@@ -711,7 +659,7 @@ export function processItemCardCreation(message, user) {
 }
 export async function onChatCardAction(event) {
 	event.preventDefault();
-	// Extract card data
+	// Extract card data - TODO come back and clean up this nastiness
 	const button = event.currentTarget;
 	button.disabled = true;
 	const card = button.closest(".chat-card");

@@ -1,4 +1,7 @@
 {
+	"AURAS.All": "Alle",
 	"AURAS.Auras": "Auren",
-	"AURAS.Opacity": "Transparenz"
+	"AURAS.AuraColour": "Aura Farbe",
+	"AURAS.Opacity": "Transparenz",
+	"AURAS.ShowTo": "Zeige Aura für"
 }

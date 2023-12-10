@@ -4,7 +4,7 @@ import { SoundConfigPanel } from "./apps/SoundConfigPanel.js";
 import { configureDamageRollDialog } from "./patching.js";
 export var itemRollButtons;
 export var criticalDamage;
-export var itemDeleteCheck;
+export var criticalDamageGM;
 export var nsaFlag;
 export var coloredBorders;
 export var saveRequests = {};
@@ -105,6 +105,9 @@ class ConfigSettings {
 		this.rollNPCSaves = "auto";
 		this.rollOtherDamage = "none";
 		this.rollOtherSpellDamage = "none";
+		this.rollChecksBlind = false;
+		this.rollSavesBlind = false;
+		this.rollSkillsBlind = false;
 		this.saveStatsEvery = 20;
 		this.showFastForward = false;
 		this.showItemDetails = "";
@@ -122,13 +125,14 @@ class ConfigSettings {
 		this.useCustomSounds = true;
 		this.usePlayerPortrait = false;
 		this.useTokenNames = false;
+		this.undoWorkflow = false;
 		this.weaponHitSound = "";
 		this.weaponUseSound = "";
 		this.weaponUseSoundRanged = "";
 		this.rollAlternate = "off";
 		this.optionalRules = {
 			invisAdvantage: true,
-			checkRange: true,
+			checkRange: "longFail",
 			wallsBlockRange: "center",
 			coverCalculation: "none",
 			nearbyFoe: 5,
@@ -139,11 +143,14 @@ class ConfigSettings {
 			distanceIncludesHeight: false,
 			criticalSaves: false,
 			activeDefence: false,
+			activeDefenceShowGM: false,
 			challengModeArmor: false,
 			checkFlanking: "off",
 			optionalCritRule: -1,
 			criticalNat20: false,
-			actionSpecialDurationImmediate: false
+			actionSpecialDurationImmediate: false,
+			vitalityResource: "system.resources.primary",
+			autoRerollInitiative: false
 		};
 	}
 }
@@ -165,7 +172,7 @@ export function collectSettingData() {
 		midiSoundSettings,
 		itemRollButtons,
 		criticalDamage,
-		itemDeleteCheck,
+		criticalDamageGM,
 		nsaFlag,
 		coloredBorders,
 		addChatDamageButtons,
@@ -187,9 +194,11 @@ export function collectSettingData() {
 		//@ts-ignore version v10
 		abouttimeVersion: game.modules.get("about-time")?.version,
 		//@ts-ignore version v10
-		betterRollsVersion: game.modules.get("betterrolls5e")?.version,
+		betterRollsVersion: game.modules.get("ready-set-roll-5e")?.version,
 		//@ts-ignore version v10
 		cubVersion: game.modules.get("combat-utility-belt")?.version,
+		//@ts-expect-error .version
+		cltVersion: game.modules.get("condition-lab-triggler")?.version,
 		//@ts-ignore version v10
 		daeVersion: game.modules.get("dae")?.version,
 		//@ts-ignore version v10
@@ -240,7 +249,7 @@ export async function importSettingsFromJSON(json) {
 	game.settings.set("midi-qol", "ConfigSettings", json.configSettings);
 	game.settings.set("midi-qol", "ItemRollButtons", json.itemRollButtons);
 	game.settings.set("midi-qol", "CriticalDamage", json.criticalDamage);
-	game.settings.set("midi-qol", "ItemDeleteCheck", json.itemDeleteCheck);
+	game.settings.set("midi-qol", "CriticalDamageGM", json.criticalDamageGM);
 	game.settings.set("midi-qol", "showGM", json.nsaFlag);
 	game.settings.set("midi-qol", "ColoredBorders", json.coloredBorders);
 	game.settings.set("midi-qol", "AddChatDamageButtons", json.addChatDamageButtons);
@@ -292,6 +301,12 @@ export let fetchParams = () => {
 		configSettings.rollOtherDamage = "none";
 	if (!configSettings.rollOtherSpellDamage)
 		configSettings.rollOtherSpellDamage = "none";
+	if (!configSettings.rollChecksBlind)
+		configSettings.rollChecksBlind = false;
+	if (!configSettings.rollSavesBlind)
+		configSettings.rollSavesBlind = false;
+	if (!configSettings.rollSkillsBlind)
+		configSettings.rollSkillsBlind = false;
 	if (configSettings.promptDamageRoll === undefined)
 		configSettings.promptDamageRoll = false;
 	if (configSettings.gmHide3dDice === undefined)
@@ -376,7 +391,7 @@ export let fetchParams = () => {
 		configSettings.highlightSuccess = false;
 	configSettings.optionalRules = mergeObject({
 		invisAdvantage: true,
-		checkRange: true,
+		checkRange: "longfail",
 		wallsBlockRange: "center",
 		coverCalculation: "none",
 		nearbyFoe: 5,
@@ -387,6 +402,7 @@ export let fetchParams = () => {
 		distanceIncludesHeight: false,
 		criticalSaves: false,
 		activeDefence: false,
+		activeDefenceShowGM: false,
 		challengeModeArmor: false,
 		challengeModeArmorScale: false,
 		checkFlanking: "off",
@@ -402,6 +418,10 @@ export let fetchParams = () => {
 		configSettings.optionalRules.coverCalculation = "none";
 	if (configSettings.optionalRules.checkFlanking === false)
 		configSettings.optionalRules.checkFlanking = "off";
+	if (configSettings.optionalRules.checkRange === true)
+		configSettings.optionalRules.checkRange = "longfail";
+	if (!configSettings.optionalRules.checkRange)
+		configSettings.optionalRules.checkRange = "none";
 	if (typeof configSettings.requireMagical !== "string" && configSettings.requireMagical !== true)
 		configSettings.requireMagical = "off";
 	if (typeof configSettings.requireMagical !== "string" && configSettings.requireMagical === true)
@@ -433,8 +453,10 @@ export let fetchParams = () => {
 		configSettings.attackPerTarget = false;
 	if (configSettings.autoRemoveTemplate === undefined)
 		configSettings.autoRemoveTemplate = true;
-	if (configSettings.removeConcentrationEffects === "undefined")
+	if (configSettings.removeConcentrationEffects === undefined)
 		configSettings.removeConcentrationEffects = "effects";
+	if (configSettings.undoWorkflow === undefined)
+		configSettings.undoWorkflow = false;
 	configSettings.hidePlayerDamageCard = true;
 	configSettings.quickSettings = true;
 	enableWorkflow = Boolean(game.settings.get("midi-qol", "EnableWorkflow"));
@@ -443,7 +465,9 @@ export let fetchParams = () => {
 	criticalDamage = String(game.settings.get("midi-qol", "CriticalDamage"));
 	if (criticalDamage === "none")
 		criticalDamage = "default";
-	itemDeleteCheck = Boolean(game.settings.get("midi-qol", "ItemDeleteCheck"));
+	criticalDamageGM = String(game.settings.get("midi-qol", "CriticalDamageGM"));
+	if (criticalDamageGM === "none")
+		criticalDamageGM = criticalDamage;
 	nsaFlag = Boolean(game.settings.get("midi-qol", "showGM"));
 	coloredBorders = String(game.settings.get("midi-qol", "ColoredBorders"));
 	itemRollButtons = Boolean(game.settings.get("midi-qol", "ItemRollButtons"));
@@ -492,15 +516,6 @@ const settings = [
 		scope: "world",
 		default: true,
 		type: Boolean,
-		onChange: fetchParams
-	},
-	{
-		name: "ItemDeleteCheck",
-		scope: "client",
-		default: true,
-		type: Boolean,
-		choices: [],
-		config: true,
 		onChange: fetchParams
 	},
 	{
@@ -560,8 +575,28 @@ const settings = [
 		config: false
 	}
 ];
+export function readySettingsSetup() {
+	if (game.settings.get("midi-qol", "CriticalDamage") === "none") {
+		criticalDamage = "default;";
+		game.settings.set("midi-qol", "CriticalDamage", "default");
+	}
+	if (game.settings.get("midi-qol", "CriticalDamageGM") === "none") {
+		criticalDamageGM = criticalDamage;
+		game.settings.set("midi-qol", "CriticalDamageGM", criticalDamage);
+	}
+}
 export function registerSetupSettings() {
 	const translations = geti18nTranslations();
+	game.settings.register("midi-qol", "CriticalDamageGM", {
+		name: "midi-qol.CriticalDamageGM.Name",
+		// hint: "midi-qol.CriticalDamageGM.Hint",
+		scope: "world",
+		default: "none",
+		type: String,
+		config: true,
+		choices: translations["CriticalDamageChoices"],
+		onChange: fetchParams
+	});
 	game.settings.register("midi-qol", "CriticalDamage", {
 		name: "midi-qol.CriticalDamage.Name",
 		hint: "midi-qol.CriticalDamage.Hint",
@@ -592,11 +627,21 @@ export const registerSettings = function () {
 			options.choices = setting.choices;
 		game.settings.register("midi-qol", setting.name, options);
 	});
+	game.settings.register("midi-qol", "CriticalDamageGM", {
+		name: "midi-qol.CriticalDamageGM.Name",
+		// hint: "midi-qol.CriticalDamageGM.Hint",
+		scope: "world",
+		default: "none",
+		type: String,
+		config: true,
+		choices: translations["CriticalDamageChoices"],
+		onChange: fetchParams
+	});
 	game.settings.register("midi-qol", "CriticalDamage", {
 		name: "midi-qol.CriticalDamage.Name",
 		hint: "midi-qol.CriticalDamage.Hint",
 		scope: "world",
-		default: "none",
+		default: "default",
 		type: String,
 		config: true,
 		choices: translations["CriticalDamageChoices"],
@@ -709,6 +754,20 @@ export const registerSettings = function () {
 		type: Boolean,
 		config: true,
 		default: false,
+		//@ts-ignore v10
+		requiresReload: true
+	});
+	game.settings.register("midi-qol", "last-run-version", {
+		type: String,
+		config: false,
+		default: "0.0.0",
+		//@ts-ignore v10
+		requiresReload: true
+	});
+	game.settings.register("midi-qol", "instanceId", {
+		type: String,
+		config: false,
+		default: "",
 		//@ts-ignore v10
 		requiresReload: true
 	});

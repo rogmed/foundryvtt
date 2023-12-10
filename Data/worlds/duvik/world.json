@@ -3,12 +3,12 @@
   "id": "duvik",
   "system": "dnd5e",
   "background": "images/portadas/puerta-de-baldur.png",
-  "coreVersion": "10.291",
+  "coreVersion": "10.312",
   "compatibility": {
     "minimum": "10",
-    "verified": "10"
+    "verified": "10.312"
   },
-  "systemVersion": "2.1.5",
+  "systemVersion": "2.4.0",
   "packs": [
     {
       "name": "equipo",

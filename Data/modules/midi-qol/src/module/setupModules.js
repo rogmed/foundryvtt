@@ -1,16 +1,16 @@
-import { error, debugEnabled, i18n } from "../midi-qol.js";
+import { error, debugEnabled } from "../midi-qol.js";
 import { log } from "../midi-qol.js";
-import { configSettings } from "./settings.js";
 const modules = {
 	"about-time": "0.0",
 	"anonymous": "0.0.0",
 	"combat-utility-belt": "1.3.8",
-	"dae": "10.0.9",
+	"condition-lab-triggler": "1.4",
+	"dae": "10.0.30",
 	"ddb-game-log": "0.0.0",
 	"df-templates": "1.0.0",
-	"dfreds-convenient-effects": "2.1.0",
+	"dfreds-convenient-effects": "4.1.0",
 	"dice-so-nice": "4.1.1",
-	"itemacro": "1.0.0",
+	"itemacro": "0.0.0",
 	"levels": "3.0.6",
 	"levelsautocover": "1.4",
 	"levelsvolumetrictemplates": "0.0.0",
@@ -41,7 +41,7 @@ export let setupModules = () => {
 				error(`midi-qol requires ${name} to be of version ${modules[name]} or later, but it is version ${game.modules.get(name)?.version}`);
 			}
 			else
-				console.warn(`midi-qol | module ${name} not active - some features disabled`);
+				console.warn(`midi-qol | optional module ${name} not active - some features disabled`);
 		}
 	}
 	if (debugEnabled > 0) {
@@ -56,8 +56,7 @@ export function dice3dEnabled() {
 }
 export function checkModules() {
 	if (game.user?.isGM && !installedModules.get("socketlib")) {
-		//@ts-ignore expected one argument but got 2
-		ui.notifications.error("midi-qol.NoSocketLib", { permanent: true, localize: true });
+		ui.notifications?.error("midi-qol.NoSocketLib", { permanent: true, localize: true });
 	}
 	//@ts-ignore
 	const midiVersion = game.modules.get("midi-qol").version;
@@ -65,23 +64,8 @@ export function checkModules() {
 	checkCubInstalled();
 }
 export function checkCubInstalled() {
-	return;
-	if (game.user?.isGM && configSettings.concentrationAutomation && !installedModules.get("combat-utility-belt")) {
-		let d = new Dialog({
-			// localize this text
-			title: i18n("midi-qol.confirm"),
-			content: i18n("midi-qol.NoCubInstalled"),
-			buttons: {
-				one: {
-					icon: '<i class="fas fa-check"></i>',
-					label: "OK",
-					callback: () => {
-						configSettings.concentrationAutomation = false;
-					}
-				}
-			},
-			default: "one"
-		});
-		d.render(true);
+	//@ts-expect-error game.version
+	if (game.user?.isGM && installedModules.get("combat-utility-belt") && isNewerVersion(game.version, "11.0")) {
+		ui.notifications?.warn("midi-qol.cubNotSupported", { permanent: true, localize: true });
 	}
 }

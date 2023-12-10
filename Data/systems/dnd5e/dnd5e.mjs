@@ -90,17 +90,6 @@ class AdvancementConfig extends FormApplication {
       showClassRestrictions: this.item.type === "class",
       showLevelSelector: !this.advancement.constructor.metadata.multiLevel
     };
-    Object.defineProperty(context, "data", {
-      get() {
-        foundry.utils.logCompatibilityWarning(
-          `You are accessing the ${this.constructor.name}#data object which is no longer used. `
-          + "Since 2.1 the Advancement class and its contained DataModel are merged into a combined data structure. "
-          + "You should now reference keys which were previously contained within the data object directly.",
-          { since: "DnD5e 2.1", until: "DnD5e 2.2" }
-        );
-        return context;
-      }
-    });
     return context;
   }
 
@@ -111,7 +100,7 @@ class AdvancementConfig extends FormApplication {
    * @param {object} configuration  Configuration object.
    * @returns {object}              Modified configuration.
    */
-  prepareConfigurationUpdate(configuration) {
+  async prepareConfigurationUpdate(configuration) {
     return configuration;
   }
 
@@ -138,17 +127,7 @@ class AdvancementConfig extends FormApplication {
   /** @inheritdoc */
   async _updateObject(event, formData) {
     let updates = foundry.utils.expandObject(formData);
-    if ( updates.data ) {
-      foundry.utils.logCompatibilityWarning(
-        "An update being performed on an advancement points to `data`. Advancement data has moved to the top level so the"
-        + " leading `data.` is no longer required.",
-        { since: "DnD5e 2.1", until: "DnD5e 2.2" }
-      );
-      const data = updates.data;
-      delete updates.data;
-      updates = { ...updates, ...data };
-    }
-    if ( updates.configuration ) updates.configuration = this.prepareConfigurationUpdate(updates.configuration);
+    if ( updates.configuration ) updates.configuration = await this.prepareConfigurationUpdate(updates.configuration);
     await this.advancement.update(updates);
   }
 
@@ -215,19 +194,22 @@ class AdvancementConfig extends FormApplication {
     try {
       this._validateDroppedItem(event, item);
     } catch(err) {
-      return ui.notifications.error(err.message);
+      ui.notifications.error(err.message);
+      return null;
     }
 
     const existingItems = foundry.utils.getProperty(this.advancement.configuration, this.options.dropKeyPath);
 
     // Abort if this uuid is the parent item
     if ( item.uuid === this.item.uuid ) {
-      return ui.notifications.error(game.i18n.localize("DND5E.AdvancementItemGrantRecursiveWarning"));
+      ui.notifications.error("DND5E.AdvancementItemGrantRecursiveWarning", {localize: true});
+      return null;
     }
 
     // Abort if this uuid exists already
     if ( existingItems.includes(item.uuid) ) {
-      return ui.notifications.warn(game.i18n.localize("DND5E.AdvancementItemGrantDuplicateWarning"));
+      ui.notifications.warn("DND5E.AdvancementItemGrantDuplicateWarning", {localize: true});
+      return null;
     }
 
     await this.advancement.update({[`configuration.${this.options.dropKeyPath}`]: [...existingItems, item.uuid]});
@@ -323,6 +305,17 @@ class AdvancementFlow extends FormApplication {
 
   /* -------------------------------------------- */
 
+  /**
+   * Set the retained data for this flow. This method gives the flow a chance to do any additional prep
+   * work required for the retained data before the application is rendered.
+   * @param {object} data  Retained data associated with this flow.
+   */
+  async retainData(data) {
+    this.retainedData = data;
+  }
+
+  /* -------------------------------------------- */
+
   /** @inheritdoc */
   getData() {
     return {
@@ -338,10 +331,338 @@ class AdvancementFlow extends FormApplication {
   /* -------------------------------------------- */
 
   /** @inheritdoc */
+  async _render(...args) {
+    await super._render(...args);
+
+    // Call setPosition on manager to adjust for size changes
+    this.options.manager?.setPosition();
+  }
+
+  /* -------------------------------------------- */
+
+  /** @inheritdoc */
   async _updateObject(event, formData) {
     await this.advancement.apply(this.level, formData);
   }
 
+  /* -------------------------------------------- */
+
+  /** @inheritdoc */
+  _canDragDrop(selector) {
+    return true;
+  }
+
+}
+
+/**
+ * Data Model variant with some extra methods to support template mix-ins.
+ *
+ * **Note**: This uses some advanced Javascript techniques that are not necessary for most data models.
+ * Please refer to the [advancement data models]{@link BaseAdvancement} for an example of a more typical usage.
+ *
+ * In template.json, each Actor or Item type can incorporate several templates which are chunks of data that are
+ * common across all the types that use them. One way to represent them in the schema for a given Document type is to
+ * duplicate schema definitions for the templates and write them directly into the Data Model for the Document type.
+ * This works fine for small templates or systems that do not need many Document types but for more complex systems
+ * this boilerplate can become prohibitive.
+ *
+ * Here we have opted to instead create a separate Data Model for each template available. These define their own
+ * schemas which are then mixed-in to the final schema for the Document type's Data Model. A Document type Data Model
+ * can define its own schema unique to it, and then add templates in direct correspondence to those in template.json
+ * via SystemDataModel.mixin.
+ */
+class SystemDataModel extends foundry.abstract.DataModel {
+
+  /** @inheritdoc */
+  static _enableV10Validation = true;
+
+  /**
+   * System type that this system data model represents (e.g. "character", "npc", "vehicle").
+   * @type {string}
+   */
+  static _systemType;
+
+  /* -------------------------------------------- */
+
+  /**
+   * Base templates used for construction.
+   * @type {*[]}
+   * @private
+   */
+  static _schemaTemplates = [];
+
+  /* -------------------------------------------- */
+
+  /**
+   * The field names of the base templates used for construction.
+   * @type {Set<string>}
+   * @private
+   */
+  static get _schemaTemplateFields() {
+    const fieldNames = Object.freeze(new Set(this._schemaTemplates.map(t => t.schema.keys()).flat()));
+    Object.defineProperty(this, "_schemaTemplateFields", {
+      value: fieldNames,
+      writable: false,
+      configurable: false
+    });
+    return fieldNames;
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * A list of properties that should not be mixed-in to the final type.
+   * @type {Set<string>}
+   * @private
+   */
+  static _immiscible = new Set(["length", "mixed", "name", "prototype", "cleanData", "_cleanData",
+    "_initializationOrder", "validateJoint", "_validateJoint", "migrateData", "_migrateData",
+    "shimData", "_shimData", "defineSchema"]);
+
+  /* -------------------------------------------- */
+
+  /**
+   * @typedef {object} SystemDataModelMetadata
+   * @property {boolean} [singleton] - Should only a single item of this type be allowed on an actor?
+   */
+
+  /**
+   * Metadata that describes this DataModel.
+   * @type {SystemDataModelMetadata}
+   */
+  static metadata = {};
+
+  get metadata() {
+    return this.constructor.metadata;
+  }
+
+  /* -------------------------------------------- */
+
+  /** @inheritdoc */
+  static defineSchema() {
+    const schema = {};
+    for ( const template of this._schemaTemplates ) {
+      if ( !template.defineSchema ) {
+        throw new Error(`Invalid dnd5e template mixin ${template} defined on class ${this.constructor}`);
+      }
+      this.mergeSchema(schema, template.defineSchema());
+    }
+    return schema;
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * Merge two schema definitions together as well as possible.
+   * @param {DataSchema} a  First schema that forms the basis for the merge. *Will be mutated.*
+   * @param {DataSchema} b  Second schema that will be merged in, overwriting any non-mergeable properties.
+   * @returns {DataSchema}  Fully merged schema.
+   */
+  static mergeSchema(a, b) {
+    Object.assign(a, b);
+    return a;
+  }
+
+
+  /* -------------------------------------------- */
+  /*  Data Cleaning                               */
+  /* -------------------------------------------- */
+
+  /** @inheritdoc */
+  static cleanData(source, options) {
+    this._cleanData(source, options);
+    return super.cleanData(source, options);
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * Performs cleaning without calling DataModel.cleanData.
+   * @param {object} [source]         The source data
+   * @param {object} [options={}]     Additional options (see DataModel.cleanData)
+   * @protected
+   */
+  static _cleanData(source, options) {
+    for ( const template of this._schemaTemplates ) {
+      template._cleanData(source, options);
+    }
+  }
+
+  /* -------------------------------------------- */
+  /*  Data Initialization                         */
+  /* -------------------------------------------- */
+
+  /** @inheritdoc */
+  static *_initializationOrder() {
+    for ( const template of this._schemaTemplates ) {
+      for ( const entry of template._initializationOrder() ) {
+        entry[1] = this.schema.get(entry[0]);
+        yield entry;
+      }
+    }
+    for ( const entry of this.schema.entries() ) {
+      if ( this._schemaTemplateFields.has(entry[0]) ) continue;
+      yield entry;
+    }
+  }
+
+  /* -------------------------------------------- */
+  /*  Data Validation                             */
+  /* -------------------------------------------- */
+
+  /** @inheritdoc */
+  validate(options={}) {
+    if ( this.constructor._enableV10Validation === false ) return true;
+    return super.validate(options);
+  }
+
+  /* -------------------------------------------- */
+  /*  Socket Event Handlers                       */
+  /* -------------------------------------------- */
+
+  /**
+   * Pre-creation logic for this system data.
+   * @param {object} data               The initial data object provided to the document creation request.
+   * @param {object} options            Additional options which modify the creation request.
+   * @param {User} user                 The User requesting the document creation.
+   * @returns {Promise<boolean|void>}   A return value of false indicates the creation operation should be cancelled.
+   * @see {Document#_preCreate}
+   * @protected
+   */
+  async _preCreate(data, options, user) {
+    const actor = this.parent.actor;
+    if ( (actor?.type !== "character") || !this.metadata?.singleton ) return;
+    if ( actor.itemTypes[data.type]?.length ) {
+      ui.notifications.error(game.i18n.format("DND5E.ActorWarningSingleton", {
+        itemType: game.i18n.localize(CONFIG.Item.typeLabels[data.type]),
+        actorType: game.i18n.localize(CONFIG.Actor.typeLabels[actor.type])
+      }));
+      return false;
+    }
+  }
+
+  /* -------------------------------------------- */
+  /*  Mixin                                       */
+  /* -------------------------------------------- */
+
+  /** @inheritdoc */
+  static validateJoint(data) {
+    this._validateJoint(data);
+    return super.validateJoint(data);
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * Performs joint validation without calling DataModel.validateJoint.
+   * @param {object} data     The source data
+   * @throws                  An error if a validation failure is detected
+   * @protected
+   */
+  static _validateJoint(data) {
+    for ( const template of this._schemaTemplates ) {
+      template._validateJoint(data);
+    }
+  }
+
+  /* -------------------------------------------- */
+  /*  Data Migration                              */
+  /* -------------------------------------------- */
+
+  /** @inheritdoc */
+  static migrateData(source) {
+    this._migrateData(source);
+    return super.migrateData(source);
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * Performs migration without calling DataModel.migrateData.
+   * @param {object} source     The source data
+   * @protected
+   */
+  static _migrateData(source) {
+    for ( const template of this._schemaTemplates ) {
+      template._migrateData(source);
+    }
+  }
+
+  /* -------------------------------------------- */
+
+  /** @inheritdoc */
+  static shimData(data, options) {
+    this._shimData(data, options);
+    return super.shimData(data, options);
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * Performs shimming without calling DataModel.shimData.
+   * @param {object} data         The source data
+   * @param {object} [options]    Additional options (see DataModel.shimData)
+   * @protected
+   */
+  static _shimData(data, options) {
+    for ( const template of this._schemaTemplates ) {
+      template._shimData(data, options);
+    }
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * Mix multiple templates with the base type.
+   * @param {...*} templates            Template classes to mix.
+   * @returns {typeof SystemDataModel}  Final prepared type.
+   */
+  static mixin(...templates) {
+    for ( const template of templates ) {
+      if ( !(template.prototype instanceof SystemDataModel) ) {
+        throw new Error(`${template.name} is not a subclass of SystemDataModel`);
+      }
+    }
+
+    const Base = class extends this {};
+    Object.defineProperty(Base, "_schemaTemplates", {
+      value: Object.seal([...this._schemaTemplates, ...templates]),
+      writable: false,
+      configurable: false
+    });
+
+    for ( const template of templates ) {
+      // Take all static methods and fields from template and mix in to base class
+      for ( const [key, descriptor] of Object.entries(Object.getOwnPropertyDescriptors(template)) ) {
+        if ( this._immiscible.has(key) ) continue;
+        Object.defineProperty(Base, key, descriptor);
+      }
+
+      // Take all instance methods and fields from template and mix in to base class
+      for ( const [key, descriptor] of Object.entries(Object.getOwnPropertyDescriptors(template.prototype)) ) {
+        if ( ["constructor"].includes(key) ) continue;
+        Object.defineProperty(Base.prototype, key, descriptor);
+      }
+    }
+
+    return Base;
+  }
+}
+
+/* -------------------------------------------- */
+
+/**
+ * Data Model variant that does not export fields with an `undefined` value during `toObject(true)`.
+ */
+class SparseDataModel extends foundry.abstract.DataModel {
+  /** @inheritdoc */
+  toObject(source=true) {
+    if ( !source ) return super.toObject(source);
+    const clone = foundry.utils.flattenObject(this._source);
+    // Remove any undefined keys from the source data
+    Object.keys(clone).filter(k => clone[k] === undefined).forEach(k => delete clone[k]);
+    return foundry.utils.expandObject(clone);
+  }
 }
 
 /**
@@ -497,8 +818,104 @@ class IdentifierField extends foundry.data.fields.StringField {
 /* -------------------------------------------- */
 
 /**
+ * @typedef {StringFieldOptions} LocalDocumentFieldOptions
+ * @property {boolean} [fallback=false]  Display the string value if no matching item is found.
+ */
+
+/**
+ * A mirror of ForeignDocumentField that references a Document embedded within this Document.
+ *
+ * @param {typeof Document} model              The local DataModel class definition which this field should link to.
+ * @param {LocalDocumentFieldOptions} options  Options which configure the behavior of the field.
+ */
+class LocalDocumentField extends foundry.data.fields.DocumentIdField {
+  constructor(model, options={}) {
+    if ( !foundry.utils.isSubclass(model, foundry.abstract.DataModel) ) {
+      throw new Error("A ForeignDocumentField must specify a DataModel subclass as its type");
+    }
+
+    super(options);
+    this.model = model;
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * A reference to the model class which is stored in this field.
+   * @type {typeof Document}
+   */
+  model;
+
+  /* -------------------------------------------- */
+
+  /** @inheritdoc */
+  static get _defaults() {
+    return foundry.utils.mergeObject(super._defaults, {
+      nullable: true,
+      readonly: false,
+      idOnly: false,
+      fallback: false
+    });
+  }
+
+  /* -------------------------------------------- */
+
+  /** @override */
+  _cast(value) {
+    if ( typeof value === "string" ) return value;
+    if ( (value instanceof this.model) ) return value._id;
+    throw new Error(`The value provided to a LocalDocumentField must be a ${this.model.name} instance.`);
+  }
+
+  /* -------------------------------------------- */
+
+  /** @inheritdoc */
+  _validateType(value) {
+    if ( !this.options.fallback ) super._validateType(value);
+  }
+
+  /* -------------------------------------------- */
+
+  /** @override */
+  initialize(value, model, options={}) {
+    if ( this.idOnly ) return this.options.fallback || foundry.data.validators.isValidId(value) ? value : null;
+    const collection = model.parent?.[this.model.metadata.collection];
+    return () => {
+      const document = collection?.get(value);
+      if ( !document ) return this.options.fallback ? value : null;
+      if ( this.options.fallback ) Object.defineProperty(document, "toString", {
+        value: () => document.name,
+        configurable: true,
+        enumerable: false
+      });
+      return document;
+    };
+  }
+
+  /* -------------------------------------------- */
+
+  /** @inheritdoc */
+  toObject(value) {
+    return value?._id ?? value;
+  }
+}
+
+/* -------------------------------------------- */
+
+/**
+ * @callback MappingFieldInitialValueBuilder
+ * @param {string} key       The key within the object where this new value is being generated.
+ * @param {*} initial        The generic initial data provided by the contained model.
+ * @param {object} existing  Any existing mapping data.
+ * @returns {object}         Value to use as default for this key.
+ */
+
+/**
  * @typedef {DataFieldOptions} MappingFieldOptions
- * @property {string[]} [initialKeys]  Keys that will be created if no data is provided.
+ * @property {string[]} [initialKeys]       Keys that will be created if no data is provided.
+ * @property {MappingFieldInitialValueBuilder} [initialValue]  Function to calculate the initial value for a key.
+ * @property {boolean} [initialKeysOnly=false]  Should the keys in the initialized data be limited to the keys provided
+ *                                              by `options.initialKeys`?
  */
 
 /**
@@ -507,6 +924,9 @@ class IdentifierField extends foundry.data.fields.StringField {
  * @param {DataField} model                    The class of DataField which should be embedded in this field.
  * @param {MappingFieldOptions} [options={}]   Options which configure the behavior of the field.
  * @property {string[]} [initialKeys]          Keys that will be created if no data is provided.
+ * @property {MappingFieldInitialValueBuilder} [initialValue]  Function to calculate the initial value for a key.
+ * @property {boolean} [initialKeysOnly=false]  Should the keys in the initialized data be limited to the keys provided
+ *                                              by `options.initialKeys`?
  */
 class MappingField extends foundry.data.fields.ObjectField {
   constructor(model, options) {
@@ -528,7 +948,8 @@ class MappingField extends foundry.data.fields.ObjectField {
   static get _defaults() {
     return foundry.utils.mergeObject(super._defaults, {
       initialKeys: null,
-      initialValue: null
+      initialValue: null,
+      initialKeysOnly: false
     });
   }
 
@@ -548,11 +969,21 @@ class MappingField extends foundry.data.fields.ObjectField {
     const initial = super.getInitialValue(data);
     if ( !keys || !foundry.utils.isEmpty(initial) ) return initial;
     if ( !(keys instanceof Array) ) keys = Object.keys(keys);
-    for ( const key of keys ) {
-      const modelInitial = this.model.getInitialValue();
-      initial[key] = this.initialValue?.(key, modelInitial) ?? modelInitial;
-    }
+    for ( const key of keys ) initial[key] = this._getInitialValueForKey(key);
     return initial;
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * Get the initial value for the provided key.
+   * @param {string} key       Key within the object being built.
+   * @param {object} [object]  Any existing mapping data.
+   * @returns {*}              Initial value based on provided field type.
+   */
+  _getInitialValueForKey(key, object) {
+    const initial = this.model.getInitialValue();
+    return this.initialValue?.(key, initial, object) ?? initial;
   }
 
   /* -------------------------------------------- */
@@ -586,10 +1017,24 @@ class MappingField extends foundry.data.fields.ObjectField {
   /** @override */
   initialize(value, model, options={}) {
     if ( !value ) return value;
-    return Object.entries(value).reduce((obj, [k, v]) => {
-      obj[k] = this.model.initialize(v, model, options);
-      return obj;
-    }, {});
+    const obj = {};
+    const initialKeys = (this.initialKeys instanceof Array) ? this.initialKeys : Object.keys(this.initialKeys ?? {});
+    const keys = this.initialKeysOnly ? initialKeys : Object.keys(value);
+    for ( const key of keys ) {
+      const data = value[key] ?? this._getInitialValueForKey(key, value);
+      obj[key] = this.model.initialize(data, model, options);
+    }
+    return obj;
+  }
+
+  /* -------------------------------------------- */
+
+  /** @inheritdoc */
+  _getField(path) {
+    if ( path.length === 0 ) return this;
+    else if ( path.length === 1 ) return this.model;
+    path.shift();
+    return this.model._getField(path);
   }
 }
 
@@ -599,10 +1044,11 @@ var fields = /*#__PURE__*/Object.freeze({
   AdvancementField: AdvancementField,
   FormulaField: FormulaField,
   IdentifierField: IdentifierField,
+  LocalDocumentField: LocalDocumentField,
   MappingField: MappingField
 });
 
-class BaseAdvancement extends foundry.abstract.DataModel {
+class BaseAdvancement extends SparseDataModel {
 
   /**
    * Name of this advancement type that will be stored in config and used for lookups.
@@ -615,6 +1061,7 @@ class BaseAdvancement extends foundry.abstract.DataModel {
 
   /* -------------------------------------------- */
 
+  /** @inheritdoc */
   static defineSchema() {
     return {
       _id: new foundry.data.fields.DocumentIdField({initial: () => foundry.utils.randomID()}),
@@ -625,7 +1072,7 @@ class BaseAdvancement extends foundry.abstract.DataModel {
       configuration: new AdvancementDataField(this, {required: true}),
       value: new AdvancementDataField(this, {required: true}),
       level: new foundry.data.fields.NumberField({
-        integer: true, initial: this.metadata?.multiLevel ? undefined : 1, min: 0, label: "DND5E.Level"
+        integer: true, initial: this.metadata?.multiLevel ? undefined : 0, min: 0, label: "DND5E.Level"
       }),
       title: new foundry.data.fields.StringField({initial: undefined, label: "DND5E.AdvancementCustomTitle"}),
       icon: new foundry.data.fields.FilePathField({
@@ -635,17 +1082,6 @@ class BaseAdvancement extends foundry.abstract.DataModel {
         initial: undefined, choices: ["primary", "secondary"], label: "DND5E.AdvancementClassRestriction"
       })
     };
-  }
-
-  /* -------------------------------------------- */
-
-  /** @inheritdoc */
-  toObject(source=true) {
-    if ( !source ) return super.toObject(source);
-    const clone = foundry.utils.deepClone(this._source);
-    // Remove any undefined keys from the source data
-    Object.keys(clone).filter(k => clone[k] === undefined).forEach(k => delete clone[k]);
-    return clone;
   }
 }
 
@@ -666,7 +1102,7 @@ class AdvancementError extends Error {
  * @param {object} [options={}]  Options which affect DataModel construction.
  * @abstract
  */
-let Advancement$1 = class Advancement extends BaseAdvancement {
+class Advancement extends BaseAdvancement {
   constructor(data, {parent=null, ...options}={}) {
     if ( parent instanceof Item ) parent = parent.system;
     super(data, {parent, ...options});
@@ -728,7 +1164,7 @@ let Advancement$1 = class Advancement extends BaseAdvancement {
       title: game.i18n.localize("DND5E.AdvancementTitle"),
       hint: "",
       multiLevel: false,
-      validItemTypes: new Set(["background", "class", "subclass"]),
+      validItemTypes: new Set(["background", "class", "race", "subclass"]),
       apps: {
         config: AdvancementConfig,
         flow: AdvancementFlow
@@ -817,6 +1253,21 @@ let Advancement$1 = class Advancement extends BaseAdvancement {
   }
 
   /* -------------------------------------------- */
+
+  /**
+   * Perform preliminary operations before an Advancement is created.
+   * @param {object} data      The initial data object provided to the document creation request.
+   * @returns {boolean|void}   A return value of false indicates the creation operation should be cancelled.
+   * @protected
+   */
+  _preCreate(data) {
+    if ( !["class", "subclass"].includes(this.item.type)
+      || foundry.utils.hasProperty(data, "level")
+      || this.constructor.metadata.multiLevel ) return;
+    this.updateSource({level: 1});
+  }
+
+  /* -------------------------------------------- */
   /*  Display Methods                             */
   /* -------------------------------------------- */
 
@@ -891,7 +1342,6 @@ let Advancement$1 = class Advancement extends BaseAdvancement {
    * @returns {Promise<Advancement>}  This advancement after updates have been applied.
    */
   async update(updates) {
-    this.constructor._migrateUpdateData(updates);
     await this.item.updateAdvancement(this.id, updates);
     return this;
   }
@@ -904,7 +1354,6 @@ let Advancement$1 = class Advancement extends BaseAdvancement {
    * @returns {Advancement}   This advancement after updates have been applied.
    */
   updateSource(updates) {
-    this.constructor._migrateUpdateData(updates);
     super.updateSource(updates);
     return this;
   }
@@ -966,55 +1415,540 @@ let Advancement$1 = class Advancement extends BaseAdvancement {
    */
   async reverse(level) { }
 
-  /* -------------------------------------------- */
-  /*  Deprecations and Compatibility              */
-  /* -------------------------------------------- */
+}
 
-  /**
-   * @deprecated since 2.1.0
-   * @ignore
-   */
-  get data() {
-    foundry.utils.logCompatibilityWarning(
-      `You are accessing the ${this.constructor.name}#data object which is no longer used. `
-      + "Since 2.1 the Advancement class and its contained DataModel are merged into a combined data structure. "
-      + "You should now reference keys which were previously contained within the data object directly.",
-      { since: "DnD5e 2.1", until: "DnD5e 2.2" }
-    );
-    const data = {};
-    for ( const k of this.schema.keys() ) {
-      data[k] = this[k];
-    }
-    return this.constructor.shimData(data, {embedded: false});
+/**
+ * Configuration application for ability score improvements.
+ */
+class AbilityScoreImprovementConfig extends AdvancementConfig {
+
+  /** @inheritdoc */
+  static get defaultOptions() {
+    return foundry.utils.mergeObject(super.defaultOptions, {
+      template: "systems/dnd5e/templates/advancement/ability-score-improvement-config.hbs"
+    });
   }
 
+  /* -------------------------------------------- */
+
+  /** @inheritdoc */
+  getData() {
+    const abilities = Object.entries(CONFIG.DND5E.abilities).reduce((obj, [key, data]) => {
+      if ( !this.advancement.canImprove(key) ) return obj;
+      const fixed = this.advancement.configuration.fixed[key] ?? 0;
+      obj[key] = {
+        key,
+        name: `configuration.fixed.${key}`,
+        label: data.label,
+        value: fixed,
+        canIncrease: true,
+        canDecrease: true
+      };
+      return obj;
+    }, {});
+
+    return foundry.utils.mergeObject(super.getData(), {
+      abilities,
+      points: {
+        key: "points",
+        name: "configuration.points",
+        label: game.i18n.localize("DND5E.AdvancementAbilityScoreImprovementPoints"),
+        min: 0,
+        value: this.advancement.configuration.points,
+        canIncrease: true,
+        canDecrease: this.advancement.configuration.points > 0
+      }
+    });
+  }
+
+  /* -------------------------------------------- */
+
+  /** @inheritdoc */
+  activateListeners(html) {
+    super.activateListeners(html);
+    html.find(".adjustment-button").click(this._onClickButton.bind(this));
+  }
+
+  /* -------------------------------------------- */
+
   /**
-   * Shim to remove leading `data.` from updates.
-   * @ignore
+   * Handle clicking the plus and minus buttons.
+   * @param {Event} event  Triggering click event.
    */
-  static _migrateUpdateData(updates) {
-    let logWarning = false;
-    for ( const [key, value] of Object.entries(updates) ) {
-      if ( key.startsWith("data.") ) {
-        updates[key.substring(5)] = value;
-        delete updates[key];
-        logWarning = true;
+  _onClickButton(event) {
+    event.preventDefault();
+    const action = event.currentTarget.dataset.action;
+    const input = event.currentTarget.closest("li").querySelector("input");
+
+    if ( action === "decrease" ) input.valueAsNumber -= 1;
+    else if ( action === "increase" ) input.valueAsNumber += 1;
+
+    this.submit();
+  }
+}
+
+/**
+ * Inline application that presents the player with a choice between ability score improvement and taking a feat.
+ */
+class AbilityScoreImprovementFlow extends AdvancementFlow {
+
+  /**
+   * Player assignments to abilities.
+   * @type {Object<string, number>}
+   */
+  assignments = {};
+
+  /* -------------------------------------------- */
+
+  /**
+   * The dropped feat item.
+   * @type {Item5e}
+   */
+  feat;
+
+  /* -------------------------------------------- */
+
+  /** @inheritdoc */
+  static get defaultOptions() {
+    return foundry.utils.mergeObject(super.defaultOptions, {
+      dragDrop: [{ dropSelector: "form" }],
+      template: "systems/dnd5e/templates/advancement/ability-score-improvement-flow.hbs"
+    });
+  }
+
+  /* -------------------------------------------- */
+
+  /** @inheritdoc */
+  async retainData(data) {
+    await super.retainData(data);
+    this.assignments = this.retainedData.assignments ?? {};
+    const featUuid = Object.values(this.retainedData.feat ?? {})[0];
+    if ( featUuid ) this.feat = await fromUuid(featUuid);
+  }
+
+  /* -------------------------------------------- */
+
+  /** @inheritdoc */
+  async getData() {
+    const points = {
+      assigned: Object.keys(CONFIG.DND5E.abilities).reduce((assigned, key) => {
+        if ( !this.advancement.canImprove(key) || this.advancement.configuration.fixed[key] ) return assigned;
+        return assigned + (this.assignments[key] ?? 0);
+      }, 0),
+      cap: this.advancement.configuration.cap ?? Infinity,
+      total: this.advancement.configuration.points
+    };
+    points.available = points.total - points.assigned;
+
+    const formatter = new Intl.NumberFormat(game.i18n.lang, { signDisplay: "always" });
+
+    const abilities = Object.entries(CONFIG.DND5E.abilities).reduce((obj, [key, data]) => {
+      if ( !this.advancement.canImprove(key) ) return obj;
+      const ability = this.advancement.actor.system.abilities[key];
+      const assignment = this.assignments[key] ?? 0;
+      const fixed = this.advancement.configuration.fixed[key] ?? 0;
+      const value = Math.min(ability.value + ((fixed || assignment) ?? 0), ability.max);
+      const max = fixed ? value : Math.min(value + points.available, ability.max);
+      obj[key] = {
+        key, max, value,
+        name: `abilities.${key}`,
+        label: data.label,
+        initial: ability.value,
+        min: fixed ? max : ability.value,
+        delta: (value - ability.value) ? formatter.format(value - ability.value) : null,
+        showDelta: true,
+        isDisabled: !!this.feat,
+        isFixed: !!fixed || (ability.value >= ability.max),
+        canIncrease: (value < max) && (assignment < points.cap) && !fixed && !this.feat,
+        canDecrease: (value > ability.value) && !fixed && !this.feat
+      };
+      return obj;
+    }, {});
+
+    const pluralRules = new Intl.PluralRules(game.i18n.lang);
+    return foundry.utils.mergeObject(super.getData(), {
+      abilities, points,
+      feat: this.feat,
+      staticIncrease: !this.advancement.configuration.points,
+      pointCap: game.i18n.format(
+        `DND5E.AdvancementAbilityScoreImprovementCapDisplay.${pluralRules.select(points.cap)}`, {points: points.cap}
+      ),
+      pointsRemaining: game.i18n.format(
+        `DND5E.AdvancementAbilityScoreImprovementPointsRemaining.${pluralRules.select(points.available)}`,
+        {points: points.available}
+      )
+    });
+  }
+
+  /* -------------------------------------------- */
+
+  /** @inheritdoc */
+  activateListeners(html) {
+    super.activateListeners(html);
+    html.find(".adjustment-button").click(this._onClickButton.bind(this));
+    html.find("a[data-uuid]").click(this._onClickFeature.bind(this));
+    html.find("[data-action='delete']").click(this._onItemDelete.bind(this));
+  }
+
+  /* -------------------------------------------- */
+
+  /** @inheritdoc */
+  _onChangeInput(event) {
+    super._onChangeInput(event);
+    const input = event.currentTarget;
+    const key = input.closest("[data-score]").dataset.score;
+    if ( isNaN(input.valueAsNumber) ) this.assignments[key] = 0;
+    else {
+      this.assignments[key] = Math.min(
+        Math.clamped(input.valueAsNumber, Number(input.min), Number(input.max)) - Number(input.dataset.initial),
+        this.advancement.configuration.cap ?? Infinity
+      );
+    }
+    this.render();
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * Handle clicking the plus and minus buttons.
+   * @param {Event} event  Triggering click event.
+   */
+  _onClickButton(event) {
+    event.preventDefault();
+    const action = event.currentTarget.dataset.action;
+    const key = event.currentTarget.closest("li").dataset.score;
+
+    this.assignments[key] ??= 0;
+    if ( action === "decrease" ) this.assignments[key] -= 1;
+    else if ( action === "increase" ) this.assignments[key] += 1;
+    else return;
+
+    this.render();
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * Handle clicking on a feature during item grant to preview the feature.
+   * @param {MouseEvent} event  The triggering event.
+   * @protected
+   */
+  async _onClickFeature(event) {
+    event.preventDefault();
+    const uuid = event.currentTarget.dataset.uuid;
+    const item = await fromUuid(uuid);
+    item?.sheet.render(true);
+  }
+
+  /* -------------------------------------------- */
+
+  /** @inheritdoc */
+  async _updateObject(event, formData) {
+    // TODO: Pass through retained feat data
+    await this.advancement.apply(this.level, {
+      type: this.feat ? "feat" : "asi",
+      assignments: this.assignments,
+      featUuid: this.feat?.uuid,
+      retainedItems: this.retainedData?.retainedItems
+    });
+  }
+
+  /* -------------------------------------------- */
+  /*  Drag & Drop                                 */
+  /* -------------------------------------------- */
+
+  /**
+   * Handle deleting a dropped feat.
+   * @param {Event} event  The originating click event.
+   * @protected
+   */
+  async _onItemDelete(event) {
+    event.preventDefault();
+    this.feat = null;
+    this.render();
+  }
+
+  /* -------------------------------------------- */
+
+  /** @inheritdoc */
+  async _onDrop(event) {
+    if ( !this.advancement.allowFeat ) return false;
+
+    // Try to extract the data
+    let data;
+    try {
+      data = JSON.parse(event.dataTransfer.getData("text/plain"));
+    } catch(err) {
+      return false;
+    }
+
+    if ( data.type !== "Item" ) return false;
+    const item = await Item.implementation.fromDropData(data);
+
+    if ( (item.type !== "feat") || (item.system.type.value !== "feat") ) {
+      ui.notifications.error("DND5E.AdvancementAbilityScoreImprovementFeatWarning", {localize: true});
+      return null;
+    }
+
+    this.feat = item;
+    this.render();
+  }
+}
+
+/**
+ * Data model for the Ability Score Improvement advancement configuration.
+ *
+ * @property {number} points                 Number of points that can be assigned to any score.
+ * @property {Object<string, number>} fixed  Number of points automatically assigned to a certain score.
+ */
+class AbilityScoreImprovementConfigurationData extends foundry.abstract.DataModel {
+  /** @inheritdoc */
+  static defineSchema() {
+    return {
+      points: new foundry.data.fields.NumberField({
+        integer: true, min: 0, initial: 0,
+        label: "DND5E.AdvancementAbilityScoreImprovementPoints",
+        hint: "DND5E.AdvancementAbilityScoreImprovementPointsHint"
+      }),
+      fixed: new MappingField(
+        new foundry.data.fields.NumberField({nullable: false, integer: true, initial: 0}),
+        {label: "DND5E.AdvancementAbilityScoreImprovementFixed"}
+      ),
+      cap: new foundry.data.fields.NumberField({
+        integer: true, min: 1, initial: 2, label: "DND5E.AdvancementAbilityScoreImprovementCap",
+        hint: "DND5E.AdvancementAbilityScoreImprovementCapHint"
+      })
+    };
+  }
+}
+
+/**
+ * Data model for the Ability Score Improvement advancement value.
+ *
+ * @property {string} type  When on a class, whether the player chose ASI or a Feat.
+ * @property {Object<string, number>}  Points assigned to individual scores.
+ * @property {Object<string, string>}  Feat that was selected.
+ */
+class AbilityScoreImprovementValueData extends SparseDataModel {
+  /** @inheritdoc */
+  static defineSchema() {
+    return {
+      type: new foundry.data.fields.StringField({
+        required: true, initial: "asi", choices: ["asi", "feat"]
+      }),
+      assignments: new MappingField(new foundry.data.fields.NumberField({
+        nullable: false, integer: true
+      }), {required: false, initial: undefined}),
+      feat: new MappingField(new foundry.data.fields.StringField(), {
+        required: false, initial: undefined, label: "DND5E.Feature.Feat"
+      })
+    };
+  }
+}
+
+/**
+ * Advancement that presents the player with the option of improving their ability scores or selecting a feat.
+ */
+class AbilityScoreImprovementAdvancement extends Advancement {
+
+  /** @inheritdoc */
+  static get metadata() {
+    return foundry.utils.mergeObject(super.metadata, {
+      dataModels: {
+        configuration: AbilityScoreImprovementConfigurationData,
+        value: AbilityScoreImprovementValueData
+      },
+      order: 20,
+      icon: "systems/dnd5e/icons/svg/ability-score-improvement.svg",
+      title: game.i18n.localize("DND5E.AdvancementAbilityScoreImprovementTitle"),
+      hint: game.i18n.localize("DND5E.AdvancementAbilityScoreImprovementHint"),
+      validItemTypes: new Set(["background", "class", "race"]),
+      apps: {
+        config: AbilityScoreImprovementConfig,
+        flow: AbilityScoreImprovementFlow
+      }
+    });
+  }
+
+  /* -------------------------------------------- */
+  /*  Preparation Methods                         */
+  /* -------------------------------------------- */
+
+  /** @inheritdoc */
+  _preCreate(data) {
+    if ( super._preCreate(data) === false ) return false;
+    if ( this.item.type !== "class" || foundry.utils.hasProperty(data, "configuration.points") ) return;
+    this.updateSource({"configuration.points": 2});
+  }
+
+  /* -------------------------------------------- */
+  /*  Instance Properties                         */
+  /* -------------------------------------------- */
+
+  /**
+   * Does this advancement allow feats, or just ability score improvements?
+   * @type {boolean}
+   */
+  get allowFeat() {
+    return (this.item.type === "class") && game.settings.get("dnd5e", "allowFeats");
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * Information on the ASI points available.
+   * @type {{ assigned: number, total: number }}
+   */
+  get points() {
+    return {
+      assigned: Object.entries(this.value.assignments ?? {}).reduce((n, [abl, c]) => {
+        if ( this.canImprove(abl) ) n += c;
+        return n;
+      }, 0),
+      total: this.configuration.points + Object.entries(this.configuration.fixed).reduce((t, [abl, v]) => {
+        if ( this.canImprove(abl) ) t += v;
+        return t;
+      }, 0)
+    };
+  }
+
+  /* -------------------------------------------- */
+  /*  Instance Methods                            */
+  /* -------------------------------------------- */
+
+  /**
+   * Is this ability allowed to be improved?
+   * @param {string} ability  The ability key.
+   * @returns {boolean}
+   */
+  canImprove(ability) {
+    return CONFIG.DND5E.abilities[ability]?.improvement !== false;
+  }
+
+  /* -------------------------------------------- */
+  /*  Display Methods                             */
+  /* -------------------------------------------- */
+
+  /** @inheritdoc */
+  titleForLevel(level, { configMode=false }={}) {
+    if ( this.value.selected !== "feat" ) return this.title;
+    return game.i18n.localize("DND5E.Feature.Feat");
+  }
+
+  /* -------------------------------------------- */
+
+  /** @inheritdoc */
+  summaryForLevel(level, { configMode=false }={}) {
+    const formatter = new Intl.NumberFormat(game.i18n.lang, { signDisplay: "always" });
+    if ( configMode ) {
+      const entries = Object.entries(this.configuration.fixed).map(([key, value]) => {
+        if ( !value ) return null;
+        const name = CONFIG.DND5E.abilities[key]?.label ?? key;
+        return `<span class="tag">${name} <strong>${formatter.format(value)}</strong></span>`;
+      });
+      if ( this.configuration.points ) entries.push(`<span class="tag">${
+        game.i18n.localize("DND5E.AdvancementAbilityScoreImprovementPoints")}: <strong>${
+        this.configuration.points}</strong></span>`
+      );
+      return entries.filterJoin("\n");
+    }
+
+    else if ( (this.value.type === "feat") && this.value.feat ) {
+      const id = Object.keys(this.value.feat)[0];
+      const feat = this.actor.items.get(id);
+      if ( feat ) return feat.toAnchor({classes: ["content-link"]}).outerHTML;
+    }
+
+    else if ( (this.value.type === "asi") && this.value.assignments ) {
+      return Object.entries(this.value.assignments).reduce((html, [key, value]) => {
+        const name = CONFIG.DND5E.abilities[key]?.label ?? key;
+        html += `<span class="tag">${name} <strong>${formatter.format(value)}</strong></span>\n`;
+        return html;
+      }, "");
+    }
+
+    return "";
+  }
+
+  /* -------------------------------------------- */
+  /*  Application Methods                         */
+  /* -------------------------------------------- */
+
+  /** @inheritdoc */
+  async apply(level, data) {
+    if ( data.type === "asi" ) {
+      const assignments = foundry.utils.mergeObject(this.configuration.fixed, data.assignments, {inplace: false});
+      const updates = {};
+      for ( const key of Object.keys(assignments) ) {
+        const ability = this.actor.system.abilities[key];
+        const source = this.actor.system.toObject().abilities[key] ?? {};
+        if ( !ability || !this.canImprove(key) ) continue;
+        assignments[key] = Math.min(assignments[key], ability.max - source.value);
+        if ( assignments[key] ) updates[`system.abilities.${key}.value`] = source.value + assignments[key];
+        else delete assignments[key];
+      }
+      data.assignments = assignments;
+      data.feat = null;
+      this.actor.updateSource(updates);
+    }
+
+    else {
+      let itemData = data.retainedItems?.[data.featUuid];
+      if ( !itemData ) {
+        const source = await fromUuid(data.featUuid);
+        if ( source ) {
+          itemData = source.clone({
+            _id: foundry.utils.randomID(),
+            "flags.dnd5e.sourceId": data.featUuid,
+            "flags.dnd5e.advancementOrigin": `${this.item.id}.${this.id}`
+          }, {keepId: true}).toObject();
+        }
+      }
+      data.assignments = null;
+      if ( itemData ) {
+        data.feat = { [itemData._id]: data.featUuid };
+        this.actor.updateSource({items: [itemData]});
       }
     }
-    if ( updates.data ) {
-      Object.assign(updates, updates.data);
-      delete updates.data;
-      logWarning = true;
-    }
-    if ( logWarning ) foundry.utils.logCompatibilityWarning(
-      "An update being performed on an advancement points to `data`. Advancement data has moved to the top level so the"
-      + " leading `data.` is no longer required.",
-      { since: "DnD5e 2.1", until: "DnD5e 2.2" }
-    );
-    return updates;
+
+    this.updateSource({value: data});
   }
 
-};
+  /* -------------------------------------------- */
+
+  /** @inheritdoc */
+  restore(level, data) {
+    data.featUuid = Object.values(data.feat ?? {})[0];
+    this.apply(level, data);
+  }
+
+  /* -------------------------------------------- */
+
+  /** @inheritdoc */
+  reverse(level) {
+    const source = this.value.toObject();
+
+    if ( this.value.type === "asi" ) {
+      const updates = {};
+      for ( const [key, change] of Object.entries(this.value.assignments ?? {}) ) {
+        const ability = this.actor.system.toObject().abilities[key];
+        if ( !ability || !this.canImprove(key) ) continue;
+        updates[`system.abilities.${key}.value`] = ability.value - change;
+      }
+      this.actor.updateSource(updates);
+    }
+
+    else {
+      const [id, uuid] = Object.entries(this.value.feat ?? {})[0] ?? [];
+      const item = this.actor.items.get(id);
+      if ( item ) source.retainedItems = {[uuid]: item.toObject()};
+      this.actor.items.delete(id);
+    }
+
+    this.updateSource({ "value.assignments": null, "value.feat": null });
+    return source;
+  }
+}
 
 /**
  * Configuration application for hit points.
@@ -1148,15 +2082,30 @@ function simplifyBonus(bonus, data={}) {
 /* -------------------------------------------- */
 
 /**
+ * Transform an object, returning only the keys which match the provided filter.
+ * @param {object} obj         Object to transform.
+ * @param {Function} [filter]  Filtering function. If none is provided, it will just check for truthiness.
+ * @returns {string[]}         Array of filtered keys.
+ */
+function filteredKeys(obj, filter) {
+  filter ??= e => e;
+  return Object.entries(obj).filter(e => filter(e[1])).map(e => e[0]);
+}
+
+/* -------------------------------------------- */
+
+/**
  * Sort the provided object by its values or by an inner sortKey.
- * @param {object} obj        The object to sort.
- * @param {string} [sortKey]  An inner key upon which to sort.
- * @returns {object}          A copy of the original object that has been sorted.
+ * @param {object} obj                 The object to sort.
+ * @param {string|Function} [sortKey]  An inner key upon which to sort or sorting function.
+ * @returns {object}                   A copy of the original object that has been sorted.
  */
 function sortObjectEntries(obj, sortKey) {
   let sorted = Object.entries(obj);
-  if ( sortKey ) sorted = sorted.sort((a, b) => a[1][sortKey].localeCompare(b[1][sortKey]));
-  else sorted = sorted.sort((a, b) => a[1].localeCompare(b[1]));
+  const sort = (lhs, rhs) => foundry.utils.getType(lhs) === "string" ? lhs.localeCompare(rhs) : lhs - rhs;
+  if ( foundry.utils.getType(sortKey) === "function" ) sorted = sorted.sort((lhs, rhs) => sortKey(lhs[1], rhs[1]));
+  else if ( sortKey ) sorted = sorted.sort((lhs, rhs) => sort(lhs[1][sortKey], rhs[1][sortKey]));
+  else sorted = sorted.sort((lhs, rhs) => sort(lhs[1], rhs[1]));
   return Object.fromEntries(sorted);
 }
 
@@ -1246,12 +2195,14 @@ async function preloadHandlebarsTemplates() {
     "systems/dnd5e/templates/items/parts/item-description.hbs",
     "systems/dnd5e/templates/items/parts/item-mountable.hbs",
     "systems/dnd5e/templates/items/parts/item-spellcasting.hbs",
+    "systems/dnd5e/templates/items/parts/item-source.hbs",
     "systems/dnd5e/templates/items/parts/item-summary.hbs",
 
     // Journal Partials
     "systems/dnd5e/templates/journal/parts/journal-table.hbs",
 
     // Advancement Partials
+    "systems/dnd5e/templates/advancement/parts/advancement-ability-score-control.hbs",
     "systems/dnd5e/templates/advancement/parts/advancement-controls.hbs",
     "systems/dnd5e/templates/advancement/parts/advancement-spell-config.hbs"
   ];
@@ -1268,13 +2219,65 @@ async function preloadHandlebarsTemplates() {
 /* -------------------------------------------- */
 
 /**
+ * A helper to create a set of <option> elements in a <select> block grouped together
+ * in <optgroup> based on the provided categories.
+ *
+ * @param {SelectChoices} choices          Choices to format.
+ * @param {object} [options]
+ * @param {boolean} [options.localize]     Should the label be localized?
+ * @param {string} [options.blank]         Name for the empty option, if one should be added.
+ * @param {string} [options.labelAttr]     Attribute pointing to label string.
+ * @param {string} [options.chosenAttr]    Attribute pointing to chosen boolean.
+ * @param {string} [options.childrenAttr]  Attribute pointing to array of children.
+ * @returns {Handlebars.SafeString}        Formatted option list.
+ */
+function groupedSelectOptions(choices, options) {
+  const localize = options.hash.localize ?? false;
+  const blank = options.hash.blank ?? null;
+  const labelAttr = options.hash.labelAttr ?? "label";
+  const chosenAttr = options.hash.chosenAttr ?? "chosen";
+  const childrenAttr = options.hash.childrenAttr ?? "children";
+
+  // Create an option
+  const option = (name, label, chosen) => {
+    if ( localize ) label = game.i18n.localize(label);
+    html += `<option value="${name}" ${chosen ? "selected" : ""}>${label}</option>`;
+  };
+
+  // Create a group
+  const group = category => {
+    let label = category[labelAttr];
+    if ( localize ) game.i18n.localize(label);
+    html += `<optgroup label="${label}">`;
+    children(category[childrenAttr]);
+    html += "</optgroup>";
+  };
+
+  // Add children
+  const children = children => {
+    for ( let [name, child] of Object.entries(children) ) {
+      if ( child[childrenAttr] ) group(child);
+      else option(name, child[labelAttr], child[chosenAttr] ?? false);
+    }
+  };
+
+  // Create the options
+  let html = "";
+  if ( blank !== null ) option("", blank);
+  children(choices);
+  return new Handlebars.SafeString(html);
+}
+
+/* -------------------------------------------- */
+
+/**
  * A helper that fetch the appropriate item context from root and adds it to the first block parameter.
  * @param {object} context  Current evaluation context.
  * @param {object} options  Handlebars options.
  * @returns {string}
  */
 function itemContext(context, options) {
-  if ( arguments.length !== 2 ) throw new Error("#dnd5e-with requires exactly one argument");
+  if ( arguments.length !== 2 ) throw new Error("#dnd5e-itemContext requires exactly one argument");
   if ( foundry.utils.getType(context) === "function" ) context = context.call(this);
 
   const ctx = options.data.root.itemContext?.[context.id];
@@ -1294,6 +2297,7 @@ function itemContext(context, options) {
 function registerHandlebarsHelpers() {
   Handlebars.registerHelper({
     getProperty: foundry.utils.getProperty,
+    "dnd5e-groupedSelectOptions": groupedSelectOptions,
     "dnd5e-linkForUuid": linkForUuid,
     "dnd5e-itemContext": itemContext
   });
@@ -1369,8 +2373,9 @@ function _localizeObject(obj, keys) {
     }
 
     for ( const key of keys ) {
-      if ( !v[key] ) continue;
-      v[key] = game.i18n.localize(v[key]);
+      const value = foundry.utils.getProperty(v, key);
+      if ( !value ) continue;
+      foundry.utils.setProperty(v, key, game.i18n.localize(value));
     }
   }
 }
@@ -1451,6 +2456,7 @@ function _synchronizeActorSpells(actor, spellsMap) {
 
 var utils = /*#__PURE__*/Object.freeze({
   __proto__: null,
+  filteredKeys: filteredKeys,
   indexFromUuid: indexFromUuid,
   linkForUuid: linkForUuid,
   performPreLocalization: performPreLocalization,
@@ -1468,7 +2474,7 @@ var utils = /*#__PURE__*/Object.freeze({
  * Keeps track of player hit point rolls or selection for each class level. **Can only be added to classes and each
  * class can only have one.**
  */
-class HitPointsAdvancement extends Advancement$1 {
+class HitPointsAdvancement extends Advancement {
 
   /** @inheritdoc */
   static get metadata() {
@@ -1652,6 +2658,7 @@ class ItemGrantConfig extends AdvancementConfig {
   /** @inheritdoc */
   static get defaultOptions() {
     return foundry.utils.mergeObject(super.defaultOptions, {
+      classes: ["dnd5e", "advancement", "item-grant"],
       dragDrop: [{ dropSelector: ".drop-target" }],
       dropKeyPath: "items",
       template: "systems/dnd5e/templates/advancement/item-grant-config.hbs"
@@ -1661,9 +2668,9 @@ class ItemGrantConfig extends AdvancementConfig {
   /* -------------------------------------------- */
 
   /** @inheritdoc */
-  getData() {
-    const context = super.getData();
-    context.showSpellConfig = context.configuration.items.map(fromUuidSync).some(i => i.type === "spell");
+  getData(options={}) {
+    const context = super.getData(options);
+    context.showSpellConfig = context.configuration.items.map(uuid => fromUuidSync(uuid)).some(i => i?.type === "spell");
     return context;
   }
 
@@ -1671,9 +2678,7 @@ class ItemGrantConfig extends AdvancementConfig {
 
   /** @inheritdoc */
   _validateDroppedItem(event, item) {
-    if ( this.advancement.constructor.VALID_TYPES.has(item.type) ) return true;
-    const type = game.i18n.localize(`ITEM.Type${item.type.capitalize()}`);
-    throw new Error(game.i18n.format("DND5E.AdvancementItemTypeInvalidWarning", { type }));
+    this.advancement._validateItemType(item);
   }
 }
 
@@ -1691,23 +2696,31 @@ class ItemGrantFlow extends AdvancementFlow {
 
   /* -------------------------------------------- */
 
-  /** @inheritdoc */
-  async getData() {
+  /**
+   * Produce the rendering context for this flow.
+   * @returns {object}
+   */
+  async getContext() {
     const config = this.advancement.configuration.items;
     const added = this.retainedData?.items.map(i => foundry.utils.getProperty(i, "flags.dnd5e.sourceId"))
       ?? this.advancement.value.added;
     const checked = new Set(Object.values(added ?? {}));
-
-    const items = await Promise.all(config.map(fromUuid));
-    return foundry.utils.mergeObject(super.getData(), {
+    return {
       optional: this.advancement.configuration.optional,
-      items: items.reduce((arr, item) => {
+      items: (await Promise.all(config.map(uuid => fromUuid(uuid)))).reduce((arr, item) => {
         if ( !item ) return arr;
         item.checked = added ? checked.has(item.uuid) : true;
         arr.push(item);
         return arr;
       }, [])
-    });
+    };
+  }
+
+  /* -------------------------------------------- */
+
+  /** @inheritdoc */
+  async getData(options={}) {
+    return foundry.utils.mergeObject(super.getData(options), await this.getContext());
   }
 
   /* -------------------------------------------- */
@@ -1745,6 +2758,7 @@ class ItemGrantFlow extends AdvancementFlow {
 }
 
 class SpellConfigurationData extends foundry.abstract.DataModel {
+  /** @inheritdoc */
   static defineSchema() {
     return {
       ability: new foundry.data.fields.StringField({label: "DND5E.AbilityModifier"}),
@@ -1783,6 +2797,7 @@ class SpellConfigurationData extends foundry.abstract.DataModel {
 }
 
 class ItemGrantConfigurationData extends foundry.abstract.DataModel {
+  /** @inheritdoc */
   static defineSchema() {
     return {
       items: new foundry.data.fields.ArrayField(new foundry.data.fields.StringField(), {
@@ -1802,7 +2817,7 @@ class ItemGrantConfigurationData extends foundry.abstract.DataModel {
  * Advancement that automatically grants one or more items to the player. Presents the player with the option of
  * skipping any or all of the items.
  */
-class ItemGrantAdvancement extends Advancement$1 {
+class ItemGrantAdvancement extends Advancement {
 
   /** @inheritdoc */
   static get metadata() {
@@ -1861,6 +2876,17 @@ class ItemGrantAdvancement extends Advancement$1 {
   /* -------------------------------------------- */
 
   /**
+   * Location where the added items are stored for the specified level.
+   * @param {number} level  Level being advanced.
+   * @returns {string}
+   */
+  storagePath(level) {
+    return "value.added";
+  }
+
+  /* -------------------------------------------- */
+
+  /**
    * Locally apply this advancement to the actor.
    * @param {number} level              Level being advanced.
    * @param {object} data               Data from the advancement form.
@@ -1890,7 +2916,7 @@ class ItemGrantAdvancement extends Advancement$1 {
       updates[itemData._id] = uuid;
     }
     this.actor.updateSource({items});
-    this.updateSource({"value.added": updates});
+    this.updateSource({[this.storagePath(level)]: updates});
   }
 
   /* -------------------------------------------- */
@@ -1902,7 +2928,7 @@ class ItemGrantAdvancement extends Advancement$1 {
       this.actor.updateSource({items: [item]});
       updates[item._id] = item.flags.dnd5e.sourceId;
     }
-    this.updateSource({"value.added": updates});
+    this.updateSource({[this.storagePath(level)]: updates});
   }
 
   /* -------------------------------------------- */
@@ -1910,16 +2936,970 @@ class ItemGrantAdvancement extends Advancement$1 {
   /** @inheritdoc */
   reverse(level) {
     const items = [];
-    for ( const id of Object.keys(this.value.added ?? {}) ) {
+    const keyPath = this.storagePath(level);
+    for ( const id of Object.keys(foundry.utils.getProperty(this, keyPath) ?? {}) ) {
       const item = this.actor.items.get(id);
       if ( item ) items.push(item.toObject());
       this.actor.items.delete(id);
     }
-    this.updateSource({ "value.-=added": null });
+    this.updateSource({[keyPath.replace(/\.([\w\d]+)$/, ".-=$1")]: null});
     return { items };
   }
 
+  /* -------------------------------------------- */
+
+  /**
+   * Verify that the provided item can be used with this advancement based on the configuration.
+   * @param {Item5e} item                   Item that needs to be tested.
+   * @param {object} config
+   * @param {boolean} [config.strict=true]  Should an error be thrown when an invalid type is encountered?
+   * @returns {boolean}                     Is this type valid?
+   * @throws An error if the item is invalid and strict is `true`.
+   */
+  _validateItemType(item, { strict=true }={}) {
+    if ( this.constructor.VALID_TYPES.has(item.type) ) return true;
+    const type = game.i18n.localize(CONFIG.Item.typeLabels[item.type]);
+    if ( strict ) throw new Error(game.i18n.format("DND5E.AdvancementItemTypeInvalidWarning", {type}));
+    return false;
+  }
 }
+
+/**
+ * Configuration application for item choices.
+ */
+class ItemChoiceConfig extends AdvancementConfig {
+
+  /** @inheritdoc */
+  static get defaultOptions() {
+    return foundry.utils.mergeObject(super.defaultOptions, {
+      classes: ["dnd5e", "advancement", "item-choice", "two-column"],
+      dragDrop: [{ dropSelector: ".drop-target" }],
+      dropKeyPath: "pool",
+      template: "systems/dnd5e/templates/advancement/item-choice-config.hbs",
+      width: 540
+    });
+  }
+
+  /* -------------------------------------------- */
+
+  /** @inheritdoc */
+  getData(options={}) {
+    const context = {
+      ...super.getData(options),
+      showSpellConfig: this.advancement.configuration.type === "spell",
+      validTypes: this.advancement.constructor.VALID_TYPES.reduce((obj, type) => {
+        obj[type] = game.i18n.localize(CONFIG.Item.typeLabels[type]);
+        return obj;
+      }, {})
+    };
+    if ( this.advancement.configuration.type === "feat" ) {
+      const selectedType = CONFIG.DND5E.featureTypes[this.advancement.configuration.restriction.type];
+      context.typeRestriction = {
+        typeLabel: game.i18n.localize("DND5E.ItemFeatureType"),
+        typeOptions: CONFIG.DND5E.featureTypes,
+        subtypeLabel: game.i18n.format("DND5E.ItemFeatureSubtype", {category: selectedType?.label}),
+        subtypeOptions: selectedType?.subtypes
+      };
+    }
+    return context;
+  }
+
+  /* -------------------------------------------- */
+
+  /** @inheritdoc */
+  async prepareConfigurationUpdate(configuration) {
+    if ( configuration.choices ) configuration.choices = this.constructor._cleanedObject(configuration.choices);
+
+    // Ensure items are still valid if type restriction or spell restriction are changed
+    const pool = [];
+    for ( const uuid of (configuration.pool ?? this.advancement.configuration.pool) ) {
+      if ( this.advancement._validateItemType(await fromUuid(uuid), {
+        type: configuration.type, restriction: configuration.restriction ?? {}, strict: false
+      }) ) pool.push(uuid);
+    }
+    configuration.pool = pool;
+
+    return configuration;
+  }
+
+  /* -------------------------------------------- */
+
+  /** @inheritdoc */
+  _validateDroppedItem(event, item) {
+    this.advancement._validateItemType(item);
+  }
+}
+
+/**
+ * Object describing the proficiency for a specific ability or skill.
+ *
+ * @param {number} proficiency   Actor's flat proficiency bonus based on their current level.
+ * @param {number} multiplier    Value by which to multiply the actor's base proficiency value.
+ * @param {boolean} [roundDown]  Should half-values be rounded up or down?
+ */
+class Proficiency {
+  constructor(proficiency, multiplier, roundDown=true) {
+
+    /**
+     * Base proficiency value of the actor.
+     * @type {number}
+     * @private
+     */
+    this._baseProficiency = Number(proficiency ?? 0);
+
+    /**
+     * Value by which to multiply the actor's base proficiency value.
+     * @type {number}
+     */
+    this.multiplier = Number(multiplier ?? 0);
+
+    /**
+     * Direction decimal results should be rounded ("up" or "down").
+     * @type {string}
+     */
+    this.rounding = roundDown ? "down" : "up";
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * Calculate an actor's proficiency modifier based on level or CR.
+   * @param {number} level  Level or CR To use for calculating proficiency modifier.
+   * @returns {number}      Proficiency modifier.
+   */
+  static calculateMod(level) {
+    return Math.floor((level + 7) / 4);
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * Flat proficiency value regardless of proficiency mode.
+   * @type {number}
+   */
+  get flat() {
+    const roundMethod = (this.rounding === "down") ? Math.floor : Math.ceil;
+    return roundMethod(this.multiplier * this._baseProficiency);
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * Dice-based proficiency value regardless of proficiency mode.
+   * @type {string}
+   */
+  get dice() {
+    if ( (this._baseProficiency === 0) || (this.multiplier === 0) ) return "0";
+    const roundTerm = (this.rounding === "down") ? "floor" : "ceil";
+    if ( this.multiplier === 0.5 ) {
+      return `${roundTerm}(1d${this._baseProficiency * 2} / 2)`;
+    } else {
+      return `${this.multiplier}d${this._baseProficiency * 2}`;
+    }
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * Either flat or dice proficiency term based on configured setting.
+   * @type {string}
+   */
+  get term() {
+    return (game.settings.get("dnd5e", "proficiencyModifier") === "dice") ? this.dice : String(this.flat);
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * Whether the proficiency is greater than zero.
+   * @type {boolean}
+   */
+  get hasProficiency() {
+    return (this._baseProficiency > 0) && (this.multiplier > 0);
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * Override the default `toString` method to return flat proficiency for backwards compatibility in formula.
+   * @returns {string}  Flat proficiency value.
+   */
+  toString() {
+    return this.term;
+  }
+}
+
+/**
+ * Object representing a nested set of choices to be displayed in a grouped select list or a trait selector.
+ *
+ * @typedef {object} SelectChoicesEntry
+ * @property {string} label              Label, either pre- or post-localized.
+ * @property {boolean} [chosen]          Has this choice been selected?
+ * @property {boolean} [sorting=true]    Should this value be sorted? If there are a mixture of this value at
+ *                                       a level, unsorted values are listed first followed by sorted values.
+ * @property {SelectChoices} [children]  Nested choices. If wildcard filtering support is desired, then trait keys
+ *                                       should be provided prefixed for children (e.g. `parent:child`, rather than
+  *                                      just `child`).
+ */
+
+/**
+ * Object with a number of methods for performing actions on a nested set of choices.
+ *
+ * @param {Object<string, SelectChoicesEntry>} [choices={}]  Initial choices for the object.
+ */
+class SelectChoices {
+  constructor(choices={}) {
+    const clone = foundry.utils.deepClone(choices);
+    for ( const value of Object.values(clone) ) {
+      if ( !value.children || (value.children instanceof SelectChoices) ) continue;
+      value.category = true;
+      value.children = new this.constructor(value.children);
+    }
+    Object.assign(this, clone);
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * Create a set of available choice keys.
+   * @param {Set<string>} [set]  Existing set to which the values will be added.
+   * @returns {Set<string>}
+   */
+  asSet(set) {
+    set ??= new Set();
+    for ( const [key, choice] of Object.entries(this) ) {
+      if ( choice.children ) choice.children.asSet(set);
+      else set.add(key);
+    }
+    return set;
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * Create a clone of this object.
+   * @returns {SelectChoices}
+   */
+  clone() {
+    const newData = {};
+    for ( const [key, value] of Object.entries(this) ) {
+      newData[key] = foundry.utils.deepClone(value);
+      if ( value.children ) newData[key].children = value.children.clone();
+    }
+    const clone = new this.constructor(newData);
+    return clone;
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * Merge another SelectChoices object into this one.
+   * @param {SelectChoices} other
+   * @param {object} [options={}]
+   * @param {boolean} [options.inplace=true]  Should this SelectChoices be mutated or a new one returned?
+   * @returns {SelectChoices}
+   */
+  merge(other, { inplace=true }={}) {
+    if ( !inplace ) return this.clone().merge(other);
+    return foundry.utils.mergeObject(this, other);
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * Internal sorting method.
+   * @param {object} lhs
+   * @param {object} rhs
+   * @returns {number}
+   * @protected
+   */
+  _sort(lhs, rhs) {
+    if ( (lhs.sorting === false) && (rhs.sorting === false) ) return 0;
+    if ( lhs.sorting === false ) return -1;
+    if ( rhs.sorting === false ) return 1;
+    return lhs.label.localeCompare(rhs.label);
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * Sort the entries using the label.
+   * @param {object} [options={}]
+   * @param {boolean} [options.inplace=true]  Should this SelectChoices be mutated or a new one returned?
+   * @returns {SelectChoices}
+   */
+  sort({ inplace=true }={}) {
+    const sorted = new SelectChoices(sortObjectEntries(this, this._sort));
+
+    if ( inplace ) {
+      for ( const key of Object.keys(this) ) delete this[key];
+      this.merge(sorted);
+      for ( const entry of Object.values(this) ) {
+        if ( entry.children ) entry.children.sort();
+      }
+      return this;
+    }
+
+    else {
+      for ( const entry of Object.values(sorted) ) {
+        if ( entry.children ) entry.children = entry.children.sort({ inplace });
+      }
+      return sorted;
+    }
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * Filters choices in place to only include the provided keys.
+   * @param {Set<string>|SelectChoices} filter   Keys of traits to retain or another SelectChoices object.
+   * @param {object} [options={}]
+   * @param {boolean} [options.inplace=true]     Should this SelectChoices be mutated or a new one returned?
+   * @returns {SelectChoices}                    This SelectChoices with filter applied.
+   *
+   * @example
+   * const choices = new SelectChoices({
+   *   categoryOne: { label: "One" },
+   *   categoryTwo: { label: "Two", children: {
+   *     childOne: { label: "Child One" },
+   *     childTwo: { label: "Child Two" }
+   *   } }
+   * });
+   *
+   * // Results in only categoryOne
+   * choices.filter(new Set(["categoryOne"]));
+   *
+   * // Results in only categoryTwo, but none if its children
+   * choices.filter(new Set(["categoryTwo"]));
+   *
+   * // Results in categoryTwo and all of its children
+   * choices.filter(new Set(["categoryTwo:*"]));
+   *
+   * // Results in categoryTwo with only childOne
+   * choices.filter(new Set(["categoryTwo:childOne"]));
+   *
+   * // Results in categoryOne, plus categoryTwo with only childOne
+   * choices.filter(new Set(["categoryOne", "categoryTwo:childOne"]));
+   *
+   * @example
+   * const choices = new SelectChoices({
+   *   "type:categoryOne": { label: "One" },
+   *   "type:categoryTwo": { label: "Two", children: {
+   *     "type:categoryOne:childOne": { label: "Child One" },
+   *     "type:categoryOne:childTwo": { label: "Child Two" }
+   *   } }
+   * });
+   *
+   * // Results in no changes
+   * choices.filter(new Set(["type:*"]));
+   *
+   * // Results in only categoryOne
+   * choices.filter(new Set(["type:categoryOne"]));
+   *
+   * // Results in categoryTwo and all of its children
+   * choices.filter(new Set(["type:categoryTwo:*"]));
+   *
+   * // Results in categoryTwo with only childOne
+   * choices.filter(new Set(["type:categoryTwo:childOne"]));
+   */
+  filter(filter, { inplace=true }={}) {
+    if ( !inplace ) return this.clone().filter(filter);
+    if ( filter instanceof SelectChoices ) filter = filter.asSet();
+
+    for ( const [key, trait] of Object.entries(this) ) {
+      // Remove children if direct match and no wildcard for this category present
+      const wildcardKey = key.replace(/(:|^)(\w+)$/, "$1*");
+      if ( filter.has(key) && !filter.has(wildcardKey) ) {
+        if ( trait.children ) delete trait.children;
+      }
+
+      // Check children, remove entry if no children match filter
+      else if ( !filter.has(wildcardKey) && !filter.has(`${key}:*`) ) {
+        if ( trait.children ) trait.children.filter(filter);
+        if ( foundry.utils.isEmpty(trait.children ?? {}) ) delete this[key];
+      }
+    }
+
+    return this;
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * Removes in place any traits or categories the keys of which are included in the exclusion set.
+   * Note: Wildcard keys are not supported with this method.
+   * @param {Set<string>} keys                Set of keys to remove from the choices.
+   * @param {object} [options={}]
+   * @param {boolean} [options.inplace=true]  Should this SelectChoices be mutated or a new one returned?
+   * @returns {SelectChoices}                 This SelectChoices with excluded keys removed.
+   *
+   * @example
+   * const choices = new SelectChoices({
+   *   categoryOne: { label: "One" },
+   *   categoryTwo: { label: "Two", children: {
+   *     childOne: { label: "Child One" },
+   *     childTwo: { label: "Child Two" }
+   *   } }
+   * });
+   *
+   * // Results in categoryOne being removed
+   * choices.exclude(new Set(["categoryOne"]));
+   *
+   * // Results in categoryOne and childOne being removed, but categoryTwo and childTwo remaining
+   * choices.exclude(new Set(["categoryOne", "categoryTwo:childOne"]));
+   */
+  exclude(keys, { inplace=true }={}) {
+    if ( !inplace ) return this.clone().exclude(keys);
+    for ( const [key, trait] of Object.entries(this) ) {
+      if ( keys.has(key) ) delete this[key];
+      else if ( trait.children ) trait.children = trait.children.exclude(keys);
+    }
+    return this;
+  }
+}
+
+/**
+ * Cached version of the base items compendia indices with the needed subtype fields.
+ * @type {object}
+ * @private
+ */
+const _cachedIndices = {};
+
+/**
+ * Determine the appropriate label to use for a trait category.
+ * @param {object|string} data  Category for which to fetch the label.
+ * @param {object} config       Trait configuration data.
+ * @returns {string}
+ * @private
+ */
+function _innerLabel(data, config) {
+  return foundry.utils.getType(data) === "Object"
+    ? foundry.utils.getProperty(data, config.labelKeyPath ?? "label") : data;
+}
+
+/* -------------------------------------------- */
+/*  Application                                 */
+/* -------------------------------------------- */
+
+/**
+ * Get the key path to the specified trait on an actor.
+ * @param {string} trait  Trait as defined in `CONFIG.DND5E.traits`.
+ * @returns {string}      Key path to this trait's object within an actor's system data.
+ */
+function actorKeyPath(trait) {
+  const traitConfig = CONFIG.DND5E.traits[trait];
+  if ( traitConfig.actorKeyPath ) return traitConfig.actorKeyPath;
+  return `system.traits.${trait}`;
+}
+
+/* -------------------------------------------- */
+
+/**
+ * Get the current trait values for the provided actor.
+ * @param {Actor5e} actor  Actor from which to retrieve the values.
+ * @param {string} trait          Trait as defined in `CONFIG.DND5E.traits`.
+ * @returns {Object<number>}
+ */
+function actorValues(actor, trait) {
+  const keyPath = actorKeyPath(trait);
+  const data = foundry.utils.getProperty(actor, keyPath);
+  if ( !data ) return {};
+  const values = {};
+
+  if ( ["skills", "tool"].includes(trait) ) {
+    Object.entries(data).forEach(([k, d]) => values[`${trait}:${k}`] = d.value);
+  } else if ( trait === "saves" ) {
+    Object.entries(data).forEach(([k, d]) => values[`${trait}:${k}`] = d.proficient);
+  } else {
+    data.value.forEach(v => values[`${trait}:${v}`] = 1);
+  }
+
+  return values;
+}
+
+/* -------------------------------------------- */
+
+/**
+ * Calculate the change key path for a provided trait key.
+ * @param {string} key      Key for a trait to set.
+ * @param {string} [trait]  Trait as defined in `CONFIG.DND5E.traits`, only needed if key isn't prefixed.
+ * @returns {string|void}
+ */
+function changeKeyPath(key, trait) {
+  const split = key.split(":");
+  if ( !trait ) trait = split.shift();
+
+  const traitConfig = CONFIG.DND5E.traits[trait];
+  if ( !traitConfig ) return;
+
+  let keyPath = actorKeyPath(trait);
+
+  if ( trait === "saves" ) {
+    return `${keyPath}.${split.pop()}.proficient`;
+  } else if ( ["skills", "tool"].includes(trait) ) {
+    return `${keyPath}.${split.pop()}.value`;
+  } else {
+    return `${keyPath}.value`;
+  }
+}
+
+/* -------------------------------------------- */
+/*  Trait Lists                                 */
+/* -------------------------------------------- */
+
+/**
+ * Build up a trait structure containing all of the children gathered from config & base items.
+ * @param {string} trait       Trait as defined in `CONFIG.DND5E.traits`.
+ * @returns {Promise<object>}  Object with trait categories and children.
+ */
+async function categories(trait) {
+  const traitConfig = CONFIG.DND5E.traits[trait];
+  const config = foundry.utils.deepClone(CONFIG.DND5E[traitConfig.configKey ?? trait]);
+
+  for ( const key of Object.keys(config) ) {
+    if ( foundry.utils.getType(config[key]) !== "Object" ) config[key] = { label: config[key] };
+    if ( traitConfig.children?.[key] ) {
+      const children = config[key].children ??= {};
+      for ( const [childKey, value] of Object.entries(CONFIG.DND5E[traitConfig.children[key]]) ) {
+        if ( foundry.utils.getType(value) !== "Object" ) children[childKey] = { label: value };
+        else children[childKey] = { ...value };
+      }
+    }
+  }
+
+  if ( traitConfig.subtypes ) {
+    const keyPath = `system.${traitConfig.subtypes.keyPath}`;
+    const map = CONFIG.DND5E[`${trait}ProficienciesMap`];
+
+    // Merge all ID lists together
+    const ids = traitConfig.subtypes.ids.reduce((obj, key) => {
+      foundry.utils.mergeObject(obj, CONFIG.DND5E[key] ?? {});
+      return obj;
+    }, {});
+
+    // Fetch base items for all IDs
+    const baseItems = await Promise.all(Object.entries(ids).map(async ([key, id]) => {
+      const index = await getBaseItem(id);
+      return [key, index];
+    }));
+
+    // Sort base items as children of categories based on subtypes
+    for ( const [key, index] of baseItems ) {
+      if ( !index ) continue;
+
+      // Get the proper subtype, using proficiency map if needed
+      let type = foundry.utils.getProperty(index, keyPath);
+      if ( map?.[type] ) type = map[type];
+
+      // No category for this type, add at top level
+      if ( !config[type] ) config[key] = { label: index.name };
+
+      // Add as child of appropriate category
+      else {
+        config[type].children ??= {};
+        config[type].children[key] = { label: index.name };
+      }
+    }
+  }
+
+  return config;
+}
+
+/* -------------------------------------------- */
+
+/**
+ * Get a list of choices for a specific trait.
+ * @param {string} trait                      Trait as defined in `CONFIG.DND5E.traits`.
+ * @param {object} [options={}]
+ * @param {Set<string>} [options.chosen=[]]   Optional list of keys to be marked as chosen.
+ * @param {boolean} [options.prefixed=false]  Should keys be prefixed with trait type?
+ * @param {boolean} [options.any=false]       Should the "Any" option be added to each category?
+ * @returns {Promise<SelectChoices>}          Object mapping proficiency ids to choice objects.
+ */
+async function choices(trait, { chosen=new Set(), prefixed=false, any=false }={}) {
+  const traitConfig = CONFIG.DND5E.traits[trait];
+  if ( !traitConfig ) return new SelectChoices();
+  if ( foundry.utils.getType(chosen) === "Array" ) chosen = new Set(chosen);
+  const categoryData = await categories(trait);
+
+  let result = {};
+  if ( prefixed && any ) {
+    const key = `${trait}:*`;
+    result[key] = {
+      label: keyLabel(key).titleCase(),
+      chosen: chosen.has(key), sorting: false, wildcard: true
+    };
+  }
+
+  const prepareCategory = (key, data, result, prefix) => {
+    let label = _innerLabel(data, traitConfig);
+    if ( !label ) label = key;
+    if ( prefixed ) key = `${prefix}:${key}`;
+    result[key] = {
+      label: game.i18n.localize(label),
+      chosen: chosen.has(key),
+      sorting: traitConfig.sortCategories === true
+    };
+    if ( data.children ) {
+      const children = result[key].children = {};
+      if ( prefixed && any ) {
+        const anyKey = `${key}:*`;
+        children[anyKey] = {
+          label: keyLabel(anyKey).titleCase(),
+          chosen: chosen.has(anyKey), sorting: false, wildcard: true
+        };
+      }
+      Object.entries(data.children).forEach(([k, v]) => prepareCategory(k, v, children, key));
+    }
+  };
+
+  Object.entries(categoryData).forEach(([k, v]) => prepareCategory(k, v, result, trait));
+
+  return new SelectChoices(result).sort();
+}
+
+/* -------------------------------------------- */
+
+/**
+ * Prepare an object with all possible choices from a set of keys. These choices will be grouped by
+ * trait type if more than one type is present.
+ * @param {Set<string>} keys  Prefixed trait keys.
+ * @returns {Promise<SelectChoices>}
+ */
+async function mixedChoices(keys) {
+  if ( !keys.size ) return new SelectChoices();
+  const types = {};
+  for ( const key of keys ) {
+    const split = key.split(":");
+    const trait = split.shift();
+    const selectChoices = (await choices(trait, { prefixed: true })).filter(new Set([key]));
+    types[trait] ??= { label: traitLabel(trait), children: new SelectChoices() };
+    types[trait].children.merge(selectChoices);
+  }
+  if ( Object.keys(types).length > 1 ) return new SelectChoices(types);
+  return Object.values(types)[0].children;
+}
+
+/* -------------------------------------------- */
+
+/**
+ * Fetch an item for the provided ID. If the provided ID contains a compendium pack name
+ * it will be fetched from that pack, otherwise it will be fetched from the compendium defined
+ * in `DND5E.sourcePacks.ITEMS`.
+ * @param {string} identifier            Simple ID or compendium name and ID separated by a dot.
+ * @param {object} [options]
+ * @param {boolean} [options.indexOnly]  If set to true, only the index data will be fetched (will never return
+ *                                       Promise).
+ * @param {boolean} [options.fullItem]   If set to true, the full item will be returned as long as `indexOnly` is
+ *                                       false.
+ * @returns {Promise<Item5e>|object}     Promise for a `Document` if `indexOnly` is false & `fullItem` is true,
+ *                                       otherwise else a simple object containing the minimal index data.
+ */
+function getBaseItem(identifier, { indexOnly=false, fullItem=false }={}) {
+  let pack = CONFIG.DND5E.sourcePacks.ITEMS;
+  let [scope, collection, id] = identifier.split(".");
+  if ( scope && collection ) pack = `${scope}.${collection}`;
+  if ( !id ) id = identifier;
+
+  const packObject = game.packs.get(pack);
+
+  // Full Item5e document required, always async.
+  if ( fullItem && !indexOnly ) return packObject?.getDocument(id);
+
+  const cache = _cachedIndices[pack];
+  const loading = cache instanceof Promise;
+
+  // Return extended index if cached, otherwise normal index, guaranteed to never be async.
+  if ( indexOnly ) {
+    const index = packObject?.index.get(id);
+    return loading ? index : cache?.[id] ?? index;
+  }
+
+  // Returned cached version of extended index if available.
+  if ( loading ) return cache.then(() => _cachedIndices[pack][id]);
+  else if ( cache ) return cache[id];
+  if ( !packObject ) return;
+
+  // Build the extended index and return a promise for the data
+  const promise = packObject.getIndex({ fields: traitIndexFields() }).then(index => {
+    const store = index.reduce((obj, entry) => {
+      obj[entry._id] = entry;
+      return obj;
+    }, {});
+    _cachedIndices[pack] = store;
+    return store[id];
+  });
+  _cachedIndices[pack] = promise;
+  return promise;
+}
+
+/* -------------------------------------------- */
+
+/**
+ * List of fields on items that should be indexed for retrieving subtypes.
+ * @returns {string[]}  Index list to pass to `Compendium#getIndex`.
+ * @protected
+ */
+function traitIndexFields() {
+  const fields = [];
+  for ( const traitConfig of Object.values(CONFIG.DND5E.traits) ) {
+    if ( !traitConfig.subtypes ) continue;
+    fields.push(`system.${traitConfig.subtypes.keyPath}`);
+  }
+  return fields;
+}
+
+/* -------------------------------------------- */
+/*  Localized Formatting Methods                */
+/* -------------------------------------------- */
+
+/**
+ * Get the localized label for a specific trait type.
+ * @param {string} trait    Trait as defined in `CONFIG.DND5E.traits`.
+ * @param {number} [count]  Count used to determine pluralization. If no count is provided, will default to
+ *                          the 'other' pluralization.
+ * @returns {string}        Localized label.
+ */
+function traitLabel(trait, count) {
+  const traitConfig = CONFIG.DND5E.traits[trait];
+  const pluralRule = (count !== undefined) ? new Intl.PluralRules(game.i18n.lang).select(count) : "other";
+  if ( !traitConfig ) return game.i18n.localize(`DND5E.TraitGenericPlural.${pluralRule}`);
+  return game.i18n.localize(`${traitConfig.labels.localization}.${pluralRule}`);
+}
+
+/* -------------------------------------------- */
+
+/**
+ * Retrieve the proper display label for the provided key. Will return a promise unless a categories
+ * object is provided in config.
+ * @param {string} key              Key for which to generate the label.
+ * @param {object} [config={}]
+ * @param {number} [config.count]   Number to display, only if a wildcard is used as final part of key.
+ * @param {string} [config.trait]   Trait as defined in `CONFIG.DND5E.traits` if not using a prefixed key.
+ * @param {boolean} [config.final]  Is this the final in a list?
+ * @returns {string}                Retrieved label.
+ *
+ * @example
+ * // Returns "Tool Proficiency"
+ * keyLabel("tool");
+ *
+ * @example
+ * // Returns "Artisan's Tools"
+ * keyLabel("tool:art");
+ *
+ * @example
+ * // Returns "any Artisan's Tools"
+ * keyLabel("tool:art:*");
+ *
+ * @example
+ * // Returns "any 2 Artisan's Tools"
+ * keyLabel("tool:art:*", { count: 2 });
+ *
+ * @example
+ * // Returns "2 other Artisan's Tools"
+ * keyLabel("tool:art:*", { count: 2, final: true });
+ *
+ * @example
+ * // Returns "Gaming Sets"
+ * keyLabel("tool:game");
+ *
+ * @example
+ * // Returns "Land Vehicle"
+ * keyLabel("tool:vehicle:land");
+ *
+ * @example
+ * // Returns "Shortsword"
+ * keyLabel("weapon:shortsword");
+ * keyLabel("weapon:simple:shortsword");
+ * keyLabel("shortsword", { trait: "weapon" });
+ */
+function keyLabel(key, config={}) {
+  if ( foundry.utils.getType(config) === "string" ) {
+    foundry.utils.logCompatibilityWarning("Trait.keyLabel(trait, key) is now Trait.keyLabel(key, { trait }).", {
+      since: "DnD5e 2.4", until: "DnD5e 2.6"
+    });
+    const tmp = config;
+    config = { trait: key };
+    key = tmp;
+  }
+  let { count, trait, final } = config;
+
+  let parts = key.split(":");
+  const pluralRules = new Intl.PluralRules(game.i18n.lang);
+
+  if ( !trait ) trait = parts.shift();
+  const traitConfig = CONFIG.DND5E.traits[trait];
+  if ( !traitConfig ) return key;
+  const traitData = CONFIG.DND5E[traitConfig.configKey ?? trait] ?? {};
+  let categoryLabel = game.i18n.localize(`${traitConfig.labels.localization}.${
+    pluralRules.select(count ?? 1)}`);
+
+  // Trait (e.g. "Tool Proficiency")
+  const lastKey = parts.pop();
+  if ( !lastKey ) return categoryLabel;
+
+  // Wildcards (e.g. "Artisan's Tools", "any Artisan's Tools", "any 2 Artisan's Tools", or "2 other Artisan's Tools")
+  if ( lastKey === "*" ) {
+    let type;
+    if ( parts.length ) {
+      let category = traitData;
+      do {
+        category = (category.children ?? category)[parts.shift()];
+        if ( !category ) return key;
+      } while ( parts.length );
+      type = _innerLabel(category, traitConfig);
+    } else type = categoryLabel.toLowerCase();
+    const localization = `DND5E.TraitConfigChoose${final ? "Other" : `Any${count ? "Counted" : "Uncounted"}`}`;
+    return game.i18n.format(localization, { count: count ?? 1, type });
+  }
+
+  else {
+    // Category (e.g. "Gaming Sets")
+    const category = traitData[lastKey];
+    if ( category ) return _innerLabel(category, traitConfig);
+
+    // Child (e.g. "Land Vehicle")
+    for ( const childrenKey of Object.values(traitConfig.children ?? {}) ) {
+      const childLabel = CONFIG.DND5E[childrenKey]?.[lastKey];
+      if ( childLabel ) return childLabel;
+    }
+
+    // Base item (e.g. "Shortsword")
+    for ( const idsKey of traitConfig.subtypes?.ids ?? [] ) {
+      const baseItemId = CONFIG.DND5E[idsKey]?.[lastKey];
+      if ( !baseItemId ) continue;
+      const index = getBaseItem(baseItemId, { indexOnly: true });
+      if ( index ) return index.name;
+      break;
+    }
+
+    // Explicit categories (e.g. languages)
+    const searchCategory = (data, key) => {
+      for ( const [k, v] of Object.entries(data) ) {
+        if ( k === key ) return v;
+        if ( v.children ) {
+          const result = searchCategory(v.children, key);
+          if ( result ) return result;
+        }
+      }
+    };
+    const config = searchCategory(traitData, lastKey);
+    return config ? _innerLabel(config, traitConfig) : key;
+  }
+}
+
+/* -------------------------------------------- */
+
+/**
+ * Create a human readable description of the provided choice.
+ * @param {TraitChoice} choice             Data for a specific choice.
+ * @param {object} [options={}]
+ * @param {boolean} [options.only=false]   Is this choice on its own, or part of a larger list?
+ * @param {boolean} [options.final=false]  If this choice is part of a list of other grants or choices,
+ *                                         is it in the final position?
+ * @returns {string}
+ *
+ * @example
+ * // Returns "any three skill proficiencies"
+ * choiceLabel({ count: 3, pool: new Set(["skills:*"]) });
+ *
+ * @example
+ * // Returns "three other skill proficiencies"
+ * choiceLabel({ count: 3, pool: new Set(["skills:*"]) }, { final: true });
+ *
+ * @example
+ * // Returns "any skill proficiency"
+ * choiceLabel({ count: 1, pool: new Set(["skills:*"]) }, { only: true });
+ *
+ * @example
+ * // Returns "Thieves Tools or any skill"
+ * choiceLabel({ count: 1, pool: new Set(["tool:thief", "skills:*"]) }, { only: true });
+ *
+ * @example
+ * // Returns "Thieves' Tools or any artisan tool"
+ * choiceLabel({ count: 1, pool: new Set(["tool:thief", "tool:art:*"]) }, { only: true });
+ *
+ * @example
+ * // Returns "2 from Thieves' Tools or any skill proficiency"
+ * choiceLabel({ count: 2, pool: new Set(["tool:thief", "skills:*"]) });
+ *
+ */
+function choiceLabel(choice, { only=false, final=false }={}) {
+  if ( !choice.pool.size ) return "";
+
+  // Single entry in pool (e.g. "any three skill proficiencies" or "three other skill proficiencies")
+  if ( choice.pool.size === 1 ) {
+    return keyLabel(choice.pool.first(), {
+      count: (choice.count > 1 || !only) ? choice.count : null, final: final && !only
+    });
+  }
+
+  const listFormatter = new Intl.ListFormat(game.i18n.lang, { type: "disjunction" });
+
+  // Singular count (e.g. "any skill", "Thieves Tools or any skill", or "Thieves' Tools or any artisan tool")
+  if ( (choice.count === 1) && only ) {
+    return listFormatter.format(choice.pool.map(key => keyLabel(key)));
+  }
+
+  // Select from a list of options (e.g. "2 from Thieves' Tools or any skill proficiency")
+  const choices = choice.pool.map(key => keyLabel(key));
+  return game.i18n.format("DND5E.TraitConfigChooseList", {
+    count: choice.count,
+    list: listFormatter.format(choices)
+  });
+}
+
+/* -------------------------------------------- */
+
+/**
+ * Create a human readable description of trait grants & choices.
+ * @param {object} config
+ * @param {Set<string>} [config.grants]        Guaranteed trait grants.
+ * @param {TraitChoice[]} [config.choices=[]]  Trait choices.
+ * @returns {string}
+ *
+ * @example
+ * // Returns "Acrobatics and Athletics"
+ * localizedList({ grants: new Set(["skills:acr", "skills:ath"]) });
+ *
+ * @example
+ * // Returns "Acrobatics and one other skill proficiency"
+ * localizedList({ grants: new Set(["skills:acr"]), choices: [{ count: 1, pool: new Set(["skills:*"])}] });
+ *
+ * @example
+ * // Returns "Choose any skill proficiency"
+ * localizedList({ choices: [{ count: 1, pool: new Set(["skills:*"])}] });
+ */
+function localizedList({ grants=new Set(), choices=[] }) {
+  const sections = Array.from(grants).map(g => keyLabel(g));
+
+  for ( const [index, choice] of choices.entries() ) {
+    const final = index === choices.length - 1;
+    sections.push(choiceLabel(choice, { final, only: !grants.size && choices.length === 1 }));
+  }
+
+  const listFormatter = new Intl.ListFormat(game.i18n.lang, { style: "long", type: "conjunction" });
+  if ( !sections.length || grants.size ) return listFormatter.format(sections);
+  return game.i18n.format("DND5E.TraitConfigChooseWrapper", {
+    choices: listFormatter.format(sections)
+  });
+}
+
+var trait = /*#__PURE__*/Object.freeze({
+  __proto__: null,
+  actorKeyPath: actorKeyPath,
+  actorValues: actorValues,
+  categories: categories,
+  changeKeyPath: changeKeyPath,
+  choiceLabel: choiceLabel,
+  choices: choices,
+  getBaseItem: getBaseItem,
+  keyLabel: keyLabel,
+  localizedList: localizedList,
+  mixedChoices: mixedChoices,
+  traitIndexFields: traitIndexFields,
+  traitLabel: traitLabel
+});
 
 /**
  * Data model for the Scale Value advancement type.
@@ -2299,7 +4279,9 @@ class ScaleValueConfig extends AdvancementConfig {
    */
   _prepareLevelData() {
     let lastValue = null;
-    return Array.fromRange(CONFIG.DND5E.maxLevel + 1).slice(1).reduce((obj, level) => {
+    let levels = Array.fromRange(CONFIG.DND5E.maxLevel + 1);
+    if ( ["class", "subclass"].includes(this.advancement.parent.type) ) levels = levels.slice(1);
+    return levels.reduce((obj, level) => {
       obj[level] = { placeholder: this._formatPlaceholder(lastValue), value: null };
       const value = this.advancement.configuration.scale[level];
       if ( value ) {
@@ -2451,7 +4433,7 @@ class ScaleValueFlow extends AdvancementFlow {
 /**
  * Advancement that represents a value that scales with class level. **Can only be added to classes or subclasses.**
  */
-class ScaleValueAdvancement extends Advancement$1 {
+class ScaleValueAdvancement extends Advancement {
 
   /** @inheritdoc */
   static get metadata() {
@@ -2464,7 +4446,7 @@ class ScaleValueAdvancement extends Advancement$1 {
       title: game.i18n.localize("DND5E.AdvancementScaleValueTitle"),
       hint: game.i18n.localize("DND5E.AdvancementScaleValueHint"),
       multiLevel: true,
-      validItemTypes: new Set(["class", "subclass"]),
+      validItemTypes: new Set(["background", "class", "race", "subclass"]),
       apps: {
         config: ScaleValueConfig,
         flow: ScaleValueFlow
@@ -2544,12 +4526,4511 @@ class ScaleValueAdvancement extends Advancement$1 {
 
 }
 
-var _module$a = /*#__PURE__*/Object.freeze({
+/**
+ * Mixin used to share some logic between Actor & Item documents.
+ * @type {function(Class)}
+ * @mixin
+ */
+const SystemDocumentMixin = Base => class extends Base {
+
+  /* -------------------------------------------- */
+  /*  Socket Event Handlers                       */
+  /* -------------------------------------------- */
+
+  /**
+   * Perform preliminary operations before a Document of this type is created.
+   * Pre-creation operations only occur for the client which requested the operation.
+   * @param {object} data               The initial data object provided to the document creation request.
+   * @param {object} options            Additional options which modify the creation request.
+   * @param {User} user                 The User requesting the document creation.
+   * @returns {Promise<boolean|void>}   A return value of false indicates the creation operation should be cancelled.
+   * @see {Document#_preCreate}
+   * @protected
+   */
+  async _preCreate(data, options, user) {
+    let allowed = await super._preCreate(data, options, user);
+    if ( allowed !== false ) allowed = await this.system._preCreate?.(data, options, user);
+    return allowed;
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * Perform preliminary operations before a Document of this type is updated.
+   * Pre-update operations only occur for the client which requested the operation.
+   * @param {object} changed            The differential data that is changed relative to the documents prior values
+   * @param {object} options            Additional options which modify the update request
+   * @param {documents.BaseUser} user   The User requesting the document update
+   * @returns {Promise<boolean|void>}   A return value of false indicates the update operation should be cancelled.
+   * @see {Document#_preUpdate}
+   * @protected
+   */
+  async _preUpdate(changed, options, user) {
+    let allowed = await super._preUpdate(changed, options, user);
+    if ( allowed !== false ) allowed = await this.system._preUpdate?.(changed, options, user);
+    return allowed;
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * Perform preliminary operations before a Document of this type is deleted.
+   * Pre-delete operations only occur for the client which requested the operation.
+   * @param {object} options            Additional options which modify the deletion request
+   * @param {documents.BaseUser} user   The User requesting the document deletion
+   * @returns {Promise<boolean|void>}   A return value of false indicates the deletion operation should be cancelled.
+   * @see {Document#_preDelete}
+   * @protected
+   */
+  async _preDelete(options, user) {
+    let allowed = await super._preDelete(options, user);
+    if ( allowed !== false ) allowed = await this.system._preDelete?.(options, user);
+    return allowed;
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * Perform follow-up operations after a Document of this type is created.
+   * Post-creation operations occur for all clients after the creation is broadcast.
+   * @param {object} data               The initial data object provided to the document creation request
+   * @param {object} options            Additional options which modify the creation request
+   * @param {string} userId             The id of the User requesting the document update
+   * @see {Document#_onCreate}
+   * @protected
+   */
+  _onCreate(data, options, userId) {
+    super._onCreate(data, options, userId);
+    this.system._onCreate?.(data, options, userId);
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * Perform follow-up operations after a Document of this type is updated.
+   * Post-update operations occur for all clients after the update is broadcast.
+   * @param {object} changed            The differential data that was changed relative to the documents prior values
+   * @param {object} options            Additional options which modify the update request
+   * @param {string} userId             The id of the User requesting the document update
+   * @see {Document#_onUpdate}
+   * @protected
+   */
+  _onUpdate(changed, options, userId) {
+    super._onUpdate(changed, options, userId);
+    this.system._onUpdate?.(changed, options, userId);
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * Perform follow-up operations after a Document of this type is deleted.
+   * Post-deletion operations occur for all clients after the deletion is broadcast.
+   * @param {object} options            Additional options which modify the deletion request
+   * @param {string} userId             The id of the User requesting the document update
+   * @see {Document#_onDelete}
+   * @protected
+   */
+  _onDelete(options, userId) {
+    super._onDelete(options, userId);
+    this.system._onDelete?.(options, userId);
+  }
+};
+
+/* -------------------------------------------- */
+/* D20 Roll                                     */
+/* -------------------------------------------- */
+
+/**
+ * Configuration data for a D20 roll.
+ *
+ * @typedef {object} D20RollConfiguration
+ *
+ * @property {string[]} [parts=[]]  The dice roll component parts, excluding the initial d20.
+ * @property {object} [data={}]     Data that will be used when parsing this roll.
+ * @property {Event} [event]        The triggering event for this roll.
+ *
+ * ## D20 Properties
+ * @property {boolean} [advantage]     Apply advantage to this roll (unless overridden by modifier keys or dialog)?
+ * @property {boolean} [disadvantage]  Apply disadvantage to this roll (unless overridden by modifier keys or dialog)?
+ * @property {number|null} [critical=20]  The value of the d20 result which represents a critical success,
+ *                                     `null` will prevent critical successes.
+ * @property {number|null} [fumble=1]  The value of the d20 result which represents a critical failure,
+ *                                     `null` will prevent critical failures.
+ * @property {number} [targetValue]    The value of the d20 result which should represent a successful roll.
+ *
+ * ## Flags
+ * @property {boolean} [elvenAccuracy]   Allow Elven Accuracy to modify this roll?
+ * @property {boolean} [halflingLucky]   Allow Halfling Luck to modify this roll?
+ * @property {boolean} [reliableTalent]  Allow Reliable Talent to modify this roll?
+ *
+ * ## Roll Configuration Dialog
+ * @property {boolean} [fastForward]           Should the roll configuration dialog be skipped?
+ * @property {boolean} [chooseModifier=false]  If the configuration dialog is shown, should the ability modifier be
+ *                                             configurable within that interface?
+ * @property {string} [template]               The HTML template used to display the roll configuration dialog.
+ * @property {string} [title]                  Title of the roll configuration dialog.
+ * @property {object} [dialogOptions]          Additional options passed to the roll configuration dialog.
+ *
+ * ## Chat Message
+ * @property {boolean} [chatMessage=true]  Should a chat message be created for this roll?
+ * @property {object} [messageData={}]     Additional data which is applied to the created chat message.
+ * @property {string} [rollMode]           Value of `CONST.DICE_ROLL_MODES` to apply as default for the chat message.
+ * @property {object} [flavor]             Flavor text to use in the created chat message.
+ */
+
+/**
+ * A standardized helper function for managing core 5e d20 rolls.
+ * Holding SHIFT, ALT, or CTRL when the attack is rolled will "fast-forward".
+ * This chooses the default options of a normal attack with no bonus, Advantage, or Disadvantage respectively
+ *
+ * @param {D20RollConfiguration} configuration  Configuration data for the D20 roll.
+ * @returns {Promise<D20Roll|null>}             The evaluated D20Roll, or null if the workflow was cancelled.
+ */
+async function d20Roll({
+  parts=[], data={}, event,
+  advantage, disadvantage, critical=20, fumble=1, targetValue,
+  elvenAccuracy, halflingLucky, reliableTalent,
+  fastForward, chooseModifier=false, template, title, dialogOptions,
+  chatMessage=true, messageData={}, rollMode, flavor
+}={}) {
+
+  // Handle input arguments
+  const formula = ["1d20"].concat(parts).join(" + ");
+  const {advantageMode, isFF} = CONFIG.Dice.D20Roll.determineAdvantageMode({
+    advantage, disadvantage, fastForward, event
+  });
+  const defaultRollMode = rollMode || game.settings.get("core", "rollMode");
+  if ( chooseModifier && !isFF ) {
+    data.mod = "@mod";
+    if ( "abilityCheckBonus" in data ) data.abilityCheckBonus = "@abilityCheckBonus";
+  }
+
+  // Construct the D20Roll instance
+  const roll = new CONFIG.Dice.D20Roll(formula, data, {
+    flavor: flavor || title,
+    advantageMode,
+    defaultRollMode,
+    rollMode,
+    critical,
+    fumble,
+    targetValue,
+    elvenAccuracy,
+    halflingLucky,
+    reliableTalent
+  });
+
+  // Prompt a Dialog to further configure the D20Roll
+  if ( !isFF ) {
+    const configured = await roll.configureDialog({
+      title,
+      chooseModifier,
+      defaultRollMode,
+      defaultAction: advantageMode,
+      defaultAbility: data?.item?.ability || data?.defaultAbility,
+      template
+    }, dialogOptions);
+    if ( configured === null ) return null;
+  } else roll.options.rollMode ??= defaultRollMode;
+
+  // Evaluate the configured roll
+  await roll.evaluate({async: true});
+
+  // Create a Chat Message
+  if ( roll && chatMessage ) await roll.toMessage(messageData);
+  return roll;
+}
+
+/* -------------------------------------------- */
+/* Damage Roll                                  */
+/* -------------------------------------------- */
+
+/**
+ * Configuration data for a damage roll.
+ *
+ * @typedef {object} DamageRollConfiguration
+ *
+ * @property {string[]} [parts=[]]  The dice roll component parts.
+ * @property {object} [data={}]     Data that will be used when parsing this roll.
+ * @property {Event} [event]        The triggering event for this roll.
+ *
+ * ## Critical Handling
+ * @property {boolean} [allowCritical=true]  Is this damage roll allowed to be rolled as critical?
+ * @property {boolean} [critical]            Apply critical to this roll (unless overridden by modifier key or dialog)?
+ * @property {number} [criticalBonusDice]    A number of bonus damage dice that are added for critical hits.
+ * @property {number} [criticalMultiplier]   Multiplier to use when calculating critical damage.
+ * @property {boolean} [multiplyNumeric]     Should numeric terms be multiplied when this roll criticals?
+ * @property {boolean} [powerfulCritical]    Should the critical dice be maximized rather than rolled?
+ * @property {string} [criticalBonusDamage]  An extra damage term that is applied only on a critical hit.
+ *
+ * ## Roll Configuration Dialog
+ * @property {boolean} [fastForward]        Should the roll configuration dialog be skipped?
+ * @property {string} [template]            The HTML template used to render the roll configuration dialog.
+ * @property {string} [title]               Title of the roll configuration dialog.
+ * @property {object} [dialogOptions]       Additional options passed to the roll configuration dialog.
+ *
+ * ## Chat Message
+ * @property {boolean} [chatMessage=true]  Should a chat message be created for this roll?
+ * @property {object} [messageData={}]     Additional data which is applied to the created chat message.
+ * @property {string} [rollMode]           Value of `CONST.DICE_ROLL_MODES` to apply as default for the chat message.
+ * @property {string} [flavor]             Flavor text to use in the created chat message.
+ */
+
+/**
+ * A standardized helper function for managing core 5e damage rolls.
+ * Holding SHIFT, ALT, or CTRL when the attack is rolled will "fast-forward".
+ * This chooses the default options of a normal attack with no bonus, Critical, or no bonus respectively
+ *
+ * @param {DamageRollConfiguration} configuration  Configuration data for the Damage roll.
+ * @returns {Promise<DamageRoll|null>}             The evaluated DamageRoll, or null if the workflow was canceled.
+ */
+async function damageRoll({
+  parts=[], data={}, event,
+  allowCritical=true, critical, criticalBonusDice, criticalMultiplier,
+  multiplyNumeric, powerfulCritical, criticalBonusDamage,
+  fastForward, template, title, dialogOptions,
+  chatMessage=true, messageData={}, rollMode, flavor
+}={}) {
+
+  // Handle input arguments
+  const defaultRollMode = rollMode || game.settings.get("core", "rollMode");
+
+  // Construct the DamageRoll instance
+  const formula = parts.join(" + ");
+  const {isCritical, isFF} = _determineCriticalMode({critical, fastForward, event});
+  const roll = new CONFIG.Dice.DamageRoll(formula, data, {
+    flavor: flavor || title,
+    rollMode,
+    critical: isFF ? isCritical : false,
+    criticalBonusDice,
+    criticalMultiplier,
+    criticalBonusDamage,
+    multiplyNumeric: multiplyNumeric ?? game.settings.get("dnd5e", "criticalDamageModifiers"),
+    powerfulCritical: powerfulCritical ?? game.settings.get("dnd5e", "criticalDamageMaxDice")
+  });
+
+  // Prompt a Dialog to further configure the DamageRoll
+  if ( !isFF ) {
+    const configured = await roll.configureDialog({
+      title,
+      defaultRollMode: defaultRollMode,
+      defaultCritical: isCritical,
+      template,
+      allowCritical
+    }, dialogOptions);
+    if ( configured === null ) return null;
+  }
+
+  // Evaluate the configured roll
+  await roll.evaluate({async: true});
+
+  // Create a Chat Message
+  if ( roll && chatMessage ) await roll.toMessage(messageData);
+  return roll;
+}
+
+/* -------------------------------------------- */
+
+/**
+ * Determines whether this d20 roll should be fast-forwarded, and whether advantage or disadvantage should be applied
+ * @param {object} [config]
+ * @param {Event} [config.event]          Event that triggered the roll.
+ * @param {boolean} [config.critical]     Is this roll treated as a critical by default?
+ * @param {boolean} [config.fastForward]  Should the roll dialog be skipped?
+ * @returns {{isFF: boolean, isCritical: boolean}}  Whether the roll is fast-forward, and whether it is a critical hit
+ */
+function _determineCriticalMode({event, critical=false, fastForward}={}) {
+  const isFF = fastForward ?? (event && (event.shiftKey || event.altKey || event.ctrlKey || event.metaKey));
+  if ( event?.altKey ) critical = true;
+  return {isFF: !!isFF, isCritical: critical};
+}
+
+/**
+ * A helper Dialog subclass for rolling Hit Dice on short rest.
+ *
+ * @param {Actor5e} actor           Actor that is taking the short rest.
+ * @param {object} [dialogData={}]  An object of dialog data which configures how the modal window is rendered.
+ * @param {object} [options={}]     Dialog rendering options.
+ */
+class ShortRestDialog extends Dialog {
+  constructor(actor, dialogData={}, options={}) {
+    super(dialogData, options);
+
+    /**
+     * Store a reference to the Actor document which is resting
+     * @type {Actor}
+     */
+    this.actor = actor;
+
+    /**
+     * Track the most recently used HD denomination for re-rendering the form
+     * @type {string}
+     */
+    this._denom = null;
+  }
+
+  /* -------------------------------------------- */
+
+  /** @inheritDoc */
+  static get defaultOptions() {
+    return foundry.utils.mergeObject(super.defaultOptions, {
+      template: "systems/dnd5e/templates/apps/short-rest.hbs",
+      classes: ["dnd5e", "dialog"]
+    });
+  }
+
+  /* -------------------------------------------- */
+
+  /** @inheritDoc */
+  getData() {
+    const data = super.getData();
+
+    // Determine Hit Dice
+    data.availableHD = this.actor.items.reduce((hd, item) => {
+      if ( item.type === "class" ) {
+        const {levels, hitDice, hitDiceUsed} = item.system;
+        const denom = hitDice ?? "d6";
+        const available = parseInt(levels ?? 1) - parseInt(hitDiceUsed ?? 0);
+        hd[denom] = denom in hd ? hd[denom] + available : available;
+      }
+      return hd;
+    }, {});
+    data.canRoll = this.actor.system.attributes.hd > 0;
+    data.denomination = this._denom;
+
+    // Determine rest type
+    const variant = game.settings.get("dnd5e", "restVariant");
+    data.promptNewDay = variant !== "epic";     // It's never a new day when only resting 1 minute
+    data.newDay = false;                        // It may be a new day, but not by default
+    return data;
+  }
+
+  /* -------------------------------------------- */
+
+
+  /** @inheritDoc */
+  activateListeners(html) {
+    super.activateListeners(html);
+    let btn = html.find("#roll-hd");
+    btn.click(this._onRollHitDie.bind(this));
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * Handle rolling a Hit Die as part of a Short Rest action
+   * @param {Event} event     The triggering click event
+   * @protected
+   */
+  async _onRollHitDie(event) {
+    event.preventDefault();
+    const btn = event.currentTarget;
+    this._denom = btn.form.hd.value;
+    await this.actor.rollHitDie(this._denom);
+    this.render();
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * A helper constructor function which displays the Short Rest dialog and returns a Promise once it's workflow has
+   * been resolved.
+   * @param {object} [options={}]
+   * @param {Actor5e} [options.actor]  Actor that is taking the short rest.
+   * @returns {Promise}                Promise that resolves when the rest is completed or rejects when canceled.
+   */
+  static async shortRestDialog({ actor }={}) {
+    return new Promise((resolve, reject) => {
+      const dlg = new this(actor, {
+        title: `${game.i18n.localize("DND5E.ShortRest")}: ${actor.name}`,
+        buttons: {
+          rest: {
+            icon: '<i class="fas fa-bed"></i>',
+            label: game.i18n.localize("DND5E.Rest"),
+            callback: html => {
+              let newDay = false;
+              if ( game.settings.get("dnd5e", "restVariant") !== "epic" ) {
+                newDay = html.find('input[name="newDay"]')[0].checked;
+              }
+              resolve(newDay);
+            }
+          },
+          cancel: {
+            icon: '<i class="fas fa-times"></i>',
+            label: game.i18n.localize("Cancel"),
+            callback: reject
+          }
+        },
+        close: reject
+      });
+      dlg.render(true);
+    });
+  }
+}
+
+/**
+ * A helper Dialog subclass for completing a long rest.
+ *
+ * @param {Actor5e} actor           Actor that is taking the long rest.
+ * @param {object} [dialogData={}]  An object of dialog data which configures how the modal window is rendered.
+ * @param {object} [options={}]     Dialog rendering options.
+ */
+class LongRestDialog extends Dialog {
+  constructor(actor, dialogData={}, options={}) {
+    super(dialogData, options);
+    this.actor = actor;
+  }
+
+  /* -------------------------------------------- */
+
+  /** @inheritDoc */
+  static get defaultOptions() {
+    return foundry.utils.mergeObject(super.defaultOptions, {
+      template: "systems/dnd5e/templates/apps/long-rest.hbs",
+      classes: ["dnd5e", "dialog"]
+    });
+  }
+
+  /* -------------------------------------------- */
+
+  /** @inheritDoc */
+  getData() {
+    const data = super.getData();
+    const variant = game.settings.get("dnd5e", "restVariant");
+    data.promptNewDay = variant !== "gritty";     // It's always a new day when resting 1 week
+    data.newDay = variant === "normal";           // It's probably a new day when resting normally (8 hours)
+    return data;
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * A helper constructor function which displays the Long Rest confirmation dialog and returns a Promise once it's
+   * workflow has been resolved.
+   * @param {object} [options={}]
+   * @param {Actor5e} [options.actor]  Actor that is taking the long rest.
+   * @returns {Promise}                Promise that resolves when the rest is completed or rejects when canceled.
+   */
+  static async longRestDialog({ actor } = {}) {
+    return new Promise((resolve, reject) => {
+      const dlg = new this(actor, {
+        title: `${game.i18n.localize("DND5E.LongRest")}: ${actor.name}`,
+        buttons: {
+          rest: {
+            icon: '<i class="fas fa-bed"></i>',
+            label: game.i18n.localize("DND5E.Rest"),
+            callback: html => {
+              let newDay = true;
+              if (game.settings.get("dnd5e", "restVariant") !== "gritty") {
+                newDay = html.find('input[name="newDay"]')[0].checked;
+              }
+              resolve(newDay);
+            }
+          },
+          cancel: {
+            icon: '<i class="fas fa-times"></i>',
+            label: game.i18n.localize("Cancel"),
+            callback: reject
+          }
+        },
+        default: "rest",
+        close: reject
+      });
+      dlg.render(true);
+    });
+  }
+}
+
+/**
+ * Extend the base Actor class to implement additional system-specific logic.
+ */
+class Actor5e extends SystemDocumentMixin(Actor) {
+
+  /**
+   * The data source for Actor5e.classes allowing it to be lazily computed.
+   * @type {Object<Item5e>}
+   * @private
+   */
+  _classes;
+
+  /* -------------------------------------------- */
+  /*  Properties                                  */
+  /* -------------------------------------------- */
+
+  /**
+   * A mapping of classes belonging to this Actor.
+   * @type {Object<Item5e>}
+   */
+  get classes() {
+    if ( this._classes !== undefined ) return this._classes;
+    if ( !["character", "npc"].includes(this.type) ) return this._classes = {};
+    return this._classes = this.items.filter(item => item.type === "class").reduce((obj, cls) => {
+      obj[cls.identifier] = cls;
+      return obj;
+    }, {});
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * Is this Actor currently polymorphed into some other creature?
+   * @type {boolean}
+   */
+  get isPolymorphed() {
+    return this.getFlag("dnd5e", "isPolymorphed") || false;
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * The Actor's currently equipped armor, if any.
+   * @type {Item5e|null}
+   */
+  get armor() {
+    return this.system.attributes.ac.equippedArmor ?? null;
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * The Actor's currently equipped shield, if any.
+   * @type {Item5e|null}
+   */
+  get shield() {
+    return this.system.attributes.ac.equippedShield ?? null;
+  }
+
+  /* -------------------------------------------- */
+  /*  Methods                                     */
+  /* -------------------------------------------- */
+
+  /** @inheritdoc */
+  _initializeSource(source, options={}) {
+    source = super._initializeSource(source, options);
+    if ( !source._id || !options.pack || dnd5e.moduleArt.suppressArt ) return source;
+    const uuid = `Compendium.${options.pack}.${source._id}`;
+    const art = game.dnd5e.moduleArt.map.get(uuid);
+    if ( art?.actor || art?.token ) {
+      if ( art.actor ) source.img = art.actor;
+      if ( typeof art.token === "string" ) source.prototypeToken.texture.src = art.token;
+      else if ( art.token ) foundry.utils.mergeObject(source.prototypeToken, art.token);
+      const biography = source.system.details?.biography;
+      if ( art.credit && biography ) {
+        if ( typeof biography.value !== "string" ) biography.value = "";
+        biography.value += `<p>${art.credit}</p>`;
+      }
+    }
+    return source;
+  }
+
+  /* -------------------------------------------- */
+
+  /** @inheritDoc */
+  prepareData() {
+    if ( !game.template.Actor.types.includes(this.type) ) return super.prepareData();
+    this._classes = undefined;
+    this._preparationWarnings = [];
+    super.prepareData();
+    this.items.forEach(item => item.prepareFinalAttributes());
+  }
+
+  /* -------------------------------------------- */
+
+  /** @inheritDoc */
+  prepareBaseData() {
+    if ( !game.template.Actor.types.includes(this.type) ) return;
+    if ( this.type !== "group" ) this._prepareBaseArmorClass();
+    else if ( game.release.generation < 11 ) this.system.prepareBaseData();
+
+    // Type-specific preparation
+    switch ( this.type ) {
+      case "character":
+        return this._prepareCharacterData();
+      case "npc":
+        return this._prepareNPCData();
+      case "vehicle":
+        return this._prepareVehicleData();
+    }
+  }
+
+  /* --------------------------------------------- */
+
+  /** @inheritDoc */
+  applyActiveEffects() {
+    this._prepareScaleValues();
+    if ( this.system?.prepareEmbeddedData instanceof Function ) this.system.prepareEmbeddedData();
+    // The Active Effects do not have access to their parent at preparation time, so we wait until this stage to
+    // determine whether they are suppressed or not.
+    this.effects.forEach(e => e.determineSuppression());
+    return super.applyActiveEffects();
+  }
+
+  /* -------------------------------------------- */
+
+  /** @inheritDoc */
+  prepareDerivedData() {
+    if ( !game.template.Actor.types.includes(this.type) || (this.type === "group") ) return;
+
+    const flags = this.flags.dnd5e || {};
+    this.labels = {};
+
+    // Retrieve data for polymorphed actors
+    let originalSaves = null;
+    let originalSkills = null;
+    if ( this.isPolymorphed ) {
+      const transformOptions = flags.transformOptions;
+      const original = game.actors?.get(flags.originalActor);
+      if ( original ) {
+        if ( transformOptions.mergeSaves ) originalSaves = original.system.abilities;
+        if ( transformOptions.mergeSkills ) originalSkills = original.system.skills;
+      }
+    }
+
+    // Prepare abilities, skills, & everything else
+    const globalBonuses = this.system.bonuses?.abilities ?? {};
+    const rollData = this.getRollData();
+    const checkBonus = simplifyBonus(globalBonuses?.check, rollData);
+    this._prepareAbilities(rollData, globalBonuses, checkBonus, originalSaves);
+    this._prepareSkills(rollData, globalBonuses, checkBonus, originalSkills);
+    this._prepareTools(rollData, globalBonuses, checkBonus);
+    this._prepareArmorClass();
+    this._prepareEncumbrance();
+    this._prepareHitPoints(rollData);
+    this._prepareInitiative(rollData, checkBonus);
+    this._prepareSpellcasting();
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * Return the amount of experience required to gain a certain character level.
+   * @param {number} level  The desired level.
+   * @returns {number}      The XP required.
+   */
+  getLevelExp(level) {
+    const levels = CONFIG.DND5E.CHARACTER_EXP_LEVELS;
+    return levels[Math.min(level, levels.length - 1)];
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * Return the amount of experience granted by killing a creature of a certain CR.
+   * @param {number} cr     The creature's challenge rating.
+   * @returns {number}      The amount of experience granted per kill.
+   */
+  getCRExp(cr) {
+    if ( cr < 1.0 ) return Math.max(200 * cr, 10);
+    return CONFIG.DND5E.CR_EXP_LEVELS[cr];
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * @inheritdoc
+   * @param {object} [options]
+   * @param {boolean} [options.deterministic] Whether to force deterministic values for data properties that could be
+   *                                            either a die term or a flat term.
+   */
+  getRollData({ deterministic=false }={}) {
+    const data = {...super.getRollData()};
+    if ( this.type === "group" ) return data;
+    data.prof = new Proficiency(this.system.attributes.prof, 1);
+    if ( deterministic ) data.prof = data.prof.flat;
+    data.attributes = foundry.utils.deepClone(data.attributes);
+    data.attributes.spellmod = data.abilities[data.attributes.spellcasting || "int"]?.mod ?? 0;
+    data.classes = {};
+    for ( const [identifier, cls] of Object.entries(this.classes) ) {
+      data.classes[identifier] = {...cls.system};
+      if ( cls.subclass ) data.classes[identifier].subclass = cls.subclass.system;
+    }
+    return data;
+  }
+
+  /* -------------------------------------------- */
+  /*  Base Data Preparation Helpers               */
+  /* -------------------------------------------- */
+
+  /**
+   * Initialize derived AC fields for Active Effects to target.
+   * Mutates the system.attributes.ac object.
+   * @protected
+   */
+  _prepareBaseArmorClass() {
+    const ac = this.system.attributes.ac;
+    ac.armor = 10;
+    ac.shield = ac.cover = 0;
+    ac.bonus = "";
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * Derive any values that have been scaled by the Advancement system.
+   * Mutates the value of the `system.scale` object.
+   * @protected
+   */
+  _prepareScaleValues() {
+    this.system.scale = this.items.reduce((scale, item) => {
+      if ( ScaleValueAdvancement.metadata.validItemTypes.has(item.type) ) scale[item.identifier] = item.scaleValues;
+      return scale;
+    }, {});
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * Perform any Character specific preparation.
+   * Mutates several aspects of the system data object.
+   * @protected
+   */
+  _prepareCharacterData() {
+    this.system.details.level = 0;
+    this.system.attributes.hd = 0;
+    this.system.attributes.attunement.value = 0;
+
+    for ( const item of this.items ) {
+      // Class levels & hit dice
+      if ( item.type === "class" ) {
+        const classLevels = parseInt(item.system.levels) || 1;
+        this.system.details.level += classLevels;
+        this.system.attributes.hd += classLevels - (parseInt(item.system.hitDiceUsed) || 0);
+      }
+
+      // Attuned items
+      else if ( item.system.attunement === CONFIG.DND5E.attunementTypes.ATTUNED ) {
+        this.system.attributes.attunement.value += 1;
+      }
+    }
+
+    // Character proficiency bonus
+    this.system.attributes.prof = Proficiency.calculateMod(this.system.details.level);
+
+    // Experience required for next level
+    const xp = this.system.details.xp;
+    xp.max = this.getLevelExp(this.system.details.level || 1);
+    const prior = this.getLevelExp(this.system.details.level - 1 || 0);
+    const required = xp.max - prior;
+    const pct = Math.round((xp.value - prior) * 100 / required);
+    xp.pct = Math.clamped(pct, 0, 100);
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * Perform any NPC specific preparation.
+   * Mutates several aspects of the system data object.
+   * @protected
+   */
+  _prepareNPCData() {
+    const cr = this.system.details.cr;
+
+    // Attuned items
+    this.system.attributes.attunement.value = this.items.filter(i => {
+      return i.system.attunement === CONFIG.DND5E.attunementTypes.ATTUNED;
+    }).length;
+
+    // Kill Experience
+    this.system.details.xp ??= {};
+    this.system.details.xp.value = this.getCRExp(cr);
+
+    // Proficiency
+    this.system.attributes.prof = Proficiency.calculateMod(Math.max(cr, 1));
+
+    // Spellcaster Level
+    if ( this.system.attributes.spellcasting && !Number.isNumeric(this.system.details.spellLevel) ) {
+      this.system.details.spellLevel = Math.max(cr, 1);
+    }
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * Perform any Vehicle specific preparation.
+   * Mutates several aspects of the system data object.
+   * @protected
+   */
+  _prepareVehicleData() {
+    this.system.attributes.prof = 0;
+  }
+
+  /* -------------------------------------------- */
+  /*  Derived Data Preparation Helpers            */
+  /* -------------------------------------------- */
+
+  /**
+   * Prepare abilities.
+   * @param {object} bonusData      Data produced by `getRollData` to be applied to bonus formulas.
+   * @param {object} globalBonuses  Global bonus data.
+   * @param {number} checkBonus     Global ability check bonus.
+   * @param {object} originalSaves  A transformed actor's original actor's abilities.
+   * @protected
+   */
+  _prepareAbilities(bonusData, globalBonuses, checkBonus, originalSaves) {
+    const flags = this.flags.dnd5e ?? {};
+    const dcBonus = simplifyBonus(this.system.bonuses?.spell?.dc, bonusData);
+    const saveBonus = simplifyBonus(globalBonuses.save, bonusData);
+    for ( const [id, abl] of Object.entries(this.system.abilities) ) {
+      if ( flags.diamondSoul ) abl.proficient = 1;  // Diamond Soul is proficient in all saves
+      abl.mod = Math.floor((abl.value - 10) / 2);
+
+      const isRA = this._isRemarkableAthlete(id);
+      abl.checkProf = new Proficiency(this.system.attributes.prof, (isRA || flags.jackOfAllTrades) ? 0.5 : 0, !isRA);
+      const saveBonusAbl = simplifyBonus(abl.bonuses?.save, bonusData);
+      abl.saveBonus = saveBonusAbl + saveBonus;
+
+      abl.saveProf = new Proficiency(this.system.attributes.prof, abl.proficient);
+      const checkBonusAbl = simplifyBonus(abl.bonuses?.check, bonusData);
+      abl.checkBonus = checkBonusAbl + checkBonus;
+
+      abl.save = abl.mod + abl.saveBonus;
+      if ( Number.isNumeric(abl.saveProf.term) ) abl.save += abl.saveProf.flat;
+      abl.dc = 8 + abl.mod + this.system.attributes.prof + dcBonus;
+
+      if ( !Number.isFinite(abl.max) ) abl.max = CONFIG.DND5E.maxAbilityScore;
+
+      // If we merged saves when transforming, take the highest bonus here.
+      if ( originalSaves && abl.proficient ) abl.save = Math.max(abl.save, originalSaves[id].save);
+    }
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * Prepare skill checks. Mutates the values of system.skills.
+   * @param {object} bonusData       Data produced by `getRollData` to be applied to bonus formulas.
+   * @param {object} globalBonuses   Global bonus data.
+   * @param {number} checkBonus      Global ability check bonus.
+   * @param {object} originalSkills  A transformed actor's original actor's skills.
+   * @protected
+   */
+  _prepareSkills(bonusData, globalBonuses, checkBonus, originalSkills) {
+    if ( this.type === "vehicle" ) return;
+    const flags = this.flags.dnd5e ?? {};
+
+    // Skill modifiers
+    const feats = CONFIG.DND5E.characterFlags;
+    const skillBonus = simplifyBonus(globalBonuses.skill, bonusData);
+    for ( const [id, skl] of Object.entries(this.system.skills) ) {
+      const ability = this.system.abilities[skl.ability];
+      const baseBonus = simplifyBonus(skl.bonuses?.check, bonusData);
+      let roundDown = true;
+
+      // Remarkable Athlete
+      if ( this._isRemarkableAthlete(skl.ability) && (skl.value < 0.5) ) {
+        skl.value = 0.5;
+        roundDown = false;
+      }
+
+      // Jack of All Trades
+      else if ( flags.jackOfAllTrades && (skl.value < 0.5) ) {
+        skl.value = 0.5;
+      }
+
+      // Polymorph Skill Proficiencies
+      if ( originalSkills ) {
+        skl.value = Math.max(skl.value, originalSkills[id].value);
+      }
+
+      // Compute modifier
+      const checkBonusAbl = simplifyBonus(ability?.bonuses?.check, bonusData);
+      skl.bonus = baseBonus + checkBonus + checkBonusAbl + skillBonus;
+      skl.mod = ability?.mod ?? 0;
+      skl.prof = new Proficiency(this.system.attributes.prof, skl.value, roundDown);
+      skl.proficient = skl.value;
+      skl.total = skl.mod + skl.bonus;
+      if ( Number.isNumeric(skl.prof.term) ) skl.total += skl.prof.flat;
+
+      // Compute passive bonus
+      const passive = flags.observantFeat && (feats.observantFeat.skills.includes(id)) ? 5 : 0;
+      const passiveBonus = simplifyBonus(skl.bonuses?.passive, bonusData);
+      skl.passive = 10 + skl.mod + skl.bonus + skl.prof.flat + passive + passiveBonus;
+    }
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * Prepare tool checks. Mutates the values of system.tools.
+   * @param {object} bonusData       Data produced by `getRollData` to be applied to bonus formulae.
+   * @param {object} globalBonuses   Global bonus data.
+   * @param {number} checkBonus      Global ability check bonus.
+   * @protected
+   */
+  _prepareTools(bonusData, globalBonuses, checkBonus) {
+    if ( this.type === "vehicle" ) return;
+    const flags = this.flags.dnd5e ?? {};
+    for ( const tool of Object.values(this.system.tools) ) {
+      const ability = this.system.abilities[tool.ability];
+      const baseBonus = simplifyBonus(tool.bonuses.check, bonusData);
+      let roundDown = true;
+
+      // Remarkable Athlete.
+      if ( this._isRemarkableAthlete(tool.ability) && (tool.value < 0.5) ) {
+        tool.value = 0.5;
+        roundDown = false;
+      }
+
+      // Jack of All Trades.
+      else if ( flags.jackOfAllTrades && (tool.value < 0.5) ) tool.value = 0.5;
+
+      const checkBonusAbl = simplifyBonus(ability?.bonuses?.check, bonusData);
+      tool.bonus = baseBonus + checkBonus + checkBonusAbl;
+      tool.mod = ability?.mod ?? 0;
+      tool.prof = new Proficiency(this.system.attributes.prof, tool.value, roundDown);
+      tool.total = tool.mod + tool.bonus;
+      if ( Number.isNumeric(tool.prof.term) ) tool.total += tool.prof.flat;
+    }
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * Prepare a character's AC value from their equipped armor and shield.
+   * Mutates the value of the `system.attributes.ac` object.
+   */
+  _prepareArmorClass() {
+    const ac = this.system.attributes.ac;
+
+    // Apply automatic migrations for older data structures
+    let cfg = CONFIG.DND5E.armorClasses[ac.calc];
+    if ( !cfg ) {
+      ac.calc = "flat";
+      if ( Number.isNumeric(ac.value) ) ac.flat = Number(ac.value);
+      cfg = CONFIG.DND5E.armorClasses.flat;
+    }
+
+    // Identify Equipped Items
+    const armorTypes = new Set(Object.keys(CONFIG.DND5E.armorTypes));
+    const {armors, shields} = this.itemTypes.equipment.reduce((obj, equip) => {
+      const armor = equip.system.armor;
+      if ( !equip.system.equipped || !armorTypes.has(armor?.type) ) return obj;
+      if ( armor.type === "shield" ) obj.shields.push(equip);
+      else obj.armors.push(equip);
+      return obj;
+    }, {armors: [], shields: []});
+    const rollData = this.getRollData({ deterministic: true });
+
+    // Determine base AC
+    switch ( ac.calc ) {
+
+      // Flat AC (no additional bonuses)
+      case "flat":
+        ac.value = Number(ac.flat);
+        return;
+
+      // Natural AC (includes bonuses)
+      case "natural":
+        ac.base = Number(ac.flat);
+        break;
+
+      default:
+        let formula = ac.calc === "custom" ? ac.formula : cfg.formula;
+        if ( armors.length ) {
+          if ( armors.length > 1 ) this._preparationWarnings.push({
+            message: game.i18n.localize("DND5E.WarnMultipleArmor"), type: "warning"
+          });
+          const armorData = armors[0].system.armor;
+          const isHeavy = armorData.type === "heavy";
+          ac.armor = armorData.value ?? ac.armor;
+          ac.dex = isHeavy ? 0 : Math.min(armorData.dex ?? Infinity, this.system.abilities.dex?.mod ?? 0);
+          ac.equippedArmor = armors[0];
+        }
+        else ac.dex = this.system.abilities.dex?.mod ?? 0;
+
+        rollData.attributes.ac = ac;
+        try {
+          const replaced = Roll.replaceFormulaData(formula, rollData);
+          ac.base = Roll.safeEval(replaced);
+        } catch(err) {
+          this._preparationWarnings.push({
+            message: game.i18n.localize("DND5E.WarnBadACFormula"), link: "armor", type: "error"
+          });
+          const replaced = Roll.replaceFormulaData(CONFIG.DND5E.armorClasses.default.formula, rollData);
+          ac.base = Roll.safeEval(replaced);
+        }
+        break;
+    }
+
+    // Equipped Shield
+    if ( shields.length ) {
+      if ( shields.length > 1 ) this._preparationWarnings.push({
+        message: game.i18n.localize("DND5E.WarnMultipleShields"), type: "warning"
+      });
+      ac.shield = shields[0].system.armor.value ?? 0;
+      ac.equippedShield = shields[0];
+    }
+
+    // Compute total AC and return
+    ac.bonus = simplifyBonus(ac.bonus, rollData);
+    ac.value = ac.base + ac.shield + ac.bonus + ac.cover;
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * Prepare the level and percentage of encumbrance for an Actor.
+   * Optionally include the weight of carried currency by applying the standard rule from the PHB pg. 143.
+   * Mutates the value of the `system.attributes.encumbrance` object.
+   * @protected
+   */
+  _prepareEncumbrance() {
+    const encumbrance = this.system.attributes.encumbrance ??= {};
+
+    // Get the total weight from items
+    const physicalItems = ["weapon", "equipment", "consumable", "tool", "backpack", "loot"];
+    let weight = this.items.reduce((weight, i) => {
+      if ( !physicalItems.includes(i.type) ) return weight;
+      const q = i.system.quantity || 0;
+      const w = i.system.weight || 0;
+      return weight + (q * w);
+    }, 0);
+
+    // [Optional] add Currency Weight (for non-transformed actors)
+    const currency = this.system.currency;
+    if ( game.settings.get("dnd5e", "currencyWeight") && currency ) {
+      const numCoins = Object.values(currency).reduce((val, denom) => val + Math.max(denom, 0), 0);
+      const currencyPerWeight = game.settings.get("dnd5e", "metricWeightUnits")
+        ? CONFIG.DND5E.encumbrance.currencyPerWeight.metric
+        : CONFIG.DND5E.encumbrance.currencyPerWeight.imperial;
+      weight += numCoins / currencyPerWeight;
+    }
+
+    // Determine the Encumbrance size class
+    let mod = {tiny: 0.5, sm: 1, med: 1, lg: 2, huge: 4, grg: 8}[this.system.traits.size] || 1;
+    if ( this.flags.dnd5e?.powerfulBuild ) mod = Math.min(mod * 2, 8);
+
+    const strengthMultiplier = game.settings.get("dnd5e", "metricWeightUnits")
+      ? CONFIG.DND5E.encumbrance.strMultiplier.metric
+      : CONFIG.DND5E.encumbrance.strMultiplier.imperial;
+
+    // Populate final Encumbrance values
+    encumbrance.value = weight.toNearest(0.1);
+    encumbrance.max = ((this.system.abilities.str?.value ?? 10) * strengthMultiplier * mod).toNearest(0.1);
+    encumbrance.pct = Math.clamped((encumbrance.value * 100) / encumbrance.max, 0, 100);
+    encumbrance.encumbered = encumbrance.pct > (200 / 3);
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * Prepare hit points for characters.
+   * @param {object} rollData  Data produced by `getRollData` to be applied to bonus formulas.
+   * @protected
+   */
+  _prepareHitPoints(rollData) {
+    if ( this.type !== "character" || (this.system._source.attributes.hp.max !== null) ) return;
+    const hp = this.system.attributes.hp;
+
+    const abilityId = CONFIG.DND5E.hitPointsAbility || "con";
+    const abilityMod = (this.system.abilities[abilityId]?.mod ?? 0);
+    const base = Object.values(this.classes).reduce((total, item) => {
+      const advancement = item.advancement.byType.HitPoints?.[0];
+      return total + (advancement?.getAdjustedTotal(abilityMod) ?? 0);
+    }, 0);
+    const levelBonus = simplifyBonus(hp.bonuses.level, rollData) * this.system.details.level;
+    const overallBonus = simplifyBonus(hp.bonuses.overall, rollData);
+
+    hp.max = base + levelBonus + overallBonus;
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * Prepare the initiative data for an actor.
+   * Mutates the value of the system.attributes.init object.
+   * @param {object} bonusData         Data produced by getRollData to be applied to bonus formulas
+   * @param {number} globalCheckBonus  Global ability check bonus
+   * @protected
+   */
+  _prepareInitiative(bonusData, globalCheckBonus=0) {
+    const init = this.system.attributes.init ??= {};
+    const flags = this.flags.dnd5e || {};
+
+    // Compute initiative modifier
+    const abilityId = init.ability || CONFIG.DND5E.initiativeAbility;
+    const ability = this.system.abilities?.[abilityId] || {};
+    init.mod = ability.mod ?? 0;
+
+    // Initiative proficiency
+    const prof = this.system.attributes.prof ?? 0;
+    const ra = flags.remarkableAthlete && ["str", "dex", "con"].includes(abilityId);
+    init.prof = new Proficiency(prof, (flags.jackOfAllTrades || ra) ? 0.5 : 0, !ra);
+
+    // Total initiative includes all numeric terms
+    const initBonus = simplifyBonus(init.bonus, bonusData);
+    const abilityBonus = simplifyBonus(ability.bonuses?.check, bonusData);
+    init.total = init.mod + initBonus + abilityBonus + globalCheckBonus
+      + (flags.initiativeAlert ? 5 : 0)
+      + (Number.isNumeric(init.prof.term) ? init.prof.flat : 0);
+  }
+
+  /* -------------------------------------------- */
+  /*  Spellcasting Preparation                    */
+  /* -------------------------------------------- */
+
+  /**
+   * Prepare data related to the spell-casting capabilities of the Actor.
+   * Mutates the value of the system.spells object.
+   * @protected
+   */
+  _prepareSpellcasting() {
+    if ( !this.system.spells ) return;
+
+    // Spellcasting DC
+    const spellcastingAbility = this.system.abilities[this.system.attributes.spellcasting];
+    this.system.attributes.spelldc = spellcastingAbility ? spellcastingAbility.dc : 8 + this.system.attributes.prof;
+
+    // Translate the list of classes into spellcasting progression
+    const progression = { slot: 0, pact: 0 };
+    const types = {};
+
+    // NPCs don't get spell levels from classes
+    if ( this.type === "npc" ) {
+      progression.slot = this.system.details.spellLevel ?? 0;
+      types.leveled = 1;
+    }
+
+    else {
+      // Grab all classes with spellcasting
+      const classes = this.items.filter(cls => {
+        if ( cls.type !== "class" ) return false;
+        const type = cls.spellcasting.type;
+        if ( !type ) return false;
+        types[type] ??= 0;
+        types[type] += 1;
+        return true;
+      });
+
+      for ( const cls of classes ) this.constructor.computeClassProgression(
+        progression, cls, { actor: this, count: types[cls.spellcasting.type] }
+      );
+    }
+
+    for ( const type of Object.keys(CONFIG.DND5E.spellcastingTypes) ) {
+      this.constructor.prepareSpellcastingSlots(this.system.spells, type, progression, { actor: this });
+    }
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * Contribute to the actor's spellcasting progression.
+   * @param {object} progression                             Spellcasting progression data. *Will be mutated.*
+   * @param {Item5e} cls                                     Class for whom this progression is being computed.
+   * @param {object} [config={}]
+   * @param {Actor5e|null} [config.actor]                    Actor for whom the data is being prepared.
+   * @param {SpellcastingDescription} [config.spellcasting]  Spellcasting descriptive object.
+   * @param {number} [config.count=1]                        Number of classes with this type of spellcasting.
+   */
+  static computeClassProgression(progression, cls, {actor, spellcasting, count=1}={}) {
+    const type = cls.spellcasting.type;
+    spellcasting = spellcasting ?? cls.spellcasting;
+
+    /**
+     * A hook event that fires while computing the spellcasting progression for each class on each actor.
+     * The actual hook names include the spellcasting type (e.g. `dnd5e.computeLeveledProgression`).
+     * @param {object} progression                    Spellcasting progression data. *Will be mutated.*
+     * @param {Actor5e|null} [actor]                  Actor for whom the data is being prepared.
+     * @param {Item5e} cls                            Class for whom this progression is being computed.
+     * @param {SpellcastingDescription} spellcasting  Spellcasting descriptive object.
+     * @param {number} count                          Number of classes with this type of spellcasting.
+     * @returns {boolean}  Explicitly return false to prevent default progression from being calculated.
+     * @function dnd5e.computeSpellcastingProgression
+     * @memberof hookEvents
+     */
+    const allowed = Hooks.call(
+      `dnd5e.compute${type.capitalize()}Progression`, progression, actor, cls, spellcasting, count
+    );
+
+    if ( allowed && (type === "pact") ) {
+      this.computePactProgression(progression, actor, cls, spellcasting, count);
+    } else if ( allowed && (type === "leveled") ) {
+      this.computeLeveledProgression(progression, actor, cls, spellcasting, count);
+    }
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * Contribute to the actor's spellcasting progression for a class with leveled spellcasting.
+   * @param {object} progression                    Spellcasting progression data. *Will be mutated.*
+   * @param {Actor5e} actor                         Actor for whom the data is being prepared.
+   * @param {Item5e} cls                            Class for whom this progression is being computed.
+   * @param {SpellcastingDescription} spellcasting  Spellcasting descriptive object.
+   * @param {number} count                          Number of classes with this type of spellcasting.
+   */
+  static computeLeveledProgression(progression, actor, cls, spellcasting, count) {
+    const prog = CONFIG.DND5E.spellcastingTypes.leveled.progression[spellcasting.progression];
+    if ( !prog ) return;
+    const rounding = prog.roundUp ? Math.ceil : Math.floor;
+    progression.slot += rounding(spellcasting.levels / prog.divisor ?? 1);
+    // Single-classed, non-full progression rounds up, rather than down.
+    if ( (count === 1) && (prog.divisor > 1) && progression.slot ) {
+      progression.slot = Math.ceil(spellcasting.levels / prog.divisor);
+    }
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * Contribute to the actor's spellcasting progression for a class with pact spellcasting.
+   * @param {object} progression                    Spellcasting progression data. *Will be mutated.*
+   * @param {Actor5e} actor                         Actor for whom the data is being prepared.
+   * @param {Item5e} cls                            Class for whom this progression is being computed.
+   * @param {SpellcastingDescription} spellcasting  Spellcasting descriptive object.
+   * @param {number} count                          Number of classes with this type of spellcasting.
+   */
+  static computePactProgression(progression, actor, cls, spellcasting, count) {
+    progression.pact += spellcasting.levels;
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * Prepare actor's spell slots using progression data.
+   * @param {object} spells           The `data.spells` object within actor's data. *Will be mutated.*
+   * @param {string} type             Type of spellcasting slots being prepared.
+   * @param {object} progression      Spellcasting progression data.
+   * @param {object} [config]
+   * @param {Actor5e} [config.actor]  Actor for whom the data is being prepared.
+   */
+  static prepareSpellcastingSlots(spells, type, progression, {actor}={}) {
+    /**
+     * A hook event that fires to convert the provided spellcasting progression into spell slots.
+     * The actual hook names include the spellcasting type (e.g. `dnd5e.prepareLeveledSlots`).
+     * @param {object} spells        The `data.spells` object within actor's data. *Will be mutated.*
+     * @param {Actor5e} actor        Actor for whom the data is being prepared.
+     * @param {object} progression   Spellcasting progression data.
+     * @returns {boolean}            Explicitly return false to prevent default preparation from being performed.
+     * @function dnd5e.prepareSpellcastingSlots
+     * @memberof hookEvents
+     */
+    const allowed = Hooks.call(`dnd5e.prepare${type.capitalize()}Slots`, spells, actor, progression);
+
+    if ( allowed && (type === "pact") ) this.preparePactSlots(spells, actor, progression);
+    else if ( allowed && (type === "leveled") ) this.prepareLeveledSlots(spells, actor, progression);
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * Prepare leveled spell slots using progression data.
+   * @param {object} spells        The `data.spells` object within actor's data. *Will be mutated.*
+   * @param {Actor5e} actor        Actor for whom the data is being prepared.
+   * @param {object} progression   Spellcasting progression data.
+   */
+  static prepareLeveledSlots(spells, actor, progression) {
+    const levels = Math.clamped(progression.slot, 0, CONFIG.DND5E.maxLevel);
+    const slots = CONFIG.DND5E.SPELL_SLOT_TABLE[Math.min(levels, CONFIG.DND5E.SPELL_SLOT_TABLE.length) - 1] ?? [];
+    for ( const level of Array.fromRange(Object.keys(CONFIG.DND5E.spellLevels).length - 1, 1) ) {
+      const slot = spells[`spell${level}`] ??= { value: 0 };
+      slot.max = Number.isNumeric(slot.override) ? Math.max(parseInt(slot.override), 0) : slots[level - 1] ?? 0;
+    }
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * Prepare pact spell slots using progression data.
+   * @param {object} spells        The `data.spells` object within actor's data. *Will be mutated.*
+   * @param {Actor5e} actor        Actor for whom the data is being prepared.
+   * @param {object} progression   Spellcasting progression data.
+   */
+  static preparePactSlots(spells, actor, progression) {
+    // Pact spell data:
+    // - pact.level: Slot level for pact casting
+    // - pact.max: Total number of pact slots
+    // - pact.value: Currently available pact slots
+    // - pact.override: Override number of available spell slots
+
+    let pactLevel = Math.clamped(progression.pact, 0, CONFIG.DND5E.maxLevel);
+    spells.pact ??= {};
+    const override = Number.isNumeric(spells.pact.override) ? parseInt(spells.pact.override) : null;
+
+    // Pact slot override
+    if ( (pactLevel === 0) && (actor.type === "npc") && (override !== null) ) {
+      pactLevel = actor.system.details.spellLevel;
+    }
+
+    const [, pactConfig] = Object.entries(CONFIG.DND5E.pactCastingProgression)
+      .reverse().find(([l]) => Number(l) <= pactLevel) ?? [];
+    if ( pactConfig ) {
+      spells.pact.level = pactConfig.level;
+      if ( override === null ) spells.pact.max = pactConfig.slots;
+      else spells.pact.max = Math.max(override, 1);
+      spells.pact.value = Math.min(spells.pact.value, spells.pact.max);
+    }
+
+    else {
+      spells.pact.max = override || 0;
+      spells.pact.level = spells.pact.max > 0 ? 1 : 0;
+    }
+  }
+
+  /* -------------------------------------------- */
+  /*  Event Handlers                              */
+  /* -------------------------------------------- */
+
+  /** @inheritdoc */
+  async _preCreate(data, options, user) {
+    if ( (await super._preCreate(data, options, user)) === false ) return false;
+
+    const sourceId = this.getFlag("core", "sourceId");
+    if ( sourceId?.startsWith("Compendium.") ) return;
+
+    // Configure prototype token settings
+    const prototypeToken = {};
+    if ( "size" in (this.system.traits || {}) ) {
+      const size = CONFIG.DND5E.tokenSizes[this.system.traits.size || "med"];
+      if ( !foundry.utils.hasProperty(data, "prototypeToken.width") ) prototypeToken.width = size;
+      if ( !foundry.utils.hasProperty(data, "prototypeToken.height") ) prototypeToken.height = size;
+    }
+    if ( this.type === "character" ) Object.assign(prototypeToken, {
+      sight: { enabled: true }, actorLink: true, disposition: CONST.TOKEN_DISPOSITIONS.FRIENDLY
+    });
+    this.updateSource({ prototypeToken });
+  }
+
+  /* -------------------------------------------- */
+
+  /** @inheritdoc */
+  async _preUpdate(changed, options, user) {
+    if ( (await super._preUpdate(changed, options, user)) === false ) return false;
+
+    // Apply changes in Actor size to Token width/height
+    if ( "size" in (this.system.traits || {}) ) {
+      const newSize = foundry.utils.getProperty(changed, "system.traits.size");
+      if ( newSize && (newSize !== this.system.traits?.size) ) {
+        let size = CONFIG.DND5E.tokenSizes[newSize];
+        if ( !foundry.utils.hasProperty(changed, "prototypeToken.width") ) {
+          changed.prototypeToken ||= {};
+          changed.prototypeToken.height = size;
+          changed.prototypeToken.width = size;
+        }
+      }
+    }
+
+    // Reset death save counters
+    if ( "hp" in (this.system.attributes || {}) ) {
+      const isDead = this.system.attributes.hp.value <= 0;
+      if ( isDead && (foundry.utils.getProperty(changed, "system.attributes.hp.value") > 0) ) {
+        foundry.utils.setProperty(changed, "system.attributes.death.success", 0);
+        foundry.utils.setProperty(changed, "system.attributes.death.failure", 0);
+      }
+    }
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * Assign a class item as the original class for the Actor based on which class has the most levels.
+   * @returns {Promise<Actor5e>}  Instance of the updated actor.
+   * @protected
+   */
+  _assignPrimaryClass() {
+    const classes = this.itemTypes.class.sort((a, b) => b.system.levels - a.system.levels);
+    const newPC = classes[0]?.id || "";
+    return this.update({"system.details.originalClass": newPC});
+  }
+
+  /* -------------------------------------------- */
+  /*  Gameplay Mechanics                          */
+  /* -------------------------------------------- */
+
+  /** @override */
+  async modifyTokenAttribute(attribute, value, isDelta, isBar) {
+    if ( attribute === "attributes.hp" ) {
+      const hp = this.system.attributes.hp;
+      const delta = isDelta ? (-1 * value) : (hp.value + hp.temp) - value;
+      return this.applyDamage(delta);
+    }
+    return super.modifyTokenAttribute(attribute, value, isDelta, isBar);
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * Apply a certain amount of damage or healing to the health pool for Actor
+   * @param {number} amount       An amount of damage (positive) or healing (negative) to sustain
+   * @param {number} multiplier   A multiplier which allows for resistance, vulnerability, or healing
+   * @returns {Promise<Actor5e>}  A Promise which resolves once the damage has been applied
+   */
+  async applyDamage(amount=0, multiplier=1) {
+    amount = Math.floor(parseInt(amount) * multiplier);
+    const hp = this.system.attributes.hp;
+    if ( !hp ) return this; // Group actors don't have HP at the moment
+
+    // Deduct damage from temp HP first
+    const tmp = parseInt(hp.temp) || 0;
+    const dt = amount > 0 ? Math.min(tmp, amount) : 0;
+
+    // Remaining goes to health
+    const tmpMax = parseInt(hp.tempmax) || 0;
+    const dh = Math.clamped(hp.value - (amount - dt), 0, Math.max(0, hp.max + tmpMax));
+
+    // Update the Actor
+    const updates = {
+      "system.attributes.hp.temp": tmp - dt,
+      "system.attributes.hp.value": dh
+    };
+
+    // Delegate damage application to a hook
+    // TODO replace this in the future with a better modifyTokenAttribute function in the core
+    const allowed = Hooks.call("modifyTokenAttribute", {
+      attribute: "attributes.hp",
+      value: amount,
+      isDelta: false,
+      isBar: true
+    }, updates);
+    return allowed !== false ? this.update(updates, {dhp: -amount}) : this;
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * Apply a certain amount of temporary hit point, but only if it's more than the actor currently has.
+   * @param {number} amount       An amount of temporary hit points to set
+   * @returns {Promise<Actor5e>}  A Promise which resolves once the temp HP has been applied
+   */
+  async applyTempHP(amount=0) {
+    amount = parseInt(amount);
+    const hp = this.system.attributes.hp;
+
+    // Update the actor if the new amount is greater than the current
+    const tmp = parseInt(hp.temp) || 0;
+    return amount > tmp ? this.update({"system.attributes.hp.temp": amount}) : this;
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * Get a color used to represent the current hit points of an Actor.
+   * @param {number} current        The current HP value
+   * @param {number} max            The maximum HP value
+   * @returns {Color}               The color used to represent the HP percentage
+   */
+  static getHPColor(current, max) {
+    const pct = Math.clamped(current, 0, max) / max;
+    return Color.fromRGB([(1-(pct/2)), pct, 0]);
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * Determine whether the provided ability is usable for remarkable athlete.
+   * @param {string} ability  Ability type to check.
+   * @returns {boolean}       Whether the actor has the remarkable athlete flag and the ability is physical.
+   * @private
+   */
+  _isRemarkableAthlete(ability) {
+    return this.getFlag("dnd5e", "remarkableAthlete")
+      && CONFIG.DND5E.characterFlags.remarkableAthlete.abilities.includes(ability);
+  }
+
+  /* -------------------------------------------- */
+  /*  Rolling                                     */
+  /* -------------------------------------------- */
+
+  /**
+   * Roll a Skill Check
+   * Prompt the user for input regarding Advantage/Disadvantage and any Situational Bonus
+   * @param {string} skillId      The skill id (e.g. "ins")
+   * @param {object} options      Options which configure how the skill check is rolled
+   * @returns {Promise<D20Roll>}  A Promise which resolves to the created Roll instance
+   */
+  async rollSkill(skillId, options={}) {
+    const skl = this.system.skills[skillId];
+    const abl = this.system.abilities[options.ability ?? skl.ability];
+    const globalBonuses = this.system.bonuses?.abilities ?? {};
+    const parts = ["@mod", "@abilityCheckBonus"];
+    const data = this.getRollData();
+
+    // Add ability modifier
+    data.mod = abl?.mod ?? 0;
+    data.defaultAbility = options.ability ?? skl.ability;
+
+    // Include proficiency bonus
+    if ( skl.prof.hasProficiency ) {
+      parts.push("@prof");
+      data.prof = skl.prof.term;
+    }
+
+    // Global ability check bonus
+    if ( globalBonuses.check ) {
+      parts.push("@checkBonus");
+      data.checkBonus = Roll.replaceFormulaData(globalBonuses.check, data);
+    }
+
+    // Ability-specific check bonus
+    if ( abl?.bonuses?.check ) data.abilityCheckBonus = Roll.replaceFormulaData(abl.bonuses.check, data);
+    else data.abilityCheckBonus = 0;
+
+    // Skill-specific skill bonus
+    if ( skl.bonuses?.check ) {
+      const checkBonusKey = `${skillId}CheckBonus`;
+      parts.push(`@${checkBonusKey}`);
+      data[checkBonusKey] = Roll.replaceFormulaData(skl.bonuses.check, data);
+    }
+
+    // Global skill check bonus
+    if ( globalBonuses.skill ) {
+      parts.push("@skillBonus");
+      data.skillBonus = Roll.replaceFormulaData(globalBonuses.skill, data);
+    }
+
+    // Reliable Talent applies to any skill check we have full or better proficiency in
+    const reliableTalent = (skl.value >= 1 && this.getFlag("dnd5e", "reliableTalent"));
+
+    // Roll and return
+    const flavor = game.i18n.format("DND5E.SkillPromptTitle", {skill: CONFIG.DND5E.skills[skillId]?.label ?? ""});
+    const rollData = foundry.utils.mergeObject({
+      data: data,
+      title: `${flavor}: ${this.name}`,
+      flavor,
+      chooseModifier: true,
+      halflingLucky: this.getFlag("dnd5e", "halflingLucky"),
+      reliableTalent,
+      messageData: {
+        speaker: options.speaker || ChatMessage.getSpeaker({actor: this}),
+        "flags.dnd5e.roll": {type: "skill", skillId }
+      }
+    }, options);
+    rollData.parts = parts.concat(options.parts ?? []);
+
+    /**
+     * A hook event that fires before a skill check is rolled for an Actor.
+     * @function dnd5e.preRollSkill
+     * @memberof hookEvents
+     * @param {Actor5e} actor                Actor for which the skill check is being rolled.
+     * @param {D20RollConfiguration} config  Configuration data for the pending roll.
+     * @param {string} skillId               ID of the skill being rolled as defined in `DND5E.skills`.
+     * @returns {boolean}                    Explicitly return `false` to prevent skill check from being rolled.
+     */
+    if ( Hooks.call("dnd5e.preRollSkill", this, rollData, skillId) === false ) return;
+
+    const roll = await d20Roll(rollData);
+
+    /**
+     * A hook event that fires after a skill check has been rolled for an Actor.
+     * @function dnd5e.rollSkill
+     * @memberof hookEvents
+     * @param {Actor5e} actor   Actor for which the skill check has been rolled.
+     * @param {D20Roll} roll    The resulting roll.
+     * @param {string} skillId  ID of the skill that was rolled as defined in `DND5E.skills`.
+     */
+    if ( roll ) Hooks.callAll("dnd5e.rollSkill", this, roll, skillId);
+
+    return roll;
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * Roll a Tool Check.
+   * Prompt the user for input regarding Advantage/Disadvantage and any Situational Bonuses.
+   * @param {string} toolId       The identifier of the tool being rolled.
+   * @param {object} options      Options which configure how the tool check is rolled.
+   * @returns {Promise<D20Roll>}  A Promise which resolves to the created Roll instance.
+   */
+  async rollToolCheck(toolId, options={}) {
+    // Prepare roll data.
+    const tool = this.system.tools[toolId];
+    const ability = this.system.abilities[options.ability || (tool?.ability ?? "int")];
+    const globalBonuses = this.system.bonuses?.abilities ?? {};
+    const parts = ["@mod", "@abilityCheckBonus"];
+    const data = this.getRollData();
+
+    // Add ability modifier.
+    data.mod = ability?.mod ?? 0;
+    data.defaultAbility = options.ability || (tool?.ability ?? "int");
+
+    // Add proficiency.
+    const prof = options.prof ?? tool?.prof;
+    if ( prof?.hasProficiency ) {
+      parts.push("@prof");
+      data.prof = prof.term;
+    }
+
+    // Global ability check bonus.
+    if ( globalBonuses.check ) {
+      parts.push("@checkBonus");
+      data.checkBonus = Roll.replaceFormulaData(globalBonuses.check, data);
+    }
+
+    // Ability-specific check bonus.
+    if ( ability?.bonuses.check ) data.abilityCheckBonus = Roll.replaceFormulaData(ability.bonuses.check, data);
+    else data.abilityCheckBonus = 0;
+
+    // Tool-specific check bonus.
+    if ( tool?.bonuses.check || options.bonus ) {
+      parts.push("@toolBonus");
+      const bonus = [];
+      if ( tool?.bonuses.check ) bonus.push(Roll.replaceFormulaData(tool.bonuses.check, data));
+      if ( options.bonus ) bonus.push(Roll.replaceFormulaData(options.bonus, data));
+      data.toolBonus = bonus.join(" + ");
+    }
+
+    const flavor = game.i18n.format("DND5E.ToolPromptTitle", {tool: keyLabel(toolId, {trait: "tool"}) ?? ""});
+    const rollData = foundry.utils.mergeObject({
+      data, flavor,
+      title: `${flavor}: ${this.name}`,
+      chooseModifier: true,
+      halflingLucky: this.getFlag("dnd5e", "halflingLucky"),
+      messageData: {
+        speaker: options.speaker || ChatMessage.implementation.getSpeaker({actor: this}),
+        "flags.dnd5e.roll": {type: "tool", toolId}
+      }
+    }, options);
+    rollData.parts = parts.concat(options.parts ?? []);
+
+    /**
+     * A hook event that fires before a tool check is rolled for an Actor.
+     * @function dnd5e.preRollRool
+     * @memberof hookEvents
+     * @param {Actor5e} actor                Actor for which the tool check is being rolled.
+     * @param {D20RollConfiguration} config  Configuration data for the pending roll.
+     * @param {string} toolId                Identifier of the tool being rolled.
+     * @returns {boolean}                    Explicitly return `false` to prevent skill check from being rolled.
+     */
+    if ( Hooks.call("dnd5e.preRollToolCheck", this, rollData, toolId) === false ) return;
+
+    const roll = await d20Roll(rollData);
+
+    /**
+     * A hook event that fires after a tool check has been rolled for an Actor.
+     * @function dnd5e.rollTool
+     * @memberof hookEvents
+     * @param {Actor5e} actor   Actor for which the tool check has been rolled.
+     * @param {D20Roll} roll    The resulting roll.
+     * @param {string} toolId   Identifier of the tool that was rolled.
+     */
+    if ( roll ) Hooks.callAll("dnd5e.rollToolCheck", this, roll, toolId);
+
+    return roll;
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * Roll a generic ability test or saving throw.
+   * Prompt the user for input on which variety of roll they want to do.
+   * @param {string} abilityId    The ability id (e.g. "str")
+   * @param {object} options      Options which configure how ability tests or saving throws are rolled
+   */
+  rollAbility(abilityId, options={}) {
+    const label = CONFIG.DND5E.abilities[abilityId]?.label ?? "";
+    new Dialog({
+      title: `${game.i18n.format("DND5E.AbilityPromptTitle", {ability: label})}: ${this.name}`,
+      content: `<p>${game.i18n.format("DND5E.AbilityPromptText", {ability: label})}</p>`,
+      buttons: {
+        test: {
+          label: game.i18n.localize("DND5E.ActionAbil"),
+          callback: () => this.rollAbilityTest(abilityId, options)
+        },
+        save: {
+          label: game.i18n.localize("DND5E.ActionSave"),
+          callback: () => this.rollAbilitySave(abilityId, options)
+        }
+      }
+    }).render(true);
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * Roll an Ability Test
+   * Prompt the user for input regarding Advantage/Disadvantage and any Situational Bonus
+   * @param {string} abilityId    The ability ID (e.g. "str")
+   * @param {object} options      Options which configure how ability tests are rolled
+   * @returns {Promise<D20Roll>}  A Promise which resolves to the created Roll instance
+   */
+  async rollAbilityTest(abilityId, options={}) {
+    const label = CONFIG.DND5E.abilities[abilityId]?.label ?? "";
+    const abl = this.system.abilities[abilityId];
+    const globalBonuses = this.system.bonuses?.abilities ?? {};
+    const parts = [];
+    const data = this.getRollData();
+
+    // Add ability modifier
+    parts.push("@mod");
+    data.mod = abl?.mod ?? 0;
+
+    // Include proficiency bonus
+    if ( abl?.checkProf.hasProficiency ) {
+      parts.push("@prof");
+      data.prof = abl.checkProf.term;
+    }
+
+    // Add ability-specific check bonus
+    if ( abl?.bonuses?.check ) {
+      const checkBonusKey = `${abilityId}CheckBonus`;
+      parts.push(`@${checkBonusKey}`);
+      data[checkBonusKey] = Roll.replaceFormulaData(abl.bonuses.check, data);
+    }
+
+    // Add global actor bonus
+    if ( globalBonuses.check ) {
+      parts.push("@checkBonus");
+      data.checkBonus = Roll.replaceFormulaData(globalBonuses.check, data);
+    }
+
+    // Roll and return
+    const flavor = game.i18n.format("DND5E.AbilityPromptTitle", {ability: label});
+    const rollData = foundry.utils.mergeObject({
+      data,
+      title: `${flavor}: ${this.name}`,
+      flavor,
+      halflingLucky: this.getFlag("dnd5e", "halflingLucky"),
+      messageData: {
+        speaker: options.speaker || ChatMessage.getSpeaker({actor: this}),
+        "flags.dnd5e.roll": {type: "ability", abilityId }
+      }
+    }, options);
+    rollData.parts = parts.concat(options.parts ?? []);
+
+    /**
+     * A hook event that fires before an ability test is rolled for an Actor.
+     * @function dnd5e.preRollAbilityTest
+     * @memberof hookEvents
+     * @param {Actor5e} actor                Actor for which the ability test is being rolled.
+     * @param {D20RollConfiguration} config  Configuration data for the pending roll.
+     * @param {string} abilityId             ID of the ability being rolled as defined in `DND5E.abilities`.
+     * @returns {boolean}                    Explicitly return `false` to prevent ability test from being rolled.
+     */
+    if ( Hooks.call("dnd5e.preRollAbilityTest", this, rollData, abilityId) === false ) return;
+
+    const roll = await d20Roll(rollData);
+
+    /**
+     * A hook event that fires after an ability test has been rolled for an Actor.
+     * @function dnd5e.rollAbilityTest
+     * @memberof hookEvents
+     * @param {Actor5e} actor     Actor for which the ability test has been rolled.
+     * @param {D20Roll} roll      The resulting roll.
+     * @param {string} abilityId  ID of the ability that was rolled as defined in `DND5E.abilities`.
+     */
+    if ( roll ) Hooks.callAll("dnd5e.rollAbilityTest", this, roll, abilityId);
+
+    return roll;
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * Roll an Ability Saving Throw
+   * Prompt the user for input regarding Advantage/Disadvantage and any Situational Bonus
+   * @param {string} abilityId    The ability ID (e.g. "str")
+   * @param {object} options      Options which configure how ability tests are rolled
+   * @returns {Promise<D20Roll>}  A Promise which resolves to the created Roll instance
+   */
+  async rollAbilitySave(abilityId, options={}) {
+    const label = CONFIG.DND5E.abilities[abilityId]?.label ?? "";
+    const abl = this.system.abilities[abilityId];
+    const globalBonuses = this.system.bonuses?.abilities ?? {};
+    const parts = [];
+    const data = this.getRollData();
+
+    // Add ability modifier
+    parts.push("@mod");
+    data.mod = abl?.mod ?? 0;
+
+    // Include proficiency bonus
+    if ( abl?.saveProf.hasProficiency ) {
+      parts.push("@prof");
+      data.prof = abl.saveProf.term;
+    }
+
+    // Include ability-specific saving throw bonus
+    if ( abl?.bonuses?.save ) {
+      const saveBonusKey = `${abilityId}SaveBonus`;
+      parts.push(`@${saveBonusKey}`);
+      data[saveBonusKey] = Roll.replaceFormulaData(abl.bonuses.save, data);
+    }
+
+    // Include a global actor ability save bonus
+    if ( globalBonuses.save ) {
+      parts.push("@saveBonus");
+      data.saveBonus = Roll.replaceFormulaData(globalBonuses.save, data);
+    }
+
+    // Roll and return
+    const flavor = game.i18n.format("DND5E.SavePromptTitle", {ability: label});
+    const rollData = foundry.utils.mergeObject({
+      data,
+      title: `${flavor}: ${this.name}`,
+      flavor,
+      halflingLucky: this.getFlag("dnd5e", "halflingLucky"),
+      messageData: {
+        speaker: options.speaker || ChatMessage.getSpeaker({actor: this}),
+        "flags.dnd5e.roll": {type: "save", abilityId }
+      }
+    }, options);
+    rollData.parts = parts.concat(options.parts ?? []);
+
+    /**
+     * A hook event that fires before an ability save is rolled for an Actor.
+     * @function dnd5e.preRollAbilitySave
+     * @memberof hookEvents
+     * @param {Actor5e} actor                Actor for which the ability save is being rolled.
+     * @param {D20RollConfiguration} config  Configuration data for the pending roll.
+     * @param {string} abilityId             ID of the ability being rolled as defined in `DND5E.abilities`.
+     * @returns {boolean}                    Explicitly return `false` to prevent ability save from being rolled.
+     */
+    if ( Hooks.call("dnd5e.preRollAbilitySave", this, rollData, abilityId) === false ) return;
+
+    const roll = await d20Roll(rollData);
+
+    /**
+     * A hook event that fires after an ability save has been rolled for an Actor.
+     * @function dnd5e.rollAbilitySave
+     * @memberof hookEvents
+     * @param {Actor5e} actor     Actor for which the ability save has been rolled.
+     * @param {D20Roll} roll      The resulting roll.
+     * @param {string} abilityId  ID of the ability that was rolled as defined in `DND5E.abilities`.
+     */
+    if ( roll ) Hooks.callAll("dnd5e.rollAbilitySave", this, roll, abilityId);
+
+    return roll;
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * Perform a death saving throw, rolling a d20 plus any global save bonuses
+   * @param {object} options          Additional options which modify the roll
+   * @returns {Promise<D20Roll|null>} A Promise which resolves to the Roll instance
+   */
+  async rollDeathSave(options={}) {
+    const death = this.system.attributes.death;
+
+    // Display a warning if we are not at zero HP or if we already have reached 3
+    if ( (this.system.attributes.hp.value > 0) || (death.failure >= 3) || (death.success >= 3) ) {
+      ui.notifications.warn("DND5E.DeathSaveUnnecessary", {localize: true});
+      return null;
+    }
+
+    // Evaluate a global saving throw bonus
+    const speaker = options.speaker || ChatMessage.getSpeaker({actor: this});
+    const globalBonuses = this.system.bonuses?.abilities ?? {};
+    const parts = [];
+    const data = this.getRollData();
+
+    // Diamond Soul adds proficiency
+    if ( this.getFlag("dnd5e", "diamondSoul") ) {
+      parts.push("@prof");
+      data.prof = new Proficiency(this.system.attributes.prof, 1).term;
+    }
+
+    // Include a global actor ability save bonus
+    if ( globalBonuses.save ) {
+      parts.push("@saveBonus");
+      data.saveBonus = Roll.replaceFormulaData(globalBonuses.save, data);
+    }
+
+    // Evaluate the roll
+    const flavor = game.i18n.localize("DND5E.DeathSavingThrow");
+    const rollData = foundry.utils.mergeObject({
+      data,
+      title: `${flavor}: ${this.name}`,
+      flavor,
+      halflingLucky: this.getFlag("dnd5e", "halflingLucky"),
+      targetValue: 10,
+      messageData: {
+        speaker: speaker,
+        "flags.dnd5e.roll": {type: "death"}
+      }
+    }, options);
+    rollData.parts = parts.concat(options.parts ?? []);
+
+    /**
+     * A hook event that fires before a death saving throw is rolled for an Actor.
+     * @function dnd5e.preRollDeathSave
+     * @memberof hookEvents
+     * @param {Actor5e} actor                Actor for which the death saving throw is being rolled.
+     * @param {D20RollConfiguration} config  Configuration data for the pending roll.
+     * @returns {boolean}                    Explicitly return `false` to prevent death saving throw from being rolled.
+     */
+    if ( Hooks.call("dnd5e.preRollDeathSave", this, rollData) === false ) return;
+
+    const roll = await d20Roll(rollData);
+    if ( !roll ) return null;
+
+    // Take action depending on the result
+    const details = {};
+
+    // Save success
+    if ( roll.total >= (roll.options.targetValue ?? 10) ) {
+      let successes = (death.success || 0) + 1;
+
+      // Critical Success = revive with 1hp
+      if ( roll.isCritical ) {
+        details.updates = {
+          "system.attributes.death.success": 0,
+          "system.attributes.death.failure": 0,
+          "system.attributes.hp.value": 1
+        };
+        details.chatString = "DND5E.DeathSaveCriticalSuccess";
+      }
+
+      // 3 Successes = survive and reset checks
+      else if ( successes === 3 ) {
+        details.updates = {
+          "system.attributes.death.success": 0,
+          "system.attributes.death.failure": 0
+        };
+        details.chatString = "DND5E.DeathSaveSuccess";
+      }
+
+      // Increment successes
+      else details.updates = {"system.attributes.death.success": Math.clamped(successes, 0, 3)};
+    }
+
+    // Save failure
+    else {
+      let failures = (death.failure || 0) + (roll.isFumble ? 2 : 1);
+      details.updates = {"system.attributes.death.failure": Math.clamped(failures, 0, 3)};
+      if ( failures >= 3 ) {  // 3 Failures = death
+        details.chatString = "DND5E.DeathSaveFailure";
+      }
+    }
+
+    /**
+     * A hook event that fires after a death saving throw has been rolled for an Actor, but before
+     * updates have been performed.
+     * @function dnd5e.rollDeathSave
+     * @memberof hookEvents
+     * @param {Actor5e} actor              Actor for which the death saving throw has been rolled.
+     * @param {D20Roll} roll               The resulting roll.
+     * @param {object} details
+     * @param {object} details.updates     Updates that will be applied to the actor as a result of this save.
+     * @param {string} details.chatString  Localizable string displayed in the create chat message. If not set, then
+     *                                     no chat message will be displayed.
+     * @returns {boolean}                  Explicitly return `false` to prevent updates from being performed.
+     */
+    if ( Hooks.call("dnd5e.rollDeathSave", this, roll, details) === false ) return roll;
+
+    if ( !foundry.utils.isEmpty(details.updates) ) await this.update(details.updates);
+
+    // Display success/failure chat message
+    if ( details.chatString ) {
+      let chatData = { content: game.i18n.format(details.chatString, {name: this.name}), speaker };
+      ChatMessage.applyRollMode(chatData, roll.options.rollMode);
+      await ChatMessage.create(chatData);
+    }
+
+    // Return the rolled result
+    return roll;
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * Get an un-evaluated D20Roll instance used to roll initiative for this Actor.
+   * @param {object} [options]                        Options which modify the roll
+   * @param {D20Roll.ADV_MODE} [options.advantageMode]    A specific advantage mode to apply
+   * @param {string} [options.flavor]                     Special flavor text to apply
+   * @returns {D20Roll}                               The constructed but unevaluated D20Roll
+   */
+  getInitiativeRoll(options={}) {
+
+    // Use a temporarily cached initiative roll
+    if ( this._cachedInitiativeRoll ) return this._cachedInitiativeRoll.clone();
+
+    // Obtain required data
+    const init = this.system.attributes?.init;
+    const abilityId = init?.ability || CONFIG.DND5E.initiativeAbility;
+    const data = this.getRollData();
+    const flags = this.flags.dnd5e || {};
+    if ( flags.initiativeAdv ) options.advantageMode ??= dnd5e.dice.D20Roll.ADV_MODE.ADVANTAGE;
+
+    // Standard initiative formula
+    const parts = ["1d20"];
+
+    // Special initiative bonuses
+    if ( init ) {
+      parts.push(init.mod);
+      if ( init.prof.term !== "0" ) {
+        parts.push("@prof");
+        data.prof = init.prof.term;
+      }
+      if ( init.bonus ) {
+        parts.push("@bonus");
+        data.bonus = Roll.replaceFormulaData(init.bonus, data);
+      }
+    }
+
+    // Ability check bonuses
+    if ( "abilities" in this.system ) {
+      const abilityBonus = this.system.abilities[abilityId]?.bonuses?.check;
+      if ( abilityBonus ) {
+        parts.push("@abilityBonus");
+        data.abilityBonus = Roll.replaceFormulaData(abilityBonus, data);
+      }
+    }
+
+    // Global check bonus
+    if ( "bonuses" in this.system ) {
+      const globalCheckBonus = this.system.bonuses.abilities?.check;
+      if ( globalCheckBonus ) {
+        parts.push("@globalBonus");
+        data.globalBonus = Roll.replaceFormulaData(globalCheckBonus, data);
+      }
+    }
+
+    // Alert feat
+    if ( flags.initiativeAlert ) {
+      parts.push("@alertBonus");
+      data.alertBonus = 5;
+    }
+
+    // Ability score tiebreaker
+    const tiebreaker = game.settings.get("dnd5e", "initiativeDexTiebreaker");
+    if ( tiebreaker && ("abilities" in this.system) ) {
+      const abilityValue = this.system.abilities[abilityId]?.value;
+      if ( Number.isNumeric(abilityValue) ) parts.push(String(abilityValue / 100));
+    }
+
+    options = foundry.utils.mergeObject({
+      flavor: options.flavor ?? game.i18n.localize("DND5E.Initiative"),
+      halflingLucky: flags.halflingLucky ?? false,
+      critical: null,
+      fumble: null
+    }, options);
+
+    // Create the d20 roll
+    const formula = parts.join(" + ");
+    return new CONFIG.Dice.D20Roll(formula, data, options);
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * Roll initiative for this Actor with a dialog that provides an opportunity to elect advantage or other bonuses.
+   * @param {object} [rollOptions]      Options forwarded to the Actor#getInitiativeRoll method
+   * @returns {Promise<void>}           A promise which resolves once initiative has been rolled for the Actor
+   */
+  async rollInitiativeDialog(rollOptions={}) {
+    // Create and configure the Initiative roll
+    const roll = this.getInitiativeRoll(rollOptions);
+    const choice = await roll.configureDialog({
+      defaultRollMode: game.settings.get("core", "rollMode"),
+      title: `${game.i18n.localize("DND5E.InitiativeRoll")}: ${this.name}`,
+      chooseModifier: false,
+      defaultAction: rollOptions.advantageMode ?? dnd5e.dice.D20Roll.ADV_MODE.NORMAL
+    });
+    if ( choice === null ) return; // Closed dialog
+
+    // Temporarily cache the configured roll and use it to roll initiative for the Actor
+    this._cachedInitiativeRoll = roll;
+    await this.rollInitiative({createCombatants: true});
+  }
+
+  /* -------------------------------------------- */
+
+  /** @inheritdoc */
+  async rollInitiative(options={}, rollOptions={}) {
+    this._cachedInitiativeRoll ??= this.getInitiativeRoll(rollOptions);
+
+    /**
+     * A hook event that fires before initiative is rolled for an Actor.
+     * @function dnd5e.preRollInitiative
+     * @memberof hookEvents
+     * @param {Actor5e} actor  The Actor that is rolling initiative.
+     * @param {D20Roll} roll   The initiative roll.
+     */
+    if ( Hooks.call("dnd5e.preRollInitiative", this, this._cachedInitiativeRoll) === false ) {
+      delete this._cachedInitiativeRoll;
+      return null;
+    }
+
+    const combat = await super.rollInitiative(options);
+    const combatants = this.isToken ? this.getActiveTokens(false, true).reduce((arr, t) => {
+      const combatant = game.combat.getCombatantByToken(t.id);
+      if ( combatant ) arr.push(combatant);
+      return arr;
+    }, []) : [game.combat.getCombatantByActor(this.id)];
+
+    /**
+     * A hook event that fires after an Actor has rolled for initiative.
+     * @function dnd5e.rollInitiative
+     * @memberof hookEvents
+     * @param {Actor5e} actor           The Actor that rolled initiative.
+     * @param {Combatant[]} combatants  The associated Combatants in the Combat.
+     */
+    Hooks.callAll("dnd5e.rollInitiative", this, combatants);
+    delete this._cachedInitiativeRoll;
+    return combat;
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * Roll a hit die of the appropriate type, gaining hit points equal to the die roll plus your CON modifier.
+   * @param {string} [denomination]  The hit denomination of hit die to roll. Example "d8".
+   *                                 If no denomination is provided, the first available HD will be used
+   * @param {object} options         Additional options which modify the roll.
+   * @returns {Promise<Roll|null>}   The created Roll instance, or null if no hit die was rolled
+   */
+  async rollHitDie(denomination, options={}) {
+    // If no denomination was provided, choose the first available
+    let cls = null;
+    if ( !denomination ) {
+      cls = this.itemTypes.class.find(c => c.system.hitDiceUsed < c.system.levels);
+      if ( !cls ) return null;
+      denomination = cls.system.hitDice;
+    }
+
+    // Otherwise, locate a class (if any) which has an available hit die of the requested denomination
+    else cls = this.items.find(i => {
+      return (i.system.hitDice === denomination) && ((i.system.hitDiceUsed || 0) < (i.system.levels || 1));
+    });
+
+    // If no class is available, display an error notification
+    if ( !cls ) {
+      ui.notifications.error(game.i18n.format("DND5E.HitDiceWarn", {name: this.name, formula: denomination}));
+      return null;
+    }
+
+    // Prepare roll data
+    const flavor = game.i18n.localize("DND5E.HitDiceRoll");
+    const rollConfig = foundry.utils.mergeObject({
+      formula: `max(0, 1${denomination} + @abilities.con.mod)`,
+      data: this.getRollData(),
+      chatMessage: true,
+      messageData: {
+        speaker: ChatMessage.getSpeaker({actor: this}),
+        flavor,
+        title: `${flavor}: ${this.name}`,
+        rollMode: game.settings.get("core", "rollMode"),
+        "flags.dnd5e.roll": {type: "hitDie"}
+      }
+    }, options);
+
+    /**
+     * A hook event that fires before a hit die is rolled for an Actor.
+     * @function dnd5e.preRollHitDie
+     * @memberof hookEvents
+     * @param {Actor5e} actor               Actor for which the hit die is to be rolled.
+     * @param {object} config               Configuration data for the pending roll.
+     * @param {string} config.formula       Formula that will be rolled.
+     * @param {object} config.data          Data used when evaluating the roll.
+     * @param {boolean} config.chatMessage  Should a chat message be created for this roll?
+     * @param {object} config.messageData   Data used to create the chat message.
+     * @param {string} denomination         Size of hit die to be rolled.
+     * @returns {boolean}                   Explicitly return `false` to prevent hit die from being rolled.
+     */
+    if ( Hooks.call("dnd5e.preRollHitDie", this, rollConfig, denomination) === false ) return;
+
+    const roll = await new Roll(rollConfig.formula, rollConfig.data).roll({async: true});
+    if ( rollConfig.chatMessage ) roll.toMessage(rollConfig.messageData);
+
+    const hp = this.system.attributes.hp;
+    const dhp = Math.min(Math.max(0, hp.max + (hp.tempmax ?? 0)) - hp.value, roll.total);
+    const updates = {
+      actor: {"system.attributes.hp.value": hp.value + dhp},
+      class: {"system.hitDiceUsed": cls.system.hitDiceUsed + 1}
+    };
+
+    /**
+     * A hook event that fires after a hit die has been rolled for an Actor, but before updates have been performed.
+     * @function dnd5e.rollHitDie
+     * @memberof hookEvents
+     * @param {Actor5e} actor         Actor for which the hit die has been rolled.
+     * @param {Roll} roll             The resulting roll.
+     * @param {object} updates
+     * @param {object} updates.actor  Updates that will be applied to the actor.
+     * @param {object} updates.class  Updates that will be applied to the class.
+     * @returns {boolean}             Explicitly return `false` to prevent updates from being performed.
+     */
+    if ( Hooks.call("dnd5e.rollHitDie", this, roll, updates) === false ) return roll;
+
+    // Re-evaluate dhp in the event that it was changed in the previous hook
+    const updateOptions = { dhp: (updates.actor?.["system.attributes.hp.value"] ?? hp.value) - hp.value };
+
+    // Perform updates
+    if ( !foundry.utils.isEmpty(updates.actor) ) await this.update(updates.actor, updateOptions);
+    if ( !foundry.utils.isEmpty(updates.class) ) await cls.update(updates.class);
+
+    return roll;
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * Roll hit points for a specific class as part of a level-up workflow.
+   * @param {Item5e} item                         The class item whose hit dice to roll.
+   * @param {object} options
+   * @param {boolean} [options.chatMessage=true]  Display the chat message for this roll.
+   * @returns {Promise<Roll>}                     The completed roll.
+   * @see {@link dnd5e.preRollClassHitPoints}
+   */
+  async rollClassHitPoints(item, { chatMessage=true }={}) {
+    if ( item.type !== "class" ) throw new Error("Hit points can only be rolled for a class item.");
+    const rollData = {
+      formula: `1${item.system.hitDice}`,
+      data: item.getRollData(),
+      chatMessage
+    };
+    const flavor = game.i18n.format("DND5E.AdvancementHitPointsRollMessage", { class: item.name });
+    const messageData = {
+      title: `${flavor}: ${this.name}`,
+      flavor,
+      speaker: ChatMessage.getSpeaker({ actor: this }),
+      "flags.dnd5e.roll": { type: "hitPoints" }
+    };
+
+    /**
+     * A hook event that fires before hit points are rolled for a character's class.
+     * @function dnd5e.preRollClassHitPoints
+     * @memberof hookEvents
+     * @param {Actor5e} actor            Actor for which the hit points are being rolled.
+     * @param {Item5e} item              The class item whose hit dice will be rolled.
+     * @param {object} rollData
+     * @param {string} rollData.formula  The string formula to parse.
+     * @param {object} rollData.data     The data object against which to parse attributes within the formula.
+     * @param {object} messageData       The data object to use when creating the message.
+     */
+    Hooks.callAll("dnd5e.preRollClassHitPoints", this, item, rollData, messageData);
+
+    const roll = new Roll(rollData.formula, rollData.data);
+    await roll.evaluate({async: true});
+
+    /**
+     * A hook event that fires after hit points haven been rolled for a character's class.
+     * @function dnd5e.rollClassHitPoints
+     * @memberof hookEvents
+     * @param {Actor5e} actor  Actor for which the hit points have been rolled.
+     * @param {Roll} roll      The resulting roll.
+     */
+    Hooks.callAll("dnd5e.rollClassHitPoints", this, roll);
+
+    if ( rollData.chatMessage ) await roll.toMessage(messageData);
+    return roll;
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * Roll hit points for an NPC based on the HP formula.
+   * @param {object} options
+   * @param {boolean} [options.chatMessage=true]  Display the chat message for this roll.
+   * @returns {Promise<Roll>}                     The completed roll.
+   * @see {@link dnd5e.preRollNPCHitPoints}
+   */
+  async rollNPCHitPoints({ chatMessage=true }={}) {
+    if ( this.type !== "npc" ) throw new Error("NPC hit points can only be rolled for NPCs");
+    const rollData = {
+      formula: this.system.attributes.hp.formula,
+      data: this.getRollData(),
+      chatMessage
+    };
+    const flavor = game.i18n.format("DND5E.HPFormulaRollMessage");
+    const messageData = {
+      title: `${flavor}: ${this.name}`,
+      flavor,
+      speaker: ChatMessage.getSpeaker({ actor: this }),
+      "flags.dnd5e.roll": { type: "hitPoints" }
+    };
+
+    /**
+     * A hook event that fires before hit points are rolled for an NPC.
+     * @function dnd5e.preRollNPCHitPoints
+     * @memberof hookEvents
+     * @param {Actor5e} actor            Actor for which the hit points are being rolled.
+     * @param {object} rollData
+     * @param {string} rollData.formula  The string formula to parse.
+     * @param {object} rollData.data     The data object against which to parse attributes within the formula.
+     * @param {object} messageData       The data object to use when creating the message.
+     */
+    Hooks.callAll("dnd5e.preRollNPCHitPoints", this, rollData, messageData);
+
+    const roll = new Roll(rollData.formula, rollData.data);
+    await roll.evaluate({async: true});
+
+    /**
+     * A hook event that fires after hit points are rolled for an NPC.
+     * @function dnd5e.rollNPCHitPoints
+     * @memberof hookEvents
+     * @param {Actor5e} actor  Actor for which the hit points have been rolled.
+     * @param {Roll} roll      The resulting roll.
+     */
+    Hooks.callAll("dnd5e.rollNPCHitPoints", this, roll);
+
+    if ( rollData.chatMessage ) await roll.toMessage(messageData);
+    return roll;
+  }
+
+  /* -------------------------------------------- */
+  /*  Resting                                     */
+  /* -------------------------------------------- */
+
+  /**
+   * Configuration options for a rest.
+   *
+   * @typedef {object} RestConfiguration
+   * @property {boolean} dialog            Present a dialog window which allows for rolling hit dice as part of the
+   *                                       Short Rest and selecting whether a new day has occurred.
+   * @property {boolean} chat              Should a chat message be created to summarize the results of the rest?
+   * @property {boolean} newDay            Does this rest carry over to a new day?
+   * @property {boolean} [autoHD]          Should hit dice be spent automatically during a short rest?
+   * @property {number} [autoHDThreshold]  How many hit points should be missing before hit dice are
+   *                                       automatically spent during a short rest.
+   */
+
+  /**
+   * Results from a rest operation.
+   *
+   * @typedef {object} RestResult
+   * @property {number} dhp            Hit points recovered during the rest.
+   * @property {number} dhd            Hit dice recovered or spent during the rest.
+   * @property {object} updateData     Updates applied to the actor.
+   * @property {object[]} updateItems  Updates applied to actor's items.
+   * @property {boolean} longRest      Whether the rest type was a long rest.
+   * @property {boolean} newDay        Whether a new day occurred during the rest.
+   * @property {Roll[]} rolls          Any rolls that occurred during the rest process, not including hit dice.
+   */
+
+  /* -------------------------------------------- */
+
+  /**
+   * Take a short rest, possibly spending hit dice and recovering resources, item uses, and pact slots.
+   * @param {RestConfiguration} [config]  Configuration options for a short rest.
+   * @returns {Promise<RestResult>}       A Promise which resolves once the short rest workflow has completed.
+   */
+  async shortRest(config={}) {
+    config = foundry.utils.mergeObject({
+      dialog: true, chat: true, newDay: false, autoHD: false, autoHDThreshold: 3
+    }, config);
+
+    /**
+     * A hook event that fires before a short rest is started.
+     * @function dnd5e.preShortRest
+     * @memberof hookEvents
+     * @param {Actor5e} actor             The actor that is being rested.
+     * @param {RestConfiguration} config  Configuration options for the rest.
+     * @returns {boolean}                 Explicitly return `false` to prevent the rest from being started.
+     */
+    if ( Hooks.call("dnd5e.preShortRest", this, config) === false ) return;
+
+    // Take note of the initial hit points and number of hit dice the Actor has
+    const hd0 = this.system.attributes.hd;
+    const hp0 = this.system.attributes.hp.value;
+
+    // Display a Dialog for rolling hit dice
+    if ( config.dialog ) {
+      try { config.newDay = await ShortRestDialog.shortRestDialog({actor: this, canRoll: hd0 > 0});
+      } catch(err) { return; }
+    }
+
+    // Automatically spend hit dice
+    else if ( config.autoHD ) await this.autoSpendHitDice({ threshold: config.autoHDThreshold });
+
+    // Return the rest result
+    const dhd = this.system.attributes.hd - hd0;
+    const dhp = this.system.attributes.hp.value - hp0;
+    return this._rest(config.chat, config.newDay, false, dhd, dhp);
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * Take a long rest, recovering hit points, hit dice, resources, item uses, and spell slots.
+   * @param {RestConfiguration} [config]  Configuration options for a long rest.
+   * @returns {Promise<RestResult>}       A Promise which resolves once the long rest workflow has completed.
+   */
+  async longRest(config={}) {
+    config = foundry.utils.mergeObject({
+      dialog: true, chat: true, newDay: true
+    }, config);
+
+    /**
+     * A hook event that fires before a long rest is started.
+     * @function dnd5e.preLongRest
+     * @memberof hookEvents
+     * @param {Actor5e} actor             The actor that is being rested.
+     * @param {RestConfiguration} config  Configuration options for the rest.
+     * @returns {boolean}                 Explicitly return `false` to prevent the rest from being started.
+     */
+    if ( Hooks.call("dnd5e.preLongRest", this, config) === false ) return;
+
+    if ( config.dialog ) {
+      try { config.newDay = await LongRestDialog.longRestDialog({actor: this}); }
+      catch(err) { return; }
+    }
+
+    return this._rest(config.chat, config.newDay, true);
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * Perform all of the changes needed for a short or long rest.
+   *
+   * @param {boolean} chat           Summarize the results of the rest workflow as a chat message.
+   * @param {boolean} newDay         Has a new day occurred during this rest?
+   * @param {boolean} longRest       Is this a long rest?
+   * @param {number} [dhd=0]         Number of hit dice spent during so far during the rest.
+   * @param {number} [dhp=0]         Number of hit points recovered so far during the rest.
+   * @returns {Promise<RestResult>}  Consolidated results of the rest workflow.
+   * @private
+   */
+  async _rest(chat, newDay, longRest, dhd=0, dhp=0) {
+    let hitPointsRecovered = 0;
+    let hitPointUpdates = {};
+    let hitDiceRecovered = 0;
+    let hitDiceUpdates = [];
+    const rolls = [];
+
+    // Recover hit points & hit dice on long rest
+    if ( longRest ) {
+      ({ updates: hitPointUpdates, hitPointsRecovered } = this._getRestHitPointRecovery());
+      ({ updates: hitDiceUpdates, hitDiceRecovered } = this._getRestHitDiceRecovery());
+    }
+
+    // Figure out the rest of the changes
+    const result = {
+      dhd: dhd + hitDiceRecovered,
+      dhp: dhp + hitPointsRecovered,
+      updateData: {
+        ...hitPointUpdates,
+        ...this._getRestResourceRecovery({ recoverShortRestResources: !longRest, recoverLongRestResources: longRest }),
+        ...this._getRestSpellRecovery({ recoverSpells: longRest })
+      },
+      updateItems: [
+        ...hitDiceUpdates,
+        ...(await this._getRestItemUsesRecovery({ recoverLongRestUses: longRest, recoverDailyUses: newDay, rolls }))
+      ],
+      longRest,
+      newDay
+    };
+    result.rolls = rolls;
+
+    /**
+     * A hook event that fires after rest result is calculated, but before any updates are performed.
+     * @function dnd5e.preRestCompleted
+     * @memberof hookEvents
+     * @param {Actor5e} actor      The actor that is being rested.
+     * @param {RestResult} result  Details on the rest to be completed.
+     * @returns {boolean}          Explicitly return `false` to prevent the rest updates from being performed.
+     */
+    if ( Hooks.call("dnd5e.preRestCompleted", this, result) === false ) return result;
+
+    // Perform updates
+    await this.update(result.updateData, { isRest: true });
+    await this.updateEmbeddedDocuments("Item", result.updateItems, { isRest: true });
+
+    // Display a Chat Message summarizing the rest effects
+    if ( chat ) await this._displayRestResultMessage(result, longRest);
+
+    /**
+     * A hook event that fires when the rest process is completed for an actor.
+     * @function dnd5e.restCompleted
+     * @memberof hookEvents
+     * @param {Actor5e} actor      The actor that just completed resting.
+     * @param {RestResult} result  Details on the rest completed.
+     */
+    Hooks.callAll("dnd5e.restCompleted", this, result);
+
+    // Return data summarizing the rest effects
+    return result;
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * Display a chat message with the result of a rest.
+   *
+   * @param {RestResult} result         Result of the rest operation.
+   * @param {boolean} [longRest=false]  Is this a long rest?
+   * @returns {Promise<ChatMessage>}    Chat message that was created.
+   * @protected
+   */
+  async _displayRestResultMessage(result, longRest=false) {
+    const { dhd, dhp, newDay } = result;
+    const diceRestored = dhd !== 0;
+    const healthRestored = dhp !== 0;
+    const length = longRest ? "Long" : "Short";
+
+    // Summarize the rest duration
+    let restFlavor;
+    switch (game.settings.get("dnd5e", "restVariant")) {
+      case "normal":
+        restFlavor = (longRest && newDay) ? "DND5E.LongRestOvernight" : `DND5E.${length}RestNormal`;
+        break;
+      case "gritty":
+        restFlavor = (!longRest && newDay) ? "DND5E.ShortRestOvernight" : `DND5E.${length}RestGritty`;
+        break;
+      case "epic":
+        restFlavor = `DND5E.${length}RestEpic`;
+        break;
+    }
+
+    // Determine the chat message to display
+    let message;
+    if ( diceRestored && healthRestored ) message = `DND5E.${length}RestResult`;
+    else if ( longRest && !diceRestored && healthRestored ) message = "DND5E.LongRestResultHitPoints";
+    else if ( longRest && diceRestored && !healthRestored ) message = "DND5E.LongRestResultHitDice";
+    else message = `DND5E.${length}RestResultShort`;
+
+    // Create a chat message
+    let chatData = {
+      user: game.user.id,
+      speaker: {actor: this, alias: this.name},
+      flavor: game.i18n.localize(restFlavor),
+      rolls: result.rolls,
+      content: game.i18n.format(message, {
+        name: this.name,
+        dice: longRest ? dhd : -dhd,
+        health: dhp
+      })
+    };
+    ChatMessage.applyRollMode(chatData, game.settings.get("core", "rollMode"));
+    return ChatMessage.create(chatData);
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * Automatically spend hit dice to recover hit points up to a certain threshold.
+   * @param {object} [options]
+   * @param {number} [options.threshold=3]  A number of missing hit points which would trigger an automatic HD roll.
+   * @returns {Promise<number>}             Number of hit dice spent.
+   */
+  async autoSpendHitDice({ threshold=3 }={}) {
+    const hp = this.system.attributes.hp;
+    const max = Math.max(0, hp.max + hp.tempmax);
+    let diceRolled = 0;
+    while ( (this.system.attributes.hp.value + threshold) <= max ) {
+      const r = await this.rollHitDie();
+      if ( r === null ) break;
+      diceRolled += 1;
+    }
+    return diceRolled;
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * Recovers actor hit points and eliminates any temp HP.
+   * @param {object} [options]
+   * @param {boolean} [options.recoverTemp=true]     Reset temp HP to zero.
+   * @param {boolean} [options.recoverTempMax=true]  Reset temp max HP to zero.
+   * @returns {object}                               Updates to the actor and change in hit points.
+   * @protected
+   */
+  _getRestHitPointRecovery({recoverTemp=true, recoverTempMax=true}={}) {
+    const hp = this.system.attributes.hp;
+    let max = hp.max;
+    let updates = {};
+    if ( recoverTempMax ) updates["system.attributes.hp.tempmax"] = 0;
+    else max = Math.max(0, max + (hp.tempmax || 0));
+    updates["system.attributes.hp.value"] = max;
+    if ( recoverTemp ) updates["system.attributes.hp.temp"] = 0;
+    return { updates, hitPointsRecovered: max - hp.value };
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * Recovers actor resources.
+   * @param {object} [options]
+   * @param {boolean} [options.recoverShortRestResources=true]  Recover resources that recharge on a short rest.
+   * @param {boolean} [options.recoverLongRestResources=true]   Recover resources that recharge on a long rest.
+   * @returns {object}                                          Updates to the actor.
+   * @protected
+   */
+  _getRestResourceRecovery({recoverShortRestResources=true, recoverLongRestResources=true}={}) {
+    let updates = {};
+    for ( let [k, r] of Object.entries(this.system.resources) ) {
+      if ( Number.isNumeric(r.max) && ((recoverShortRestResources && r.sr) || (recoverLongRestResources && r.lr)) ) {
+        updates[`system.resources.${k}.value`] = Number(r.max);
+      }
+    }
+    return updates;
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * Recovers spell slots and pact slots.
+   * @param {object} [options]
+   * @param {boolean} [options.recoverPact=true]     Recover all expended pact slots.
+   * @param {boolean} [options.recoverSpells=true]   Recover all expended spell slots.
+   * @returns {object}                               Updates to the actor.
+   * @protected
+   */
+  _getRestSpellRecovery({recoverPact=true, recoverSpells=true}={}) {
+    const spells = this.system.spells;
+    let updates = {};
+    if ( recoverPact ) {
+      const pact = spells.pact;
+      updates["system.spells.pact.value"] = pact.override || pact.max;
+    }
+    if ( recoverSpells ) {
+      for ( let [k, v] of Object.entries(spells) ) {
+        updates[`system.spells.${k}.value`] = Number.isNumeric(v.override) ? v.override : (v.max ?? 0);
+      }
+    }
+    return updates;
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * Recovers class hit dice during a long rest.
+   *
+   * @param {object} [options]
+   * @param {number} [options.maxHitDice]  Maximum number of hit dice to recover.
+   * @returns {object}                     Array of item updates and number of hit dice recovered.
+   * @protected
+   */
+  _getRestHitDiceRecovery({maxHitDice}={}) {
+    // Determine the number of hit dice which may be recovered
+    if ( maxHitDice === undefined ) maxHitDice = Math.max(Math.floor(this.system.details.level / 2), 1);
+
+    // Sort classes which can recover HD, assuming players prefer recovering larger HD first.
+    const sortedClasses = Object.values(this.classes).sort((a, b) => {
+      return (parseInt(b.system.hitDice.slice(1)) || 0) - (parseInt(a.system.hitDice.slice(1)) || 0);
+    });
+
+    // Update hit dice usage
+    let updates = [];
+    let hitDiceRecovered = 0;
+    for ( let item of sortedClasses ) {
+      const hitDiceUsed = item.system.hitDiceUsed;
+      if ( (hitDiceRecovered < maxHitDice) && (hitDiceUsed > 0) ) {
+        let delta = Math.min(hitDiceUsed || 0, maxHitDice - hitDiceRecovered);
+        hitDiceRecovered += delta;
+        updates.push({_id: item.id, "system.hitDiceUsed": hitDiceUsed - delta});
+      }
+    }
+    return { updates, hitDiceRecovered };
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * Recovers item uses during short or long rests.
+   * @param {object} [options]
+   * @param {boolean} [options.recoverShortRestUses=true]  Recover uses for items that recharge after a short rest.
+   * @param {boolean} [options.recoverLongRestUses=true]   Recover uses for items that recharge after a long rest.
+   * @param {boolean} [options.recoverDailyUses=true]      Recover uses for items that recharge on a new day.
+   * @param {Roll[]} [options.rolls]                       Rolls that have been performed as part of this rest.
+   * @returns {Promise<object[]>}                          Array of item updates.
+   * @protected
+   */
+  async _getRestItemUsesRecovery({recoverShortRestUses=true, recoverLongRestUses=true,
+    recoverDailyUses=true, rolls}={}) {
+    let recovery = [];
+    if ( recoverShortRestUses ) recovery.push("sr");
+    if ( recoverLongRestUses ) recovery.push("lr");
+    if ( recoverDailyUses ) recovery.push("day");
+    let updates = [];
+    for ( let item of this.items ) {
+      const uses = item.system.uses;
+      if ( recovery.includes(uses?.per) ) {
+        updates.push({_id: item.id, "system.uses.value": uses.max});
+      }
+      if ( recoverLongRestUses && item.system.recharge?.value ) {
+        updates.push({_id: item.id, "system.recharge.charged": true});
+      }
+
+      // Items that roll to gain charges on a new day
+      if ( recoverDailyUses && uses?.recovery && (uses?.per in CONFIG.DND5E.limitedUseFormulaPeriods) ) {
+        const roll = new Roll(uses.recovery, item.getRollData());
+        if ( recoverLongRestUses && (game.settings.get("dnd5e", "restVariant") === "gritty") ) {
+          roll.alter(7, 0, {multiplyNumeric: true});
+        }
+
+        let total = 0;
+        try {
+          total = (await roll.evaluate({async: true})).total;
+        } catch(err) {
+          ui.notifications.warn(game.i18n.format("DND5E.ItemRecoveryFormulaWarning", {
+            name: item.name,
+            formula: uses.recovery
+          }));
+        }
+
+        const newValue = Math.clamped(uses.value + total, 0, uses.max);
+        if ( newValue !== uses.value ) {
+          const diff = newValue - uses.value;
+          const isMax = newValue === uses.max;
+          const locKey = `DND5E.Item${diff < 0 ? "Loss" : "Recovery"}Roll${isMax ? "Max" : ""}`;
+          updates.push({_id: item.id, "system.uses.value": newValue});
+          rolls.push(roll);
+          await roll.toMessage({
+            user: game.user.id,
+            speaker: {actor: this, alias: this.name},
+            flavor: game.i18n.format(locKey, {name: item.name, count: Math.abs(diff)})
+          });
+        }
+      }
+    }
+    return updates;
+  }
+
+  /* -------------------------------------------- */
+  /*  Conversion & Transformation                 */
+  /* -------------------------------------------- */
+
+  /**
+   * Convert all carried currency to the highest possible denomination using configured conversion rates.
+   * See CONFIG.DND5E.currencies for configuration.
+   * @returns {Promise<Actor5e>}
+   */
+  convertCurrency() {
+    const currency = foundry.utils.deepClone(this.system.currency);
+    const currencies = Object.entries(CONFIG.DND5E.currencies);
+    currencies.sort((a, b) => a[1].conversion - b[1].conversion);
+
+    // Count total converted units of the base currency
+    let basis = currencies.reduce((change, [denomination, config]) => {
+      if ( !config.conversion ) return change;
+      return change + (currency[denomination] / config.conversion);
+    }, 0);
+
+    // Convert base units into the highest denomination possible
+    for ( const [denomination, config] of currencies) {
+      if ( !config.conversion ) continue;
+      const amount = Math.floor(basis * config.conversion);
+      currency[denomination] = amount;
+      basis -= (amount / config.conversion);
+    }
+
+    // Save the updated currency object
+    return this.update({"system.currency": currency});
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * Options that determine what properties of the original actor are kept and which are replaced with
+   * the target actor.
+   *
+   * @typedef {object} TransformationOptions
+   * @property {boolean} [keepPhysical=false]       Keep physical abilities (str, dex, con)
+   * @property {boolean} [keepMental=false]         Keep mental abilities (int, wis, cha)
+   * @property {boolean} [keepSaves=false]          Keep saving throw proficiencies
+   * @property {boolean} [keepSkills=false]         Keep skill proficiencies
+   * @property {boolean} [mergeSaves=false]         Take the maximum of the save proficiencies
+   * @property {boolean} [mergeSkills=false]        Take the maximum of the skill proficiencies
+   * @property {boolean} [keepClass=false]          Keep proficiency bonus
+   * @property {boolean} [keepFeats=false]          Keep features
+   * @property {boolean} [keepSpells=false]         Keep spells and spellcasting ability
+   * @property {boolean} [keepItems=false]          Keep items
+   * @property {boolean} [keepBio=false]            Keep biography
+   * @property {boolean} [keepVision=false]         Keep vision
+   * @property {boolean} [keepSelf=false]           Keep self
+   * @property {boolean} [keepAE=false]             Keep all effects
+   * @property {boolean} [keepOriginAE=true]        Keep effects which originate on this actor
+   * @property {boolean} [keepOtherOriginAE=true]   Keep effects which originate on another actor
+   * @property {boolean} [keepSpellAE=true]         Keep effects which originate from actors spells
+   * @property {boolean} [keepFeatAE=true]          Keep effects which originate from actors features
+   * @property {boolean} [keepEquipmentAE=true]     Keep effects which originate on actors equipment
+   * @property {boolean} [keepClassAE=true]         Keep effects which originate from actors class/subclass
+   * @property {boolean} [keepBackgroundAE=true]    Keep effects which originate from actors background
+   * @property {boolean} [transformTokens=true]     Transform linked tokens too
+   */
+
+  /**
+   * Transform this Actor into another one.
+   *
+   * @param {Actor5e} target                      The target Actor.
+   * @param {TransformationOptions} [options={}]  Options that determine how the transformation is performed.
+   * @param {boolean} [options.renderSheet=true]  Render the sheet of the transformed actor after the polymorph
+   * @returns {Promise<Array<Token>>|null}        Updated token if the transformation was performed.
+   */
+  async transformInto(target, { keepPhysical=false, keepMental=false, keepSaves=false, keepSkills=false,
+    mergeSaves=false, mergeSkills=false, keepClass=false, keepFeats=false, keepSpells=false, keepItems=false,
+    keepBio=false, keepVision=false, keepSelf=false, keepAE=false, keepOriginAE=true, keepOtherOriginAE=true,
+    keepSpellAE=true, keepEquipmentAE=true, keepFeatAE=true, keepClassAE=true, keepBackgroundAE=true,
+    transformTokens=true}={}, {renderSheet=true}={}) {
+
+    // Ensure the player is allowed to polymorph
+    const allowed = game.settings.get("dnd5e", "allowPolymorphing");
+    if ( !allowed && !game.user.isGM ) {
+      ui.notifications.warn("DND5E.PolymorphWarn", {localize: true});
+      return null;
+    }
+
+    // Get the original Actor data and the new source data
+    const o = this.toObject();
+    o.flags.dnd5e = o.flags.dnd5e || {};
+    o.flags.dnd5e.transformOptions = {mergeSkills, mergeSaves};
+    const source = target.toObject();
+
+    if ( keepSelf ) {
+      o.img = source.img;
+      o.name = `${o.name} (${game.i18n.localize("DND5E.PolymorphSelf")})`;
+    }
+
+    // Prepare new data to merge from the source
+    const d = foundry.utils.mergeObject(foundry.utils.deepClone({
+      type: o.type, // Remain the same actor type
+      name: `${o.name} (${source.name})`, // Append the new shape to your old name
+      system: source.system, // Get the systemdata model of your new form
+      items: source.items, // Get the items of your new form
+      effects: o.effects.concat(source.effects), // Combine active effects from both forms
+      img: source.img, // New appearance
+      ownership: o.ownership, // Use the original actor permissions
+      folder: o.folder, // Be displayed in the same sidebar folder
+      flags: o.flags, // Use the original actor flags
+      prototypeToken: { name: `${o.name} (${source.name})`, texture: {}, sight: {}, detectionModes: [] } // Set a new empty token
+    }), keepSelf ? o : {}); // Keeps most of original actor
+
+    // Specifically delete some data attributes
+    delete d.system.resources; // Don't change your resource pools
+    delete d.system.currency; // Don't lose currency
+    delete d.system.bonuses; // Don't lose global bonuses
+    if ( keepSpells ) delete d.system.attributes.spellcasting; // Keep spellcasting ability if retaining spells.
+
+    // Specific additional adjustments
+    d.system.details.alignment = o.system.details.alignment; // Don't change alignment
+    d.system.attributes.exhaustion = o.system.attributes.exhaustion; // Keep your prior exhaustion level
+    d.system.attributes.inspiration = o.system.attributes.inspiration; // Keep inspiration
+    d.system.spells = o.system.spells; // Keep spell slots
+    d.system.attributes.ac.flat = target.system.attributes.ac.value; // Override AC
+
+    // Token appearance updates
+    for ( const k of ["width", "height", "alpha", "lockRotation"] ) {
+      d.prototypeToken[k] = source.prototypeToken[k];
+    }
+    for ( const k of ["offsetX", "offsetY", "scaleX", "scaleY", "src", "tint"] ) {
+      d.prototypeToken.texture[k] = source.prototypeToken.texture[k];
+    }
+    for ( const k of ["bar1", "bar2", "displayBars", "displayName", "disposition", "rotation", "elevation"] ) {
+      d.prototypeToken[k] = o.prototypeToken[k];
+    }
+
+    if ( !keepSelf ) {
+      const sightSource = keepVision ? o.prototypeToken : source.prototypeToken;
+      for ( const k of ["range", "angle", "visionMode", "color", "attenuation", "brightness", "saturation", "contrast", "enabled"] ) {
+        d.prototypeToken.sight[k] = sightSource.sight[k];
+      }
+      d.prototypeToken.detectionModes = sightSource.detectionModes;
+
+      // Transfer ability scores
+      const abilities = d.system.abilities;
+      for ( let k of Object.keys(abilities) ) {
+        const oa = o.system.abilities[k];
+        const prof = abilities[k].proficient;
+        const type = CONFIG.DND5E.abilities[k]?.type;
+        if ( keepPhysical && (type === "physical") ) abilities[k] = oa;
+        else if ( keepMental && (type === "mental") ) abilities[k] = oa;
+
+        // Set saving throw proficiencies.
+        if ( keepSaves && oa ) abilities[k].proficient = oa.proficient;
+        else if ( mergeSaves && oa ) abilities[k].proficient = Math.max(prof, oa.proficient);
+        else abilities[k].proficient = source.system.abilities[k].proficient;
+      }
+
+      // Transfer skills
+      if ( keepSkills ) d.system.skills = o.system.skills;
+      else if ( mergeSkills ) {
+        for ( let [k, s] of Object.entries(d.system.skills) ) {
+          s.value = Math.max(s.value, o.system.skills[k]?.value ?? 0);
+        }
+      }
+
+      // Keep specific items from the original data
+      d.items = d.items.concat(o.items.filter(i => {
+        if ( ["class", "subclass"].includes(i.type) ) return keepClass;
+        else if ( i.type === "feat" ) return keepFeats;
+        else if ( i.type === "spell" ) return keepSpells;
+        else return keepItems;
+      }));
+
+      // Transfer classes for NPCs
+      if ( !keepClass && d.system.details.cr ) {
+        const cls = new dnd5e.dataModels.item.ClassData({levels: d.system.details.cr});
+        d.items.push({
+          type: "class",
+          name: game.i18n.localize("DND5E.PolymorphTmpClass"),
+          system: cls.toObject()
+        });
+      }
+
+      // Keep biography
+      if ( keepBio ) d.system.details.biography = o.system.details.biography;
+
+      // Keep senses
+      if ( keepVision ) d.system.traits.senses = o.system.traits.senses;
+
+      // Remove active effects
+      const oEffects = foundry.utils.deepClone(d.effects);
+      const originEffectIds = new Set(oEffects.filter(effect => {
+        return !effect.origin || effect.origin === this.uuid;
+      }).map(e => e._id));
+      d.effects = d.effects.filter(e => {
+        if ( keepAE ) return true;
+        const origin = e.origin?.startsWith("Actor") || e.origin?.startsWith("Item") ? fromUuidSync(e.origin) : {};
+        const originIsSelf = origin?.parent?.uuid === this.uuid;
+        const isOriginEffect = originEffectIds.has(e._id);
+        if ( isOriginEffect ) return keepOriginAE;
+        if ( !isOriginEffect && !originIsSelf ) return keepOtherOriginAE;
+        if ( origin.type === "spell" ) return keepSpellAE;
+        if ( origin.type === "feat" ) return keepFeatAE;
+        if ( origin.type === "background" ) return keepBackgroundAE;
+        if ( ["subclass", "class"].includes(origin.type) ) return keepClassAE;
+        if ( ["equipment", "weapon", "tool", "loot", "backpack"].includes(origin.type) ) return keepEquipmentAE;
+        return true;
+      });
+    }
+
+    // Set a random image if source is configured that way
+    if ( source.prototypeToken.randomImg ) {
+      const images = await target.getTokenImages();
+      d.prototypeToken.texture.src = images[Math.floor(Math.random() * images.length)];
+    }
+
+    // Set new data flags
+    if ( !this.isPolymorphed || !d.flags.dnd5e.originalActor ) d.flags.dnd5e.originalActor = this.id;
+    d.flags.dnd5e.isPolymorphed = true;
+
+    // Gather previous actor data
+    const previousActorIds = this.getFlag("dnd5e", "previousActorIds") || [];
+    previousActorIds.push(this._id);
+    foundry.utils.setProperty(d.flags, "dnd5e.previousActorIds", previousActorIds);
+
+    // Update unlinked Tokens, and grab a copy of any actorData adjustments to re-apply
+    if ( this.isToken ) {
+      const tokenData = d.prototypeToken;
+      delete d.prototypeToken;
+      let previousActorData;
+      if ( game.dnd5e.isV10 ) {
+        tokenData.actorData = d;
+        previousActorData = this.token.toObject().actorData;
+      } else {
+        tokenData.delta = d;
+        previousActorData = this.token.delta.toObject();
+      }
+      foundry.utils.setProperty(tokenData, "flags.dnd5e.previousActorData", previousActorData);
+      await this.sheet?.close();
+      const update = await this.token.update(tokenData);
+      if ( renderSheet ) this.sheet?.render(true);
+      return update;
+    }
+
+    // Close sheet for non-transformed Actor
+    await this.sheet?.close();
+
+    /**
+     * A hook event that fires just before the actor is transformed.
+     * @function dnd5e.transformActor
+     * @memberof hookEvents
+     * @param {Actor5e} actor                  The original actor before transformation.
+     * @param {Actor5e} target                 The target actor into which to transform.
+     * @param {object} data                    The data that will be used to create the new transformed actor.
+     * @param {TransformationOptions} options  Options that determine how the transformation is performed.
+     * @param {object} [options]
+     */
+    Hooks.callAll("dnd5e.transformActor", this, target, d, {
+      keepPhysical, keepMental, keepSaves, keepSkills, mergeSaves, mergeSkills, keepClass, keepFeats, keepSpells,
+      keepItems, keepBio, keepVision, keepSelf, keepAE, keepOriginAE, keepOtherOriginAE, keepSpellAE,
+      keepEquipmentAE, keepFeatAE, keepClassAE, keepBackgroundAE, transformTokens
+    }, {renderSheet});
+
+    // Create new Actor with transformed data
+    const newActor = await this.constructor.create(d, {renderSheet});
+
+    // Update placed Token instances
+    if ( !transformTokens ) return;
+    const tokens = this.getActiveTokens(true);
+    const updates = tokens.map(t => {
+      const newTokenData = foundry.utils.deepClone(d.prototypeToken);
+      newTokenData._id = t.id;
+      newTokenData.actorId = newActor.id;
+      newTokenData.actorLink = true;
+
+      const dOriginalActor = foundry.utils.getProperty(d, "flags.dnd5e.originalActor");
+      foundry.utils.setProperty(newTokenData, "flags.dnd5e.originalActor", dOriginalActor);
+      foundry.utils.setProperty(newTokenData, "flags.dnd5e.isPolymorphed", true);
+      return newTokenData;
+    });
+    return canvas.scene?.updateEmbeddedDocuments("Token", updates);
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * If this actor was transformed with transformTokens enabled, then its
+   * active tokens need to be returned to their original state. If not, then
+   * we can safely just delete this actor.
+   * @param {object} [options]
+   * @param {boolean} [options.renderSheet=true]  Render Sheet after revert the transformation.
+   * @returns {Promise<Actor>|null}  Original actor if it was reverted.
+   */
+  async revertOriginalForm({renderSheet=true}={}) {
+    if ( !this.isPolymorphed ) return;
+    if ( !this.isOwner ) {
+      ui.notifications.warn("DND5E.PolymorphRevertWarn", {localize: true});
+      return null;
+    }
+
+    /**
+     * A hook event that fires just before the actor is reverted to original form.
+     * @function dnd5e.revertOriginalForm
+     * @memberof hookEvents
+     * @param {Actor} this                 The original actor before transformation.
+     * @param {object} [options]
+     */
+    Hooks.callAll("dnd5e.revertOriginalForm", this, {renderSheet});
+    const previousActorIds = this.getFlag("dnd5e", "previousActorIds") ?? [];
+    const isOriginalActor = !previousActorIds.length;
+    const isRendered = this.sheet.rendered;
+
+    // Obtain a reference to the original actor
+    const original = game.actors.get(this.getFlag("dnd5e", "originalActor"));
+
+    // If we are reverting an unlinked token, grab the previous actorData, and create a new token
+    if ( this.isToken ) {
+      const baseActor = original ? original : game.actors.get(this.token.actorId);
+      if ( !baseActor ) {
+        ui.notifications.warn(game.i18n.format("DND5E.PolymorphRevertNoOriginalActorWarn", {
+          reference: this.getFlag("dnd5e", "originalActor")
+        }));
+        return;
+      }
+      const prototypeTokenData = await baseActor.getTokenDocument();
+      const actorData = this.token.getFlag("dnd5e", "previousActorData");
+      const tokenUpdate = this.token.toObject();
+      if ( game.dnd5e.isV10 ) tokenUpdate.actorData = actorData ?? {};
+      else {
+        actorData._id = tokenUpdate.delta._id;
+        tokenUpdate.delta = actorData;
+      }
+
+      for ( const k of ["width", "height", "alpha", "lockRotation", "name"] ) {
+        tokenUpdate[k] = prototypeTokenData[k];
+      }
+      for ( const k of ["offsetX", "offsetY", "scaleX", "scaleY", "src", "tint"] ) {
+        tokenUpdate.texture[k] = prototypeTokenData.texture[k];
+      }
+      tokenUpdate.sight = prototypeTokenData.sight;
+      tokenUpdate.detectionModes = prototypeTokenData.detectionModes;
+
+      await this.sheet.close();
+      await canvas.scene?.deleteEmbeddedDocuments("Token", [this.token._id]);
+      const token = await TokenDocument.implementation.create(tokenUpdate, {
+        parent: canvas.scene, keepId: true, render: true
+      });
+      if ( isOriginalActor ) {
+        await this.unsetFlag("dnd5e", "isPolymorphed");
+        await this.unsetFlag("dnd5e", "previousActorIds");
+        await this.token.unsetFlag("dnd5e", "previousActorData");
+      }
+      if ( isRendered && renderSheet ) token.actor?.sheet?.render(true);
+      return token;
+    }
+
+    if ( !original ) {
+      ui.notifications.warn(game.i18n.format("DND5E.PolymorphRevertNoOriginalActorWarn", {
+        reference: this.getFlag("dnd5e", "originalActor")
+      }));
+      return;
+    }
+
+    // Get the Tokens which represent this actor
+    if ( canvas.ready ) {
+      const tokens = this.getActiveTokens(true);
+      const tokenData = await original.getTokenDocument();
+      const tokenUpdates = tokens.map(t => {
+        const update = duplicate(tokenData);
+        update._id = t.id;
+        delete update.x;
+        delete update.y;
+        return update;
+      });
+      await canvas.scene.updateEmbeddedDocuments("Token", tokenUpdates);
+    }
+    if ( isOriginalActor ) {
+      await this.unsetFlag("dnd5e", "isPolymorphed");
+      await this.unsetFlag("dnd5e", "previousActorIds");
+    }
+
+    // Delete the polymorphed version(s) of the actor, if possible
+    if ( game.user.isGM ) {
+      const idsToDelete = previousActorIds.filter(id =>
+        id !== original.id // Is not original Actor Id
+        && game.actors?.get(id) // Actor still exists
+      ).concat([this.id]); // Add this id
+
+      await Actor.implementation.deleteDocuments(idsToDelete);
+    } else if ( isRendered ) {
+      this.sheet?.close();
+    }
+    if ( isRendered && renderSheet ) original.sheet?.render(isRendered);
+    return original;
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * Add additional system-specific sidebar directory context menu options for Actor documents
+   * @param {jQuery} html         The sidebar HTML
+   * @param {Array} entryOptions  The default array of context menu options
+   */
+  static addDirectoryContextOptions(html, entryOptions) {
+    entryOptions.push({
+      name: "DND5E.PolymorphRestoreTransformation",
+      icon: '<i class="fas fa-backward"></i>',
+      callback: li => {
+        const actor = game.actors.get(li.data("documentId"));
+        return actor.revertOriginalForm();
+      },
+      condition: li => {
+        const allowed = game.settings.get("dnd5e", "allowPolymorphing");
+        if ( !allowed && !game.user.isGM ) return false;
+        const actor = game.actors.get(li.data("documentId"));
+        return actor && actor.isPolymorphed;
+      }
+    });
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * Format a type object into a string.
+   * @param {object} typeData          The type data to convert to a string.
+   * @returns {string}
+   */
+  static formatCreatureType(typeData) {
+    if ( typeof typeData === "string" ) return typeData; // Backwards compatibility
+    let localizedType;
+    if ( typeData.value === "custom" ) {
+      localizedType = typeData.custom;
+    } else {
+      let code = CONFIG.DND5E.creatureTypes[typeData.value];
+      localizedType = game.i18n.localize(typeData.swarm ? `${code}Pl` : code);
+    }
+    let type = localizedType;
+    if ( typeData.swarm ) {
+      type = game.i18n.format("DND5E.CreatureSwarmPhrase", {
+        size: game.i18n.localize(CONFIG.DND5E.actorSizes[typeData.swarm]),
+        type: localizedType
+      });
+    }
+    if (typeData.subtype) type = `${type} (${typeData.subtype})`;
+    return type;
+  }
+
+  /* -------------------------------------------- */
+  /*  Event Listeners and Handlers                */
+  /* -------------------------------------------- */
+
+  /** @inheritdoc */
+  _onUpdate(data, options, userId) {
+    super._onUpdate(data, options, userId);
+    this._displayScrollingDamage(options.dhp);
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * Display changes to health as scrolling combat text.
+   * Adapt the font size relative to the Actor's HP total to emphasize more significant blows.
+   * @param {number} dhp      The change in hit points that was applied
+   * @private
+   */
+  _displayScrollingDamage(dhp) {
+    if ( !dhp ) return;
+    dhp = Number(dhp);
+    const tokens = this.isToken ? [this.token?.object] : this.getActiveTokens(true);
+    for ( const t of tokens ) {
+      if ( !t.visible || !t.renderable ) continue;
+      const pct = Math.clamped(Math.abs(dhp) / this.system.attributes.hp.max, 0, 1);
+      canvas.interface.createScrollingText(t.center, dhp.signedString(), {
+        anchor: CONST.TEXT_ANCHOR_POINTS.TOP,
+        fontSize: 16 + (32 * pct), // Range between [16, 48]
+        fill: CONFIG.DND5E.tokenHPColors[dhp < 0 ? "damage" : "healing"],
+        stroke: 0x000000,
+        strokeThickness: 4,
+        jitter: 0.25
+      });
+    }
+  }
+}
+
+/**
+ * Inline application that presents the player with a choice of items.
+ */
+class ItemChoiceFlow extends ItemGrantFlow {
+
+  /**
+   * Set of selected UUIDs.
+   * @type {Set<string>}
+   */
+  selected;
+
+  /**
+   * Cached items from the advancement's pool.
+   * @type {Item5e[]}
+   */
+  pool;
+
+  /**
+   * List of dropped items.
+   * @type {Item5e[]}
+   */
+  dropped;
+
+  /* -------------------------------------------- */
+
+  /** @inheritdoc */
+  static get defaultOptions() {
+    return foundry.utils.mergeObject(super.defaultOptions, {
+      dragDrop: [{ dropSelector: ".drop-target" }],
+      template: "systems/dnd5e/templates/advancement/item-choice-flow.hbs"
+    });
+  }
+
+  /* -------------------------------------------- */
+
+  /** @inheritdoc */
+  async getContext() {
+    this.selected ??= new Set(
+      this.retainedData?.items.map(i => foundry.utils.getProperty(i, "flags.dnd5e.sourceId"))
+        ?? Object.values(this.advancement.value[this.level] ?? {})
+    );
+    this.pool ??= await Promise.all(this.advancement.configuration.pool.map(uuid => fromUuid(uuid)));
+    if ( !this.dropped ) {
+      this.dropped = [];
+      for ( const data of this.retainedData?.items ?? [] ) {
+        const uuid = foundry.utils.getProperty(data, "flags.dnd5e.sourceId");
+        if ( this.pool.find(i => uuid === i.uuid) ) continue;
+        const item = await fromUuid(uuid);
+        item.dropped = true;
+        this.dropped.push(item);
+      }
+    }
+
+    const max = this.advancement.configuration.choices[this.level];
+    const choices = { max, current: this.selected.size, full: this.selected.size >= max };
+
+    const previousLevels = {};
+    const previouslySelected = new Set();
+    for ( const [level, data] of Object.entries(this.advancement.value.added ?? {}) ) {
+      if ( level > this.level ) continue;
+      previousLevels[level] = await Promise.all(Object.values(data).map(uuid => fromUuid(uuid)));
+      Object.values(data).forEach(uuid => previouslySelected.add(uuid));
+    }
+
+    const items = [...this.pool, ...this.dropped].reduce((items, i) => {
+      i.checked = this.selected.has(i.uuid);
+      i.disabled = !i.checked && choices.full;
+      if ( !previouslySelected.has(i.uuid) ) items.push(i);
+      return items;
+    }, []);
+
+    return { choices, items, previousLevels };
+  }
+
+  /* -------------------------------------------- */
+
+  /** @inheritdoc */
+  activateListeners(html) {
+    super.activateListeners(html);
+    html.find(".item-delete").click(this._onItemDelete.bind(this));
+  }
+
+  /* -------------------------------------------- */
+
+  /** @inheritdoc */
+  _onChangeInput(event) {
+    if ( event.target.checked ) this.selected.add(event.target.name);
+    else this.selected.delete(event.target.name);
+    this.render();
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * Handle deleting a dropped item.
+   * @param {Event} event  The originating click event.
+   * @protected
+   */
+  async _onItemDelete(event) {
+    event.preventDefault();
+    const uuidToDelete = event.currentTarget.closest(".item-name")?.querySelector("input")?.name;
+    if ( !uuidToDelete ) return;
+    this.dropped.findSplice(i => i.uuid === uuidToDelete);
+    this.selected.delete(uuidToDelete);
+    this.render();
+  }
+
+  /* -------------------------------------------- */
+
+  /** @inheritdoc */
+  async _onDrop(event) {
+    if ( this.selected.size >= this.advancement.configuration.choices[this.level] ) return false;
+
+    // Try to extract the data
+    let data;
+    try {
+      data = JSON.parse(event.dataTransfer.getData("text/plain"));
+    } catch(err) {
+      return false;
+    }
+
+    if ( data.type !== "Item" ) return false;
+    const item = await Item.implementation.fromDropData(data);
+
+    try {
+      this.advancement._validateItemType(item);
+    } catch(err) {
+      ui.notifications.error(err.message);
+      return null;
+    }
+
+    // If the item is already been marked as selected, no need to go further
+    if ( this.selected.has(item.uuid) ) return false;
+
+    // Check to ensure the dropped item hasn't been selected at a lower level
+    for ( const [level, data] of Object.entries(this.advancement.value.added ?? {}) ) {
+      if ( level >= this.level ) continue;
+      if ( Object.values(data).includes(item.uuid) ) {
+        ui.notifications.error("DND5E.AdvancementItemChoicePreviouslyChosenWarning", {localize: true});
+        return null;
+      }
+    }
+
+    // If spell level is restricted to available level, ensure the spell is of the appropriate level
+    const spellLevel = this.advancement.configuration.restriction.level;
+    if ( (this.advancement.configuration.type === "spell") && spellLevel === "available" ) {
+      const maxSlot = this._maxSpellSlotLevel();
+      if ( item.system.level > maxSlot ) {
+        ui.notifications.error(game.i18n.format("DND5E.AdvancementItemChoiceSpellLevelAvailableWarning", {
+          level: CONFIG.DND5E.spellLevels[maxSlot]
+        }));
+        return null;
+      }
+    }
+
+    // Mark the item as selected
+    this.selected.add(item.uuid);
+
+    // If the item doesn't already exist in the pool, add it
+    if ( !this.pool.find(i => i.uuid === item.uuid) ) {
+      this.dropped.push(item);
+      item.dropped = true;
+    }
+
+    this.render();
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * Determine the maximum spell slot level for the actor to which this advancement is being applied.
+   * @returns {number}
+   */
+  _maxSpellSlotLevel() {
+    const spellcasting = this.advancement.item.spellcasting;
+    let spells;
+
+    // For advancements on classes or subclasses, use the largest slot available for that class
+    if ( spellcasting ) {
+      const progression = { slot: 0, pact: {} };
+      const maxSpellLevel = CONFIG.DND5E.SPELL_SLOT_TABLE[CONFIG.DND5E.SPELL_SLOT_TABLE.length - 1].length;
+      spells = Object.fromEntries(Array.fromRange(maxSpellLevel, 1).map(l => [`spell${l}`, {}]));
+      Actor5e.computeClassProgression(progression, this.advancement.item, { spellcasting });
+      Actor5e.prepareSpellcastingSlots(spells, spellcasting.type, progression);
+    }
+
+    // For all other items, use the largest slot possible
+    else spells = this.advancement.actor.system.spells;
+
+    const largestSlot = Object.entries(spells).reduce((slot, [key, data]) => {
+      if ( data.max === 0 ) return slot;
+      const level = parseInt(key.replace("spell", ""));
+      if ( !Number.isNaN(level) && level > slot ) return level;
+      return slot;
+    }, -1);
+    return Math.max(spells.pact?.level ?? 0, largestSlot);
+  }
+}
+
+class ItemChoiceConfigurationData extends foundry.abstract.DataModel {
+  static defineSchema() {
+    return {
+      hint: new foundry.data.fields.StringField({label: "DND5E.AdvancementHint"}),
+      choices: new MappingField(new foundry.data.fields.NumberField(), {
+        hint: "DND5E.AdvancementItemChoiceLevelsHint"
+      }),
+      allowDrops: new foundry.data.fields.BooleanField({
+        initial: true, label: "DND5E.AdvancementConfigureAllowDrops",
+        hint: "DND5E.AdvancementConfigureAllowDropsHint"
+      }),
+      type: new foundry.data.fields.StringField({
+        blank: false, nullable: true, initial: null,
+        label: "DND5E.AdvancementItemChoiceType", hint: "DND5E.AdvancementItemChoiceTypeHint"
+      }),
+      pool: new foundry.data.fields.ArrayField(new foundry.data.fields.StringField(), {label: "DOCUMENT.Items"}),
+      spell: new foundry.data.fields.EmbeddedDataField(SpellConfigurationData, {nullable: true, initial: null}),
+      restriction: new foundry.data.fields.SchemaField({
+        type: new foundry.data.fields.StringField({label: "DND5E.Type"}),
+        subtype: new foundry.data.fields.StringField({label: "DND5E.Subtype"}),
+        level: new foundry.data.fields.StringField({label: "DND5E.SpellLevel"})
+      })
+    };
+  }
+}
+
+/**
+ * Advancement that presents the player with a choice of multiple items that they can take. Keeps track of which
+ * items were selected at which levels.
+ */
+class ItemChoiceAdvancement extends ItemGrantAdvancement {
+
+  /** @inheritdoc */
+  static get metadata() {
+    return foundry.utils.mergeObject(super.metadata, {
+      dataModels: {
+        configuration: ItemChoiceConfigurationData
+      },
+      order: 50,
+      icon: "systems/dnd5e/icons/svg/item-choice.svg",
+      title: game.i18n.localize("DND5E.AdvancementItemChoiceTitle"),
+      hint: game.i18n.localize("DND5E.AdvancementItemChoiceHint"),
+      multiLevel: true,
+      apps: {
+        config: ItemChoiceConfig,
+        flow: ItemChoiceFlow
+      }
+    });
+  }
+
+  /* -------------------------------------------- */
+  /*  Instance Properties                         */
+  /* -------------------------------------------- */
+
+  /** @inheritdoc */
+  get levels() {
+    return Array.from(Object.keys(this.configuration.choices));
+  }
+
+  /* -------------------------------------------- */
+  /*  Display Methods                             */
+  /* -------------------------------------------- */
+
+  /** @inheritdoc */
+  configuredForLevel(level) {
+    return this.value.added?.[level] !== undefined;
+  }
+
+  /* -------------------------------------------- */
+
+  /** @inheritdoc */
+  titleForLevel(level, { configMode=false }={}) {
+    return `${this.title} <em>(${game.i18n.localize("DND5E.AdvancementChoices")})</em>`;
+  }
+
+  /* -------------------------------------------- */
+
+  /** @inheritdoc */
+  summaryForLevel(level, { configMode=false }={}) {
+    const items = this.value.added?.[level];
+    if ( !items || configMode ) return "";
+    return Object.values(items).reduce((html, uuid) => html + game.dnd5e.utils.linkForUuid(uuid), "");
+  }
+
+  /* -------------------------------------------- */
+  /*  Application Methods                         */
+  /* -------------------------------------------- */
+
+  /** @inheritdoc */
+  storagePath(level) {
+    return `value.added.${level}`;
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * Verify that the provided item can be used with this advancement based on the configuration.
+   * @param {Item5e} item                   Item that needs to be tested.
+   * @param {object} config
+   * @param {string} config.type            Type restriction on this advancement.
+   * @param {object} config.restriction     Additional restrictions to be applied.
+   * @param {boolean} [config.strict=true]  Should an error be thrown when an invalid type is encountered?
+   * @returns {boolean}                     Is this type valid?
+   * @throws An error if the item is invalid and strict is `true`.
+   */
+  _validateItemType(item, { type, restriction, strict=true }={}) {
+    super._validateItemType(item, { strict });
+    type ??= this.configuration.type;
+    restriction ??= this.configuration.restriction;
+
+    // Type restriction is set and the item type does not match the selected type
+    if ( type && (type !== item.type) ) {
+      const typeLabel = game.i18n.localize(CONFIG.Item.typeLabels[restriction]);
+      if ( strict ) throw new Error(game.i18n.format("DND5E.AdvancementItemChoiceTypeWarning", {type: typeLabel}));
+      return false;
+    }
+
+    // If additional type restrictions applied, make sure they are valid
+    if ( (type === "feat") && restriction.type ) {
+      const typeConfig = CONFIG.DND5E.featureTypes[restriction.type];
+      const subtype = typeConfig.subtypes?.[restriction.subtype];
+      let errorLabel;
+      if ( restriction.type !== item.system.type.value ) errorLabel = typeConfig.label;
+      else if ( subtype && (restriction.subtype !== item.system.type.subtype) ) errorLabel = subtype;
+      if ( errorLabel ) {
+        if ( strict ) throw new Error(game.i18n.format("DND5E.AdvancementItemChoiceTypeWarning", {type: errorLabel}));
+        return false;
+      }
+    }
+
+    // If spell level is restricted, ensure the spell is of the appropriate level
+    const l = parseInt(restriction.level);
+    if ( (type === "spell") && !Number.isNaN(l) && (item.system.level !== l) ) {
+      const level = CONFIG.DND5E.spellLevels[l];
+      if ( strict ) throw new Error(game.i18n.format("DND5E.AdvancementItemChoiceSpellLevelSpecificWarning", {level}));
+      return false;
+    }
+
+    return true;
+  }
+}
+
+/**
+ * Configuration application for size advancement.
+ */
+class SizeConfig extends AdvancementConfig {
+
+  /** @inheritdoc */
+  static get defaultOptions() {
+    return foundry.utils.mergeObject(super.defaultOptions, {
+      classes: ["dnd5e", "advancement", "size"],
+      template: "systems/dnd5e/templates/advancement/size-config.hbs"
+    });
+  }
+
+  /* -------------------------------------------- */
+
+  /** @inheritdoc */
+  getData() {
+    return foundry.utils.mergeObject(super.getData(), {
+      default: {
+        hint: this.advancement.automaticHint
+      },
+      showLevelSelector: false,
+      sizes: Object.entries(CONFIG.DND5E.actorSizes).reduce((obj, [key, label]) => {
+        obj[key] = { label, chosen: this.advancement.configuration.sizes.has(key) };
+        return obj;
+      }, {})
+    });
+  }
+
+  /* -------------------------------------------- */
+
+  /** @inheritdoc */
+  async prepareConfigurationUpdate(configuration) {
+    configuration.sizes = filteredKeys(configuration.sizes ?? {});
+    return configuration;
+  }
+}
+
+/**
+ * Inline application that displays size advancement.
+ */
+class SizeFlow extends AdvancementFlow {
+
+  /** @inheritdoc */
+  static get defaultOptions() {
+    return foundry.utils.mergeObject(super.defaultOptions, {
+      template: "systems/dnd5e/templates/advancement/size-flow.hbs"
+    });
+  }
+
+  /* -------------------------------------------- */
+
+  /** @inheritdoc */
+  getData() {
+    const sizes = this.advancement.configuration.sizes;
+    return foundry.utils.mergeObject(super.getData(), {
+      singleSize: sizes.size === 1 ? sizes.first() : null,
+      hint: this.advancement.configuration.hint || this.advancement.automaticHint,
+      selectedSize: this.retainedData?.size ?? this.advancement.value.size,
+      sizes: Array.from(sizes).reduce((obj, key) => {
+        obj[key] = CONFIG.DND5E.actorSizes[key];
+        return obj;
+      }, {})
+    });
+  }
+}
+
+/**
+ * Configuration data for the size advancement type.
+ */
+class SizeConfigurationData extends foundry.abstract.DataModel {
+  /** @inheritdoc */
+  static defineSchema() {
+    return {
+      hint: new foundry.data.fields.StringField({label: "DND5E.AdvancementHint"}),
+      sizes: new foundry.data.fields.SetField(
+        new foundry.data.fields.StringField(), {required: false, initial: ["med"], label: "DND5E.Size"}
+      )
+    };
+  }
+}
+
+/**
+ * Value data for the size advancement type.
+ */
+class SizeValueData extends foundry.abstract.DataModel {
+  /** @inheritdoc */
+  static defineSchema() {
+    return {
+      size: new foundry.data.fields.StringField({required: false, label: "DND5E.Size"})
+    };
+  }
+}
+
+/**
+ * Advancement that handles player size.
+ */
+class SizeAdvancement extends Advancement {
+
+  /** @inheritdoc */
+  static get metadata() {
+    return foundry.utils.mergeObject(super.metadata, {
+      dataModels: {
+        configuration: SizeConfigurationData,
+        value: SizeValueData
+      },
+      order: 25,
+      icon: "systems/dnd5e/icons/svg/size.svg",
+      title: game.i18n.localize("DND5E.AdvancementSizeTitle"),
+      hint: game.i18n.localize("DND5E.AdvancementSizeHint"),
+      validItemTypes: new Set(["race"]),
+      apps: {
+        config: SizeConfig,
+        flow: SizeFlow
+      }
+    });
+  }
+
+  /* -------------------------------------------- */
+  /*  Instance Properties                         */
+  /* -------------------------------------------- */
+
+  /**
+   * Hint that will be displayed to players if none is entered.
+   * @type {string}
+   */
+  get automaticHint() {
+    if ( !this.configuration.sizes.size ) return "";
+    if ( this.configuration.sizes.size === 1 ) return game.i18n.format("DND5E.AdvancementSizeFlowHintSingle", {
+      size: CONFIG.DND5E.actorSizes[this.configuration.sizes.first()]
+    });
+
+    const listFormatter = new Intl.ListFormat(game.i18n.lang, { type: "disjunction" });
+    return game.i18n.format("DND5E.AdvancementSizeflowHintMultiple", {
+      sizes: listFormatter.format(this.configuration.sizes.map(s => CONFIG.DND5E.actorSizes[s]))
+    });
+  }
+
+  /* -------------------------------------------- */
+
+  /** @inheritdoc */
+  get levels() {
+    return [0];
+  }
+
+  /* -------------------------------------------- */
+  /*  Display Methods                             */
+  /* -------------------------------------------- */
+
+  /** @inheritdoc */
+  summaryForLevel(level, { configMode=false }={}) {
+    const sizes = configMode ? Array.from(this.configuration.sizes) : this.value.size ? [this.value.size] : [];
+    return sizes.map(s => `<span class="tag">${CONFIG.DND5E.actorSizes[s]}</span>`).join("");
+  }
+
+  /* -------------------------------------------- */
+  /*  Editing Methods                             */
+  /* -------------------------------------------- */
+
+  /** @inheritdoc */
+  static availableForItem(item) {
+    return !item.advancement.byType.Size?.length;
+  }
+
+  /* -------------------------------------------- */
+  /*  Application Methods                         */
+  /* -------------------------------------------- */
+
+  /** @inheritdoc */
+  async apply(level, data) {
+    this.actor.updateSource({"system.traits.size": data.size ?? "med"});
+    this.updateSource({ value: data });
+  }
+
+  /* -------------------------------------------- */
+
+  /** @inheritdoc */
+  async restore(level, data) {
+    this.apply(level, data);
+  }
+
+  /* -------------------------------------------- */
+
+  /** @inheritdoc */
+  async reverse(level) {
+    this.actor.updateSource({"system.traits.size": "med"});
+    this.updateSource({ "value.-=size": null });
+  }
+}
+
+/**
+ * Configuration application for traits.
+ */
+class TraitConfig extends AdvancementConfig {
+  constructor(...args) {
+    super(...args);
+    this.selected = (this.config.choices.length && !this.config.grants.size) ? 0 : -1;
+    this.trait = this.types.first() ?? "skills";
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * Shortcut to the configuration data on the advancement.
+   * @type {object}
+   */
+  get config() {
+    return this.advancement.configuration;
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * Index of the selected configuration, `-1` means `grants` array, any other number is equal
+   * to an index in `choices` array.
+   * @type {number}
+   */
+  selected;
+
+  /* -------------------------------------------- */
+
+  /**
+   * Trait type to display in the selector interface.
+   * @type {string}
+   */
+  trait;
+
+  /* -------------------------------------------- */
+
+  /**
+   * List of trait types for the current selected configuration.
+   * @type {Set<string>}
+   */
+  get types() {
+    const pool = this.selected === -1 ? this.config.grants : this.config.choices[this.selected].pool;
+    return this.advancement.representedTraits([pool]);
+  }
+
+  /* -------------------------------------------- */
+
+  /** @inheritdoc */
+  static get defaultOptions() {
+    return foundry.utils.mergeObject(super.defaultOptions, {
+      classes: ["dnd5e", "advancement", "traits", "two-column"],
+      template: "systems/dnd5e/templates/advancement/trait-config.hbs",
+      width: 640
+    });
+  }
+
+  /* -------------------------------------------- */
+  /*  Context Preparation                         */
+  /* -------------------------------------------- */
+
+  /** @inheritdoc */
+  async getData() {
+    const context = super.getData();
+
+    context.grants = {
+      label: localizedList({ grants: this.config.grants }) || "—",
+      data: this.config.grants,
+      selected: this.selected === -1
+    };
+    context.choices = this.config.choices.map((choice, index) => ({
+      label: choiceLabel(choice, { only: true }).capitalize() || "—",
+      data: choice,
+      selected: this.selected === index
+    }));
+    const chosen = (this.selected === -1) ? context.grants.data : context.choices[this.selected].data.pool;
+    context.count = context.choices[this.selected]?.data.count;
+    context.selectedIndex = this.selected;
+
+    context.validTraitTypes = Object.entries(CONFIG.DND5E.traits).reduce((obj, [key, config]) => {
+      if ( (this.config.mode === "default") || config.expertise ) obj[key] = config.labels.title;
+      return obj;
+    }, {});
+
+    const rep = this.advancement.representedTraits();
+    const traitConfig = rep.size === 1 ? CONFIG.DND5E.traits[rep.first()] : null;
+    if ( traitConfig ) {
+      context.default.title = traitConfig.labels.title;
+      context.default.icon = traitConfig.icon;
+    } else {
+      context.default.title = game.i18n.localize("DND5E.TraitGenericPlural.other");
+      context.default.icon = this.advancement.constructor.metadata.icon;
+    }
+    context.default.hint = localizedList({ grants: this.config.grants, choices: this.config.choices });
+
+    context.choiceOptions = await choices(this.trait, { chosen, prefixed: true, any: this.selected !== -1 });
+    context.selectedTraitHeader = `${CONFIG.DND5E.traits[this.trait].labels.localization}.other`;
+    context.selectedTrait = this.trait;
+
+    return context;
+  }
+
+  /* -------------------------------------------- */
+  /*  Event Handlers                              */
+  /* -------------------------------------------- */
+
+  /** @inheritdoc */
+  activateListeners(html) {
+    super.activateListeners(html);
+
+    this.form.querySelectorAll("[data-action]").forEach(a => a.addEventListener("click", this._onAction.bind(this)));
+
+    // Handle selecting & disabling category children when a category is selected
+    for ( const checkbox of html[0].querySelectorAll(".trait-selector input:checked") ) {
+      const toCheck = checkbox.name.endsWith("*")
+        ? checkbox.closest("ol").querySelectorAll(`input:not([name="${checkbox.name}"])`)
+        : checkbox.closest("li").querySelector("ol")?.querySelectorAll("input");
+      toCheck?.forEach(i => i.checked = i.disabled = true);
+    }
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * Handle clicks to the Add and Remove buttons above the list.
+   * @param {Event} event  Triggering click.
+   */
+  async _onAction(event) {
+    event.preventDefault();
+    switch ( event.currentTarget.dataset.action ) {
+      case "add-choice":
+        this.config.choices.push({ count: 1 });
+        this.selected = this.config.choices.length - 1;
+        break;
+
+      case "remove-choice":
+        const input = event.currentTarget.closest("li").querySelector("[name='selectedIndex']");
+        const selectedIndex = Number(input.value);
+        this.config.choices.splice(selectedIndex, 1);
+        if ( selectedIndex <= this.selected ) this.selected -= 1;
+        break;
+
+      default:
+        return;
+    }
+
+    await this.advancement.update({ configuration: await this.prepareConfigurationUpdate() });
+  }
+
+  /* -------------------------------------------- */
+
+  /** @inheritdoc */
+  async _onChangeInput(event) {
+    // Display new set of trait choices
+    if ( event.target.name === "selectedTrait" ) {
+      this.trait = event.target.value;
+      return this.render();
+    }
+
+    // Change selected configuration set
+    else if ( event.target.name === "selectedIndex" ) {
+      this.selected = Number(event.target.value ?? -1);
+      const types = this.types;
+      if ( types.size && !types.has(this.trait) ) this.trait = types.first();
+      return this.render();
+    }
+
+    // If mode is changed from default to one of the others, change selected type if current type is not valid
+    if ( (event.target.name === "configuration.mode")
+      && (event.target.value !== "default")
+      && (this.config.mode === "default") ) {
+      const validTraitTypes = filteredKeys(CONFIG.DND5E.traits, c => c.expertise);
+      if ( !validTraitTypes.includes(this.trait) ) this.trait = validTraitTypes[0];
+    }
+
+    super._onChangeInput(event);
+  }
+
+  /* -------------------------------------------- */
+
+  /** @inheritdoc */
+  async prepareConfigurationUpdate(configuration={}) {
+    const choicesCollection = foundry.utils.deepClone(this.config.choices);
+
+    if ( configuration.checked ) {
+      const prefix = `${this.trait}:`;
+      const filteredSelected = filteredKeys(configuration.checked);
+
+      // Update grants
+      if ( this.selected === -1 ) {
+        const filteredPrevious = this.config.grants.filter(k => !k.startsWith(prefix));
+        configuration.grants = [...filteredPrevious, ...filteredSelected];
+      }
+
+      // Update current choice pool
+      else {
+        const current = choicesCollection[this.selected];
+        const filteredPrevious = current.pool.filter(k => !k.startsWith(prefix));
+        current.pool = [...filteredPrevious, ...filteredSelected];
+      }
+      delete configuration.checked;
+    }
+
+    if ( configuration.count ) {
+      choicesCollection[this.selected].count = configuration.count;
+      delete configuration.count;
+    }
+
+    // TODO: Remove when https://github.com/foundryvtt/foundryvtt/issues/7706 is resolved
+    choicesCollection.forEach(c => {
+      if ( !c.pool ) return;
+      c.pool = Array.from(c.pool);
+    });
+    configuration.choices = choicesCollection;
+    configuration.grants ??= Array.from(this.config.grants);
+
+    // If one of the expertise modes is selected, filter out any traits that are not of a valid type
+    if ( (configuration.mode ?? this.config.mode) !== "default" ) {
+      const validTraitTypes = filteredKeys(CONFIG.DND5E.traits, c => c.expertise);
+      configuration.grants = configuration.grants.filter(k => validTraitTypes.some(t => k.startsWith(t)));
+      configuration.choices.forEach(c => c.pool = c.pool?.filter(k => validTraitTypes.some(t => k.startsWith(t))));
+    }
+
+    return configuration;
+  }
+}
+
+/**
+ * Inline application that presents the player with a trait choices.
+ */
+class TraitFlow extends AdvancementFlow {
+
+  /**
+   * Array of trait keys currently chosen.
+   * @type {Set<string>}
+   */
+  chosen;
+
+  /* -------------------------------------------- */
+
+  /** @inheritdoc */
+  static get defaultOptions() {
+    return foundry.utils.mergeObject(super.defaultOptions, {
+      template: "systems/dnd5e/templates/advancement/trait-flow.hbs"
+    });
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * Trait configuration from `CONFIG.TRAITS` for this advancement's trait type.
+   * @type {TraitConfiguration}
+   */
+  get traitConfig() {
+    return CONFIG.DND5E.traits[this.advancement.configuration.type];
+  }
+
+  /* -------------------------------------------- */
+
+  /** @inheritdoc */
+  async getData() {
+    this.chosen ??= await this.prepareInitialValue();
+    const available = await this.advancement.availableChoices(this.chosen);
+    return foundry.utils.mergeObject(super.getData(), {
+      hint: this.advancement.configuration.hint ? this.advancement.configuration.hint : localizedList({
+        grants: this.advancement.configuration.grants, choices: this.advancement.configuration.choices
+      }),
+      slots: this.prepareTraitSlots(available),
+      available
+    });
+  }
+
+  /* -------------------------------------------- */
+
+  /** @inheritdoc */
+  activateListeners(html) {
+    this.form.querySelectorAll("select").forEach(s => s.addEventListener("change", this._onSelectTrait.bind(this)));
+    this.form.querySelectorAll(".remove").forEach(s => s.addEventListener("click", this._onRemoveTrait.bind(this)));
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * Add a trait to the value when one is selected.
+   * @param {Event} event  Triggering change to a select input.
+   */
+  _onSelectTrait(event) {
+    const addedTrait = event.target.value;
+    if ( addedTrait === "" ) return;
+    this.chosen.add(addedTrait);
+    this.render();
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * Remove a trait for the value when the remove button is clicked.
+   * @param {Event} event  Triggering click.
+   */
+  _onRemoveTrait(event) {
+    const tag = event.target.closest(".trait-slot");
+    this.chosen.delete(tag.dataset.key);
+    this.render();
+  }
+
+  /* -------------------------------------------- */
+
+  /** @inheritdoc */
+  async _updateObject(event, formData) {
+    if ( formData.chosen && !Array.isArray(formData.chosen) ) formData.chosen = [formData.chosen];
+    super._updateObject(event, formData);
+  }
+
+  /* -------------------------------------------- */
+  /*  Data Preparation Methods                    */
+  /* -------------------------------------------- */
+
+  /**
+   * When only a single choice is available, automatically select that choice provided value is empty.
+   * @returns {Set<string>}
+   */
+  async prepareInitialValue() {
+    const existingChosen = this.retainedData?.chosen ?? this.advancement.value.chosen;
+    if ( existingChosen?.size ) return new Set(existingChosen);
+    const { available } = await this.advancement.unfulfilledChoices();
+    const chosen = new Set();
+    for ( const { choices } of available ) {
+      const set = choices.asSet();
+      if ( set.size === 1 ) chosen.add(set.first());
+    }
+    return chosen;
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * Prepare the list of slots to be populated by traits.
+   * @param {object} available  Trait availability returned by `prepareAvailableTraits`.
+   * @returns {object[]}
+   */
+  prepareTraitSlots(available) {
+    const config = this.advancement.configuration;
+    const count = config.choices.reduce((count, c) => count + c.count, config.grants.size);
+    const chosen = Array.from(this.chosen);
+    let selectorShown = false;
+    const slots = [];
+    for ( let i = 1; i <= count; i++ ) {
+      const key = chosen.shift();
+      if ( selectorShown || (!key && !available) ) continue;
+      selectorShown = !key;
+      slots.push({
+        key,
+        label: key ? keyLabel(key, { type: config.type }) : null,
+        showDelete: !this.advancement.configuration.grants.has(key),
+        showSelector: !key
+      });
+    }
+    return slots;
+  }
+}
+
+/**
+ * Configuration for a specific trait choice.
+ *
+ * @typedef {object} TraitChoice
+ * @property {number} count     Number of traits that can be selected.
+ * @property {string[]} [pool]  List of trait or category keys that can be chosen. If no choices are provided,
+ *                              any trait of the specified type can be selected.
+ */
+
+/**
+ * Configuration data for the TraitAdvancement.
+ *
+ * @property {string} hint                Hint displayed instead of the automatically generated one.
+ * @property {string} mode                Method by which this advancement modifies the actor's traits.
+ * @property {boolean} allowReplacements  Whether all potential choices should be presented to the user if there
+ *                                        are no more choices available in a more limited set.
+ * @property {string[]} grants            Keys for traits granted automatically.
+ * @property {TraitChoice[]} choices      Choices presented to the user.
+ */
+class TraitConfigurationData extends foundry.abstract.DataModel {
+  static defineSchema() {
+    return {
+      hint: new foundry.data.fields.StringField({label: "DND5E.AdvancementHint"}),
+      mode: new foundry.data.fields.StringField({initial: "default", label: "DND5E.AdvancementTraitMode"}),
+      allowReplacements: new foundry.data.fields.BooleanField({
+        required: true, label: "DND5E.AdvancementTraitAllowReplacements",
+        hint: "DND5E.AdvancementTraitAllowReplacementsHint"
+      }),
+      grants: new foundry.data.fields.SetField(new foundry.data.fields.StringField(), {
+        required: true, label: "DND5E.AdvancementTraitGrants"
+      }),
+      choices: new foundry.data.fields.ArrayField(new foundry.data.fields.SchemaField({
+        count: new foundry.data.fields.NumberField({
+          required: true, positive: true, integer: true, initial: 1, label: "DND5E.AdvancementTraitCount"
+        }),
+        pool: new foundry.data.fields.SetField(new foundry.data.fields.StringField(), {
+          required: false, initial: undefined, label: "DOCUMENT.Items"
+        })
+      }), {label: "DND5E.AdvancementTraitChoices"})
+    };
+  }
+}
+
+/**
+ * Value data for the TraitAdvancement.
+ *
+ * @property {Set<string>} chosen  Trait keys that have been chosen.
+ */
+class TraitValueData extends foundry.abstract.DataModel {
+  static defineSchema() {
+    return {
+      chosen: new foundry.data.fields.SetField(new foundry.data.fields.StringField(), {
+        required: false, initial: undefined
+      })
+    };
+  }
+}
+
+/**
+ * Advancement that grants the player with certain traits or presents them with a list of traits from which
+ * to choose.
+ */
+class TraitAdvancement extends Advancement {
+
+  /** @inheritdoc */
+  static get metadata() {
+    return foundry.utils.mergeObject(super.metadata, {
+      dataModels: {
+        configuration: TraitConfigurationData,
+        value: TraitValueData
+      },
+      order: 30,
+      icon: "systems/dnd5e/icons/svg/trait.svg",
+      title: game.i18n.localize("DND5E.AdvancementTraitTitle"),
+      hint: game.i18n.localize("DND5E.AdvancementTraitHint"),
+      apps: {
+        config: TraitConfig,
+        flow: TraitFlow
+      }
+    });
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * The maximum number of traits granted by this advancement. The number of traits actually granted may be lower if
+   * actor already has some traits.
+   * @type {number}
+   */
+  get maxTraits() {
+    const { grants, choices } = this.configuration;
+    return grants.size + choices.reduce((acc, choice) => acc + choice.count, 0);
+  }
+
+  /* -------------------------------------------- */
+  /*  Preparation Methods                         */
+  /* -------------------------------------------- */
+
+  /**
+   * Prepare data for the Advancement.
+   */
+  prepareData() {
+    const rep = this.representedTraits();
+    const traitConfig = rep.size === 1 ? CONFIG.DND5E.traits[rep.first()] : null;
+    this.title = this.title || traitConfig?.labels.title || this.constructor.metadata.title;
+    this.icon = this.icon || traitConfig?.icon || this.constructor.metadata.icon;
+  }
+
+  /* -------------------------------------------- */
+  /*  Display Methods                             */
+  /* -------------------------------------------- */
+
+  /** @inheritdoc */
+  configuredForLevel(level) {
+    return !!this.value.chosen?.size;
+  }
+
+  /* -------------------------------------------- */
+
+  /** @inheritdoc */
+  sortingValueForLevel(levels) {
+    const traitOrder = Object.keys(CONFIG.DND5E.traits).findIndex(k => k === this.representedTraits().first());
+    const modeOrder = Object.keys(CONFIG.DND5E.traitModes).findIndex(k => k === this.configuration.mode);
+    const order = traitOrder + (modeOrder * 100);
+    return `${this.constructor.metadata.order.paddedString(4)} ${order.paddedString(4)} ${this.titleForLevel(levels)}`;
+  }
+
+  /* -------------------------------------------- */
+
+  /** @inheritdoc */
+  summaryForLevel(level, { configMode=false }={}) {
+    if ( configMode ) {
+      if ( this.configuration.hint ) return `<p>${this.configuration.hint}</p>`;
+      return `<p>${localizedList({
+        grants: this.configuration.grants, choices: this.configuration.choices
+      })}</p>`;
+    } else {
+      return Array.from(this.value.chosen).map(k => `<span class="tag">${keyLabel(k)}</span>`).join(" ");
+    }
+  }
+
+  /* -------------------------------------------- */
+  /*  Application Methods                         */
+  /* -------------------------------------------- */
+
+  /** @inheritdoc */
+  async apply(level, data) {
+    const updates = {};
+    if ( !data.chosen ) return;
+
+    for ( const key of data.chosen ) {
+      const keyPath = changeKeyPath(key);
+      let existingValue = updates[keyPath] ?? foundry.utils.getProperty(this.actor, keyPath);
+
+      if ( ["Array", "Set"].includes(foundry.utils.getType(existingValue)) ) {
+        existingValue = new Set(existingValue);
+        existingValue.add(key.split(":").pop());
+        updates[keyPath] = Array.from(existingValue);
+      } else if ( (this.configuration.mode !== "expertise") || (existingValue !== 0) ) {
+        updates[keyPath] = (this.configuration.mode === "default")
+          || ((this.configuration.mode === "upgrade") && (existingValue === 0)) ? 1 : 2;
+      }
+    }
+
+    this.actor.updateSource(updates);
+    this.updateSource({ "value.chosen": Array.from(data.chosen) });
+  }
+
+  /* -------------------------------------------- */
+
+  /** @inheritdoc */
+  async restore(level, data) {
+    this.apply(level, data);
+  }
+
+  /* -------------------------------------------- */
+
+  /** @inheritdoc */
+  async reverse(level) {
+    const updates = {};
+    if ( !this.value.chosen ) return;
+
+    for ( const key of this.value.chosen ) {
+      const keyPath = changeKeyPath(key);
+      let existingValue = updates[keyPath] ?? foundry.utils.getProperty(this.actor, keyPath);
+
+      if ( ["Array", "Set"].includes(foundry.utils.getType(existingValue)) ) {
+        existingValue = new Set(existingValue);
+        existingValue.delete(key.split(":").pop());
+        updates[keyPath] = Array.from(existingValue);
+      }
+
+      else if ( this.configuration.mode === "expertise" ) updates[keyPath] = 1;
+      else if ( this.configuration.mode === "upgrade" ) updates[keyPath] = existingValue === 1 ? 0 : 1;
+      else updates[keyPath] = 0;
+      // NOTE: When using forced expertise mode, this will not return to original value
+      // if the value before being applied is 1.
+    }
+
+    const retainedData = foundry.utils.deepClone(this.value);
+    this.actor.updateSource(updates);
+    this.updateSource({ "value.chosen": [] });
+    return retainedData;
+  }
+
+  /* -------------------------------------------- */
+  /*  Helper Methods                              */
+  /* -------------------------------------------- */
+
+  /**
+   * Two sets of keys based on actor data, one that is considered "selected" and thus unavailable to be chosen
+   * and another that is "available". This is based off configured advancement mode.
+   * @returns {{selected: Set<string>, available: Set<string>}}
+   */
+  async actorSelected() {
+    const selected = new Set();
+    const available = new Set();
+
+    // If "default" mode is selected, return all traits
+    // If any other mode is selected, only return traits that support expertise
+    const traitTypes = this.configuration.mode === "default" ? Object.keys(CONFIG.DND5E.traits)
+      : filteredKeys(CONFIG.DND5E.traits, t => t.expertise);
+
+    for ( const trait$1 of traitTypes ) {
+      const actorValues$1 = actorValues(this.actor, trait$1);
+      const choices$1 = await choices(trait$1, { prefixed: true });
+      for ( const key of choices$1.asSet() ) {
+        const value = actorValues$1[key];
+        if ( this.configuration.mode === "default" ) {
+          if ( value >= 1 ) selected.add(key);
+          else available.add(key);
+        } else {
+          if ( value === 2 ) selected.add(key);
+          if ( (this.configuration.mode === "expertise") && (value === 1) ) available.add(key);
+          else if ( (this.configuration.mode !== "expertise") && (value < 2) ) available.add(key);
+        }
+      }
+    }
+
+    return { selected, available };
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * Guess the trait type from the grants & choices on this advancement.
+   * @param {Set<string>[]} [pools]  Trait pools to use when figuring out the type.
+   * @returns {Set<string>}
+   */
+  representedTraits(pools) {
+    const set = new Set();
+    pools ??= [this.configuration.grants, ...this.configuration.choices.map(c => c.pool)];
+    for ( const pool of pools ) {
+      for ( const key of pool ) {
+        const [type] = key.split(":");
+        set.add(type);
+      }
+    }
+    return set;
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * Prepare the list of available traits from which the player can choose.
+   * @param {Set<string>} [chosen]  Traits already chosen on the advancement. If not set then it will
+   *                                be retrieved from advancement's value.
+   * @returns {{choices: SelectChoices, label: string}|null}
+   */
+  async availableChoices(chosen) {
+    // TODO: Still shows "Choose 1 x" even if not possible due to mode restriction
+    let { available, choices } = await this.unfulfilledChoices(chosen);
+
+    // If all traits of this type are already assigned, then nothing new can be selected
+    if ( foundry.utils.isEmpty(choices) ) return null;
+
+    // Remove any grants that have no choices remaining
+    let unfilteredLength = available.length;
+    available = available.filter(a => a.choices.asSet().size > 0);
+
+    // If replacements are allowed and there are grants with zero choices from their limited set,
+    // display all remaining choices as an option
+    if ( this.configuration.allowReplacements && (unfilteredLength > available.length) ) {
+      const rep = this.representedTraits();
+      return {
+        choices: choices.filter(this.representedTraits().map(t => `${t}:*`), { inplace: false }),
+        label: game.i18n.format("DND5E.AdvancementTraitChoicesRemaining", {
+          count: unfilteredLength,
+          type: traitLabel(rep.size === 1 ? rep.first() : null, unfilteredLength)
+        })
+      };
+      // TODO: This works well for types without categories like skills where it is primarily intended,
+      // but perhaps there could be some improvements elsewhere. For example, if I have an advancement
+      // that grants proficiency in the Bagpipes and allows replacements, but the character already has
+      // Bagpipe proficiency. In this example this just lets them choose from any other tool proficiency
+      // as their replacement, but it might make sense to only show other musical instruments unless
+      // they already have proficiency in all musical instruments. Might not be worth the effort.
+    }
+
+    if ( !available.length ) return null;
+
+    // Create a choices object featuring a union of choices from all remaining grants
+    const remainingSet = new Set(available.flatMap(a => Array.from(a.choices.asSet())));
+    choices.filter(remainingSet);
+
+    const rep = this.representedTraits(available.map(a => a.choices.asSet()));
+    return {
+      choices,
+      label: game.i18n.format("DND5E.AdvancementTraitChoicesRemaining", {
+        count: available.length,
+        type: traitLabel(rep.size === 1 ? rep.first() : null, available.length)
+      })
+    };
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * The advancement configuration is flattened into separate options for the user that are chosen step-by-step. Some
+   * are automatically picked for them if they are 'grants' or if there is only one option after the character's
+   * existing traits have been taken into account.
+   * @typedef {object} TraitChoices
+   * @property {"grant"|"choice"} type  Whether this trait is automatically granted or is chosen from some options.
+   * @property {number} [choiceIdx]     An index that groups each separate choice into the groups that they originally
+   *                                    came from.
+   * @property {SelectChoices} choices  The available traits to pick from. Grants have only 0 or 1, depending on whether
+   *                                    the character already has the granted trait.
+   */
+
+  /**
+   * Determine which of the provided grants, if any, still needs to be fulfilled.
+   * @param {Set<string>} [chosen]  Traits already chosen on the advancement. If not set then it will
+   *                                be retrieved from advancement's value.
+   * @returns {{ available: TraitChoices[], choices: SelectChoices }}
+   */
+  async unfulfilledChoices(chosen) {
+    const actorData = await this.actorSelected();
+    const selected = {
+      actor: actorData.selected,
+      item: chosen ?? this.value.selected ?? new Set()
+    };
+
+    // If everything has already been selected, no need to go further
+    if ( this.maxTraits <= selected.item.size ) {
+      return { available: [], choices: new SelectChoices() };
+    }
+
+    const available = await Promise.all([
+      ...this.configuration.grants.map(async g => ({
+        type: "grant",
+        choices: await mixedChoices(new Set([g]))
+      })),
+      ...this.configuration.choices.reduce((arr, choice, index) => {
+        return arr.concat(Array.fromRange(choice.count).map(async () => ({
+          type: "choice",
+          choiceIdx: index,
+          choices: await mixedChoices(choice.pool)
+        })));
+      }, [])
+    ]);
+
+    available.sort((lhs, rhs) => lhs.choices.asSet().size - rhs.choices.asSet().size);
+
+    // Remove any fulfilled grants
+    for ( const key of selected.item ) available.findSplice(grant => grant.choices.asSet().has(key));
+
+    // Merge all possible choices into a single SelectChoices
+    const allChoices = await mixedChoices(actorData.available);
+    allChoices.exclude(new Set([...(selected.actor ?? []), ...selected.item]));
+    available.forEach(a => a.choices = allChoices.filter(a.choices, { inplace: false }));
+
+    return { available, choices: allChoices };
+  }
+}
+
+var _module$b = /*#__PURE__*/Object.freeze({
   __proto__: null,
-  Advancement: Advancement$1,
+  AbilityScoreImprovementAdvancement: AbilityScoreImprovementAdvancement,
+  Advancement: Advancement,
   HitPointsAdvancement: HitPointsAdvancement,
+  ItemChoiceAdvancement: ItemChoiceAdvancement,
   ItemGrantAdvancement: ItemGrantAdvancement,
-  ScaleValueAdvancement: ScaleValueAdvancement
+  ScaleValueAdvancement: ScaleValueAdvancement,
+  SizeAdvancement: SizeAdvancement,
+  TraitAdvancement: TraitAdvancement
 });
 
 // Namespace Configuration Values
@@ -2566,36 +9047,80 @@ ______      ______ _____ _____
 _______________________________`;
 
 /**
- * The set of Ability Scores used within the system.
- * @enum {string}
+ * Configuration data for abilities.
+ *
+ * @typedef {object} AbilityConfiguration
+ * @property {string} label                               Localized label.
+ * @property {string} abbreviation                        Localized abbreviation.
+ * @property {string} fullKey                             Fully written key used as alternate for enrichers.
+ * @property {string} [type]                              Whether this is a "physical" or "mental" ability.
+ * @property {Object<string, number|string>}  [defaults]  Default values for this ability based on actor type.
+ *                                                        If a string is used, the system will attempt to fetch.
+ *                                                        the value of the specified ability.
  */
-DND5E.abilities = {
-  str: "DND5E.AbilityStr",
-  dex: "DND5E.AbilityDex",
-  con: "DND5E.AbilityCon",
-  int: "DND5E.AbilityInt",
-  wis: "DND5E.AbilityWis",
-  cha: "DND5E.AbilityCha",
-  hon: "DND5E.AbilityHon",
-  san: "DND5E.AbilitySan"
-};
-preLocalize("abilities");
 
 /**
- * Localized abbreviations for Ability Scores.
- * @enum {string}
+ * The set of Ability Scores used within the system.
+ * @enum {AbilityConfiguration}
  */
-DND5E.abilityAbbreviations = {
-  str: "DND5E.AbilityStrAbbr",
-  dex: "DND5E.AbilityDexAbbr",
-  con: "DND5E.AbilityConAbbr",
-  int: "DND5E.AbilityIntAbbr",
-  wis: "DND5E.AbilityWisAbbr",
-  cha: "DND5E.AbilityChaAbbr",
-  hon: "DND5E.AbilityHonAbbr",
-  san: "DND5E.AbilitySanAbbr"
+DND5E.abilities = {
+  str: {
+    label: "DND5E.AbilityStr",
+    abbreviation: "DND5E.AbilityStrAbbr",
+    type: "physical",
+    fullKey: "strength"
+  },
+  dex: {
+    label: "DND5E.AbilityDex",
+    abbreviation: "DND5E.AbilityDexAbbr",
+    type: "physical",
+    fullKey: "dexterity"
+  },
+  con: {
+    label: "DND5E.AbilityCon",
+    abbreviation: "DND5E.AbilityConAbbr",
+    type: "physical",
+    fullKey: "constitution"
+  },
+  int: {
+    label: "DND5E.AbilityInt",
+    abbreviation: "DND5E.AbilityIntAbbr",
+    type: "mental",
+    fullKey: "intelligence",
+    defaults: { vehicle: 0 }
+  },
+  wis: {
+    label: "DND5E.AbilityWis",
+    abbreviation: "DND5E.AbilityWisAbbr",
+    type: "mental",
+    fullKey: "wisdom",
+    defaults: { vehicle: 0 }
+  },
+  cha: {
+    label: "DND5E.AbilityCha",
+    abbreviation: "DND5E.AbilityChaAbbr",
+    type: "mental",
+    fullKey: "charisma",
+    defaults: { vehicle: 0 }
+  },
+  hon: {
+    label: "DND5E.AbilityHon",
+    abbreviation: "DND5E.AbilityHonAbbr",
+    type: "mental",
+    fullKey: "honor",
+    defaults: { npc: "cha", vehicle: 0 },
+    improvement: false
+  },
+  san: {
+    label: "DND5E.AbilitySan",
+    abbreviation: "DND5E.AbilitySanAbbr",
+    type: "mental",
+    fullKey: "sanity",
+    defaults: { npc: "wis", vehicle: 0 },
+    improvement: false
+  }
 };
-preLocalize("abilityAbbreviations");
+preLocalize("abilities", { keys: ["label", "abbreviation"] });
 
 /**
  * Configure which ability score is used as the default modifier for initiative rolls.
@@ -2617,6 +9142,7 @@ DND5E.hitPointsAbility = "con";
  * @typedef {object} SkillConfiguration
  * @property {string} label    Localized label.
  * @property {string} ability  Key for the default ability used by this skill.
+ * @property {string} fullKey  Fully written key used as alternate for enrichers.
  */
 
 /**
@@ -2624,27 +9150,26 @@ DND5E.hitPointsAbility = "con";
  * @enum {SkillConfiguration}
  */
 DND5E.skills = {
-  acr: { label: "DND5E.SkillAcr", ability: "dex" },
-  ani: { label: "DND5E.SkillAni", ability: "wis" },
-  arc: { label: "DND5E.SkillArc", ability: "int" },
-  ath: { label: "DND5E.SkillAth", ability: "str" },
-  dec: { label: "DND5E.SkillDec", ability: "cha" },
-  his: { label: "DND5E.SkillHis", ability: "int" },
-  ins: { label: "DND5E.SkillIns", ability: "wis" },
-  itm: { label: "DND5E.SkillItm", ability: "cha" },
-  inv: { label: "DND5E.SkillInv", ability: "int" },
-  med: { label: "DND5E.SkillMed", ability: "wis" },
-  nat: { label: "DND5E.SkillNat", ability: "int" },
-  prc: { label: "DND5E.SkillPrc", ability: "wis" },
-  prf: { label: "DND5E.SkillPrf", ability: "cha" },
-  per: { label: "DND5E.SkillPer", ability: "cha" },
-  rel: { label: "DND5E.SkillRel", ability: "int" },
-  slt: { label: "DND5E.SkillSlt", ability: "dex" },
-  ste: { label: "DND5E.SkillSte", ability: "dex" },
-  sur: { label: "DND5E.SkillSur", ability: "wis" }
+  acr: { label: "DND5E.SkillAcr", ability: "dex", fullKey: "acrobatics" },
+  ani: { label: "DND5E.SkillAni", ability: "wis", fullKey: "animalHandling" },
+  arc: { label: "DND5E.SkillArc", ability: "int", fullKey: "arcana" },
+  ath: { label: "DND5E.SkillAth", ability: "str", fullKey: "athletics" },
+  dec: { label: "DND5E.SkillDec", ability: "cha", fullKey: "deception" },
+  his: { label: "DND5E.SkillHis", ability: "int", fullKey: "history" },
+  ins: { label: "DND5E.SkillIns", ability: "wis", fullKey: "insight" },
+  itm: { label: "DND5E.SkillItm", ability: "cha", fullKey: "intimidation" },
+  inv: { label: "DND5E.SkillInv", ability: "int", fullKey: "investigation" },
+  med: { label: "DND5E.SkillMed", ability: "wis", fullKey: "medicine" },
+  nat: { label: "DND5E.SkillNat", ability: "int", fullKey: "nature" },
+  prc: { label: "DND5E.SkillPrc", ability: "wis", fullKey: "perception" },
+  prf: { label: "DND5E.SkillPrf", ability: "cha", fullKey: "performance" },
+  per: { label: "DND5E.SkillPer", ability: "cha", fullKey: "persuasion" },
+  rel: { label: "DND5E.SkillRel", ability: "int", fullKey: "religion" },
+  slt: { label: "DND5E.SkillSlt", ability: "dex", fullKey: "sleightOfHand" },
+  ste: { label: "DND5E.SkillSte", ability: "dex", fullKey: "stealth" },
+  sur: { label: "DND5E.SkillSur", ability: "wis", fullKey: "survival" }
 };
 preLocalize("skills", { key: "label", sort: true });
-patchConfig("skills", "label", { since: 2.0, until: 2.2 });
 
 /* -------------------------------------------- */
 
@@ -2706,7 +9231,6 @@ preLocalize("weaponProficiencies");
  * @enum {(boolean|string)}
  */
 DND5E.weaponProficienciesMap = {
-  natural: true,
   simpleM: "sim",
   simpleR: "sim",
   martialM: "mar",
@@ -2756,6 +9280,19 @@ DND5E.weaponIds = {
   warpick: "2YdfjN1PIIrSHZii",
   warhammer: "F0Df164Xv1gWcYt0",
   whip: "QKTyxoO0YDnAsbYe"
+};
+
+/* -------------------------------------------- */
+
+/**
+ * The basic ammunition types.
+ * @enum {string}
+ */
+DND5E.ammoIds = {
+  arrow: "3c7JXOzsv55gqJS5",
+  blowgunNeedle: "gBQ8xqTA5f8wP5iu",
+  crossbowBolt: "SItCnYBqhzqBoaWG",
+  slingBullet: "z9SbsMIBZzuhZOqT"
 };
 
 /* -------------------------------------------- */
@@ -2830,38 +9367,83 @@ DND5E.toolIds = {
 /* -------------------------------------------- */
 
 /**
- * The various lengths of time over which effects can occur.
+ * Time periods that accept a numeric value.
  * @enum {string}
  */
-DND5E.timePeriods = {
-  inst: "DND5E.TimeInst",
+DND5E.scalarTimePeriods = {
   turn: "DND5E.TimeTurn",
   round: "DND5E.TimeRound",
   minute: "DND5E.TimeMinute",
   hour: "DND5E.TimeHour",
   day: "DND5E.TimeDay",
   month: "DND5E.TimeMonth",
-  year: "DND5E.TimeYear",
-  perm: "DND5E.TimePerm",
+  year: "DND5E.TimeYear"
+};
+preLocalize("scalarTimePeriods");
+
+/* -------------------------------------------- */
+
+/**
+ * Time periods for spells that don't have a defined ending.
+ * @enum {string}
+ */
+DND5E.permanentTimePeriods = {
+  disp: "DND5E.TimeDisp",
+  dstr: "DND5E.TimeDispTrig",
+  perm: "DND5E.TimePerm"
+};
+preLocalize("permanentTimePeriods");
+
+/* -------------------------------------------- */
+
+/**
+ * Time periods that don't accept a numeric value.
+ * @enum {string}
+ */
+DND5E.specialTimePeriods = {
+  inst: "DND5E.TimeInst",
   spec: "DND5E.Special"
+};
+preLocalize("specialTimePeriods");
+
+/* -------------------------------------------- */
+
+/**
+ * The various lengths of time over which effects can occur.
+ * @enum {string}
+ */
+DND5E.timePeriods = {
+  ...DND5E.specialTimePeriods,
+  ...DND5E.permanentTimePeriods,
+  ...DND5E.scalarTimePeriods
 };
 preLocalize("timePeriods");
 
 /* -------------------------------------------- */
 
 /**
+ * Ways in which to activate an item that cannot be labeled with a cost.
+ * @enum {string}
+ */
+DND5E.staticAbilityActivationTypes = {
+  none: "DND5E.NoneActionLabel",
+  special: DND5E.timePeriods.spec
+};
+
+/**
  * Various ways in which an item or ability can be activated.
  * @enum {string}
  */
 DND5E.abilityActivationTypes = {
+  ...DND5E.staticAbilityActivationTypes,
   action: "DND5E.Action",
   bonus: "DND5E.BonusAction",
   reaction: "DND5E.Reaction",
   minute: DND5E.timePeriods.minute,
   hour: DND5E.timePeriods.hour,
   day: DND5E.timePeriods.day,
-  special: DND5E.timePeriods.spec,
   legendary: "DND5E.LegendaryActionLabel",
+  mythic: "DND5E.MythicActionLabel",
   lair: "DND5E.LairActionLabel",
   crew: "DND5E.VehicleCrewAction"
 };
@@ -2997,6 +9579,18 @@ preLocalize("itemRarity");
 /* -------------------------------------------- */
 
 /**
+ * The limited use periods that support a recovery formula.
+ * @enum {string}
+ */
+DND5E.limitedUseFormulaPeriods = {
+  charges: "DND5E.Charges",
+  dawn: "DND5E.Dawn",
+  dusk: "DND5E.Dusk"
+};
+
+/* -------------------------------------------- */
+
+/**
  * Enumerate the lengths of time over which an item can have limited use ability.
  * @enum {string}
  */
@@ -3004,7 +9598,7 @@ DND5E.limitedUsePeriods = {
   sr: "DND5E.ShortRest",
   lr: "DND5E.LongRest",
   day: "DND5E.Day",
-  charges: "DND5E.Charges"
+  ...DND5E.limitedUseFormulaPeriods
 };
 preLocalize("limitedUsePeriods");
 
@@ -3178,6 +9772,77 @@ preLocalize("consumableTypes", { sort: true });
 /* -------------------------------------------- */
 
 /**
+ * Types of containers.
+ * @enum {string}
+ */
+DND5E.containerTypes = {
+  backpack: "H8YCd689ezlD26aT",
+  barrel: "7Yqbqg5EtVW16wfT",
+  basket: "Wv7HzD6dv1P0q78N",
+  boltcase: "eJtPBiZtr2pp6ynt",
+  bottle: "HZp69hhyNZUUCipF",
+  bucket: "mQVYcHmMSoCUnBnM",
+  case: "5mIeX824uMklU3xq",
+  chest: "2YbuclKfhDL0bU4u",
+  flask: "lHS63sC6bypENNlR",
+  jug: "0ZBWwjFz3nIAXMLW",
+  pot: "M8xM8BLK4tpUayEE",
+  pitcher: "nXWdGtzi8DXDLLsL",
+  pouch: "9bWTRRDym06PzSAf",
+  quiver: "4MtQKPn9qMWCFjDA",
+  sack: "CNdDj8dsXVpRVpXt",
+  saddlebags: "TmfaFUSZJAotndn9",
+  tankard: "uw6fINSmZ2j2o57A",
+  vial: "meJEfX3gZgtMX4x2"
+};
+
+/* -------------------------------------------- */
+
+/**
+ * Configuration data for spellcasting foci.
+ *
+ * @typedef {object} SpellcastingFocusConfiguration
+ * @property {string} label                    Localized label for this category.
+ * @property {Object<string, string>} itemIds  Item IDs or UUIDs.
+ */
+
+/**
+ * Type of spellcasting foci.
+ * @enum {SpellcastingFocusConfiguration}
+ */
+DND5E.focusTypes = {
+  arcane: {
+    label: "DND5E.Focus.Arcane",
+    itemIds: {
+      crystal: "uXOT4fYbgPY8DGdd",
+      orb: "tH5Rn0JVRG1zdmPa",
+      rod: "OojyyGfh91iViuMF",
+      staff: "BeKIrNIvNHRPQ4t5",
+      wand: "KA2P6I48iOWlnboO"
+    }
+  },
+  druidic: {
+    label: "DND5E.Focus.Druidic",
+    itemIds: {
+      mistletoe: "xDK9GQd2iqOGH8Sd",
+      totem: "PGL6aaM0wE5h0VN5",
+      woodenstaff: "FF1ktpb2YSiyv896",
+      yewwand: "t5yP0d7YaKwuKKiH"
+    }
+  },
+  holy: {
+    label: "DND5E.Focus.Holy",
+    itemIds: {
+      amulet: "paqlMjggWkBIAeCe",
+      emblem: "laVqttkGMW4B9654",
+      reliquary: "gP1URGq3kVIIFHJ7"
+    }
+  }
+};
+
+/* -------------------------------------------- */
+
+/**
  * Configuration data for an item with the "feature" type.
  *
  * @typedef {object} FeatureTypeConfiguration
@@ -3196,6 +9861,7 @@ DND5E.featureTypes = {
   class: {
     label: "DND5E.Feature.Class",
     subtypes: {
+      arcaneShot: "DND5E.ClassFeature.ArcaneShot",
       artificerInfusion: "DND5E.ClassFeature.ArtificerInfusion",
       channelDivinity: "DND5E.ClassFeature.ChannelDivinity",
       defensiveTactic: "DND5E.ClassFeature.DefensiveTactic",
@@ -3225,6 +9891,44 @@ DND5E.featureTypes = {
 };
 preLocalize("featureTypes", { key: "label" });
 preLocalize("featureTypes.class.subtypes", { sort: true });
+
+/* -------------------------------------------- */
+
+/**
+ * Configuration data for an item with the "loot" type.
+ *
+ * @typedef {object} LootTypeConfiguration
+ * @property {string} label                       Localized label for this type.
+ */
+
+/**
+ * Types of "loot" items.
+ * @enum {LootTypeConfiguration}
+ */
+DND5E.lootTypes = {
+  art: {
+    label: "DND5E.Loot.Art"
+  },
+  gear: {
+    label: "DND5E.Loot.Gear"
+  },
+  gem: {
+    label: "DND5E.Loot.Gem"
+  },
+  junk: {
+    label: "DND5E.Loot.Junk"
+  },
+  material: {
+    label: "DND5E.Loot.Material"
+  },
+  resource: {
+    label: "DND5E.Loot.Resource"
+  },
+  treasure: {
+    label: "DND5E.Loot.Treasure"
+  }
+};
+preLocalize("lootTypes", { key: "label" });
 
 /* -------------------------------------------- */
 
@@ -3427,7 +10131,10 @@ DND5E.individualTargetTypes = {
   enemy: "DND5E.TargetEnemy",
   creature: "DND5E.TargetCreature",
   object: "DND5E.TargetObject",
-  space: "DND5E.TargetSpace"
+  space: "DND5E.TargetSpace",
+  creatureOrObject: "DND5E.TargetCreatureOrObject",
+  any: "DND5E.TargetAny",
+  willing: "DND5E.TargetWilling"
 };
 preLocalize("individualTargetTypes");
 
@@ -3480,7 +10187,6 @@ DND5E.areaTargetTypes = {
   }
 };
 preLocalize("areaTargetTypes", { key: "label", sort: true });
-patchConfig("areaTargetTypes", "template", { since: 2.0, until: 2.2 });
 
 /* -------------------------------------------- */
 
@@ -3551,6 +10257,31 @@ DND5E.SPELL_SLOT_TABLE = [
 /* -------------------------------------------- */
 
 /**
+ * Configuration data for pact casting progression.
+ *
+ * @typedef {object} PactProgressionConfig
+ * @property {number} slots  Number of spell slots granted.
+ * @property {number} level  Level of spells that can be cast.
+ */
+
+/**
+ * Define the pact slot & level progression by pact caster level.
+ * @enum {PactProgressionConfig}
+ */
+DND5E.pactCastingProgression = {
+  1: { slots: 1, level: 1 },
+  2: { slots: 2, level: 1 },
+  3: { slots: 2, level: 2 },
+  5: { slots: 2, level: 3 },
+  7: { slots: 2, level: 4 },
+  9: { slots: 2, level: 5 },
+  11: { slots: 3, level: 5 },
+  17: { slots: 4, level: 5 }
+};
+
+/* -------------------------------------------- */
+
+/**
  * Various different ways a spell can be prepared.
  */
 DND5E.spellPreparationModes = {
@@ -3566,7 +10297,7 @@ preLocalize("spellPreparationModes");
 
 /**
  * Subset of `DND5E.spellPreparationModes` that consume spell slots.
- * @type {boolean[]}
+ * @type {string[]}
  */
 DND5E.spellUpcastModes = ["always", "pact", "prepared"];
 
@@ -3911,6 +10642,18 @@ preLocalize("proficiencyLevels");
 /* -------------------------------------------- */
 
 /**
+ * Weapon and armor item proficiency levels.
+ * @enum {string}
+ */
+DND5E.weaponAndArmorProficiencyLevels = {
+  0: "DND5E.NotProficient",
+  1: "DND5E.Proficient"
+};
+preLocalize("weaponAndArmorProficiencyLevels");
+
+/* -------------------------------------------- */
+
+/**
  * The amount of cover provided by an object. In cases where multiple pieces
  * of cover are in play, we take the highest value.
  * @enum {string}
@@ -3928,6 +10671,7 @@ preLocalize("cover");
 /**
  * A selection of actor attributes that can be tracked on token resource bars.
  * @type {string[]}
+ * @deprecated since v10
  */
 DND5E.trackableAttributes = [
   "attributes.ac.value", "attributes.init.bonus", "attributes.movement", "attributes.senses", "attributes.spelldc",
@@ -3942,15 +10686,13 @@ DND5E.trackableAttributes = [
  * @type {string[]}
  */
 DND5E.consumableResources = [
-  "item.quantity", "item.weight", "item.duration.value", "currency", "details.xp.value", "abilities.*.value",
-  "attributes.senses", "attributes.movement", "attributes.ac.flat", "item.armor.value", "item.target", "item.range",
-  "item.save.dc"
+  // Configured during init.
 ];
 
 /* -------------------------------------------- */
 
 /**
- * Conditions that can effect an actor.
+ * Conditions that can affect an actor.
  * @enum {string}
  */
 DND5E.conditionTypes = {
@@ -3973,44 +10715,74 @@ DND5E.conditionTypes = {
 };
 preLocalize("conditionTypes", { sort: true });
 
+/* -------------------------------------------- */
+/*  Languages                                   */
+/* -------------------------------------------- */
+
 /**
  * Languages a character can learn.
  * @enum {string}
  */
 DND5E.languages = {
-  common: "DND5E.LanguagesCommon",
-  aarakocra: "DND5E.LanguagesAarakocra",
-  abyssal: "DND5E.LanguagesAbyssal",
-  aquan: "DND5E.LanguagesAquan",
-  auran: "DND5E.LanguagesAuran",
-  celestial: "DND5E.LanguagesCelestial",
-  deep: "DND5E.LanguagesDeepSpeech",
-  draconic: "DND5E.LanguagesDraconic",
-  druidic: "DND5E.LanguagesDruidic",
-  dwarvish: "DND5E.LanguagesDwarvish",
-  elvish: "DND5E.LanguagesElvish",
-  giant: "DND5E.LanguagesGiant",
-  gith: "DND5E.LanguagesGith",
-  gnomish: "DND5E.LanguagesGnomish",
-  goblin: "DND5E.LanguagesGoblin",
-  gnoll: "DND5E.LanguagesGnoll",
-  halfling: "DND5E.LanguagesHalfling",
-  ignan: "DND5E.LanguagesIgnan",
-  infernal: "DND5E.LanguagesInfernal",
-  orc: "DND5E.LanguagesOrc",
-  primordial: "DND5E.LanguagesPrimordial",
-  sylvan: "DND5E.LanguagesSylvan",
-  terran: "DND5E.LanguagesTerran",
+  standard: {
+    label: "DND5E.LanguagesStandard",
+    children: {
+      common: "DND5E.LanguagesCommon",
+      dwarvish: "DND5E.LanguagesDwarvish",
+      elvish: "DND5E.LanguagesElvish",
+      giant: "DND5E.LanguagesGiant",
+      gnomish: "DND5E.LanguagesGnomish",
+      goblin: "DND5E.LanguagesGoblin",
+      halfling: "DND5E.LanguagesHalfling",
+      orc: "DND5E.LanguagesOrc"
+    }
+  },
+  exotic: {
+    label: "DND5E.LanguagesExotic",
+    children: {
+      aarakocra: "DND5E.LanguagesAarakocra",
+      abyssal: "DND5E.LanguagesAbyssal",
+      celestial: "DND5E.LanguagesCelestial",
+      deep: "DND5E.LanguagesDeepSpeech",
+      draconic: "DND5E.LanguagesDraconic",
+      gith: "DND5E.LanguagesGith",
+      gnoll: "DND5E.LanguagesGnoll",
+      infernal: "DND5E.LanguagesInfernal",
+      primordial: {
+        label: "DND5E.LanguagesPrimordial",
+        children: {
+          aquan: "DND5E.LanguagesAquan",
+          auran: "DND5E.LanguagesAuran",
+          ignan: "DND5E.LanguagesIgnan",
+          terran: "DND5E.LanguagesTerran"
+        }
+      },
+      sylvan: "DND5E.LanguagesSylvan",
+      undercommon: "DND5E.LanguagesUndercommon"
+    }
+  },
   cant: "DND5E.LanguagesThievesCant",
-  undercommon: "DND5E.LanguagesUndercommon"
+  druidic: "DND5E.LanguagesDruidic"
 };
-preLocalize("languages", { sort: true });
+preLocalize("languages", { key: "label" });
+preLocalize("languages.standard.children", { sort: true });
+preLocalize("languages.exotic.children", { key: "label", sort: true });
+preLocalize("languages.exotic.children.primordial.children", { sort: true });
+patchConfig("languages", "label", { since: "DnD5e 2.4", until: "DnD5e 2.6" });
+
+/* -------------------------------------------- */
 
 /**
  * Maximum allowed character level.
  * @type {number}
  */
 DND5E.maxLevel = 20;
+
+/**
+ * Maximum ability score value allowed by default.
+ * @type {number}
+ */
+DND5E.maxAbilityScore = 20;
 
 /**
  * XP required to achieve each character level.
@@ -4048,17 +10820,22 @@ DND5E.CR_EXP_LEVELS = [
  * Trait configuration information.
  *
  * @typedef {object} TraitConfiguration
- * @property {string} label               Localization key for the trait name.
- * @property {string} [actorKeyPath]      If the trait doesn't directly map to an entry as `traits.[key]`, where is
- *                                        this trait's data stored on the actor?
- * @property {string} [configKey]         If the list of trait options doesn't match the name of the trait, where can
- *                                        the options be found within `CONFIG.DND5E`?
- * @property {string} [labelKey]          If config is an enum of objects, where can the label be found?
- * @property {object} [subtypes]          Configuration for traits that take some sort of base item.
- * @property {string} [subtypes.keyPath]  Path to subtype value on base items, should match a category key.
- * @property {string[]} [subtypes.ids]    Key for base item ID objects within `CONFIG.DND5E`.
- * @property {object} [children]          Mapping of category key to an object defining its children.
- * @property {boolean} [sortCategories]   Whether top-level categories should be sorted.
+ * @property {object} labels
+ * @property {string} labels.title         Localization key for the trait name.
+ * @property {string} labels.localization  Prefix for a localization key that can be used to generate various
+ *                                         plural variants of the trait type.
+ * @property {string} icon                 Path to the icon used to represent this trait.
+ * @property {string} [actorKeyPath]       If the trait doesn't directly map to an entry as `traits.[key]`, where is
+ *                                         this trait's data stored on the actor?
+ * @property {string} [configKey]          If the list of trait options doesn't match the name of the trait, where can
+ *                                         the options be found within `CONFIG.DND5E`?
+ * @property {string} [labelKeyPath]       If config is an enum of objects, where can the label be found?
+ * @property {object} [subtypes]           Configuration for traits that take some sort of base item.
+ * @property {string} [subtypes.keyPath]   Path to subtype value on base items, should match a category key.
+ * @property {string[]} [subtypes.ids]     Key for base item ID objects within `CONFIG.DND5E`.
+ * @property {object} [children]           Mapping of category key to an object defining its children.
+ * @property {boolean} [sortCategories]    Whether top-level categories should be sorted.
+ * @property {boolean} [expertise]         Can an actor receive expertise in this trait?
  */
 
 /**
@@ -4067,54 +10844,125 @@ DND5E.CR_EXP_LEVELS = [
  */
 DND5E.traits = {
   saves: {
-    label: "DND5E.ClassSaves",
-    configKey: "abilities"
+    labels: {
+      title: "DND5E.ClassSaves",
+      localization: "DND5E.TraitSavesPlural"
+    },
+    icon: "systems/dnd5e/icons/svg/trait-saves.svg",
+    actorKeyPath: "system.abilities",
+    configKey: "abilities",
+    labelKeyPath: "label"
   },
   skills: {
-    label: "DND5E.TraitSkillProf",
-    labelKey: "label"
+    labels: {
+      title: "DND5E.Skills",
+      localization: "DND5E.TraitSkillsPlural"
+    },
+    icon: "systems/dnd5e/icons/svg/trait-skills.svg",
+    actorKeyPath: "system.skills",
+    labelKeyPath: "label",
+    expertise: true
   },
   languages: {
-    label: "DND5E.Languages"
-  },
-  di: {
-    label: "DND5E.DamImm",
-    configKey: "damageTypes"
-  },
-  dr: {
-    label: "DND5E.DamRes",
-    configKey: "damageTypes"
-  },
-  dv: {
-    label: "DND5E.DamVuln",
-    configKey: "damageTypes"
-  },
-  ci: {
-    label: "DND5E.ConImm",
-    configKey: "conditionTypes"
-  },
-  weapon: {
-    label: "DND5E.TraitWeaponProf",
-    actorKeyPath: "traits.weaponProf",
-    configKey: "weaponProficiencies",
-    subtypes: { keyPath: "weaponType", ids: ["weaponIds"] }
+    labels: {
+      title: "DND5E.Languages",
+      localization: "DND5E.TraitLanguagesPlural"
+    },
+    icon: "systems/dnd5e/icons/svg/trait-languages.svg"
   },
   armor: {
-    label: "DND5E.TraitArmorProf",
-    actorKeyPath: "traits.armorProf",
+    labels: {
+      title: "DND5E.TraitArmorProf",
+      localization: "DND5E.TraitArmorPlural"
+    },
+    icon: "systems/dnd5e/icons/svg/trait-armor-proficiencies.svg",
+    actorKeyPath: "system.traits.armorProf",
     configKey: "armorProficiencies",
     subtypes: { keyPath: "armor.type", ids: ["armorIds", "shieldIds"] }
   },
+  weapon: {
+    labels: {
+      title: "DND5E.TraitWeaponProf",
+      localization: "DND5E.TraitWeaponPlural"
+    },
+    icon: "systems/dnd5e/icons/svg/trait-weapon-proficiencies.svg",
+    actorKeyPath: "system.traits.weaponProf",
+    configKey: "weaponProficiencies",
+    subtypes: { keyPath: "weaponType", ids: ["weaponIds"] }
+  },
   tool: {
-    label: "DND5E.TraitToolProf",
-    actorKeyPath: "traits.toolProf",
+    labels: {
+      title: "DND5E.TraitToolProf",
+      localization: "DND5E.TraitToolPlural"
+    },
+    icon: "systems/dnd5e/icons/svg/trait-tool-proficiencies.svg",
+    actorKeyPath: "system.tools",
     configKey: "toolProficiencies",
     subtypes: { keyPath: "toolType", ids: ["toolIds"] },
     children: { vehicle: "vehicleTypes" },
-    sortCategories: true
+    sortCategories: true,
+    expertise: true
+  },
+  di: {
+    labels: {
+      title: "DND5E.DamImm",
+      localization: "DND5E.TraitDIPlural"
+    },
+    icon: "systems/dnd5e/icons/svg/trait-damage-immunities.svg",
+    configKey: "damageTypes"
+  },
+  dr: {
+    labels: {
+      title: "DND5E.DamRes",
+      localization: "DND5E.TraitDRPlural"
+    },
+    icon: "systems/dnd5e/icons/svg/trait-damage-resistances.svg",
+    configKey: "damageTypes"
+  },
+  dv: {
+    labels: {
+      title: "DND5E.DamVuln",
+      localization: "DND5E.TraitDVPlural"
+    },
+    icon: "systems/dnd5e/icons/svg/trait-damage-vulnerabilities.svg",
+    configKey: "damageTypes"
+  },
+  ci: {
+    labels: {
+      title: "DND5E.ConImm",
+      localization: "DND5E.TraitCIPlural"
+    },
+    icon: "systems/dnd5e/icons/svg/trait-condition-immunities.svg",
+    configKey: "conditionTypes"
   }
 };
-preLocalize("traits", { key: "label" });
+preLocalize("traits", { key: "labels.title" });
+
+/* -------------------------------------------- */
+
+/**
+ * Modes used within a trait advancement.
+ * @enum {object}
+ */
+DND5E.traitModes = {
+  default: {
+    label: "DND5E.AdvancementTraitModeDefaultLabel",
+    hint: "DND5E.AdvancementTraitModeDefaultHint"
+  },
+  expertise: {
+    label: "DND5E.AdvancementTraitModeExpertiseLabel",
+    hint: "DND5E.AdvancementTraitModeExpertiseHint"
+  },
+  forcedExpertise: {
+    label: "DND5E.AdvancementTraitModeForceLabel",
+    hint: "DND5E.AdvancementTraitModeForceHint"
+  },
+  upgrade: {
+    label: "DND5E.AdvancementTraitModeUpgradeLabel",
+    hint: "DND5E.AdvancementTraitModeUpgradeHint"
+  }
+};
+preLocalize("traitModes", { keys: ["label", "hint"] });
 
 /* -------------------------------------------- */
 
@@ -4164,6 +11012,12 @@ DND5E.characterFlags = {
     name: "DND5E.FlagsObservant",
     hint: "DND5E.FlagsObservantHint",
     skills: ["prc", "inv"],
+    section: "DND5E.Feats",
+    type: Boolean
+  },
+  tavernBrawlerFeat: {
+    name: "DND5E.FlagsTavernBrawler",
+    hint: "DND5E.FlagsTavernBrawlerHint",
     section: "DND5E.Feats",
     type: Boolean
   },
@@ -4223,10 +11077,48 @@ DND5E.allowedActorFlags = ["isPolymorphed", "originalActor"].concat(Object.keys(
  * @enum {*}
  */
 DND5E.advancementTypes = {
+  AbilityScoreImprovement: AbilityScoreImprovementAdvancement,
   HitPoints: HitPointsAdvancement,
+  ItemChoice: ItemChoiceAdvancement,
   ItemGrant: ItemGrantAdvancement,
-  ScaleValue: ScaleValueAdvancement
+  ScaleValue: ScaleValueAdvancement,
+  Size: SizeAdvancement,
+  Trait: TraitAdvancement
 };
+
+/* -------------------------------------------- */
+/*  Sources                                     */
+/* -------------------------------------------- */
+
+/**
+ * List of books available as sources.
+ * @enum {string}
+ */
+DND5E.sourceBooks = {
+  "SRD 5.1": "SOURCE.BOOK.SRD"
+};
+preLocalize("sourceBooks", { sort: true });
+
+/* -------------------------------------------- */
+/*  Enrichment                                  */
+/* -------------------------------------------- */
+
+let _enrichmentLookup;
+Object.defineProperty(DND5E, "enrichmentLookup", {
+  get() {
+    if ( !_enrichmentLookup ) {
+      _enrichmentLookup = {
+        abilities: foundry.utils.deepClone(DND5E.abilities),
+        skills: foundry.utils.deepClone(DND5E.skills),
+        tools: foundry.utils.deepClone(DND5E.toolIds)
+      };
+      Object.values(DND5E.abilities).forEach(a => _enrichmentLookup.abilities[a.fullKey] = a);
+      Object.values(DND5E.skills).forEach(s => _enrichmentLookup.skills[s.fullKey] = s);
+    }
+    return _enrichmentLookup;
+  },
+  enumerable: true
+});
 
 /* -------------------------------------------- */
 
@@ -4246,7 +11138,10 @@ function patchConfig(key, fallbackKey, options) {
     return this[fallbackKey];
   }
 
-  Object.values(DND5E[key]).forEach(o => o.toString = toString);
+  Object.values(DND5E[key]).forEach(o => {
+    if ( foundry.utils.getType(o) !== "Object" ) return;
+    o.toString = toString;
+  });
 }
 
 /**
@@ -4449,6 +11344,16 @@ function registerSystemSettings() {
     onChange: rule => canvas.grid.diagonalRule = rule
   });
 
+  // Allow rotating square templates
+  game.settings.register("dnd5e", "gridAlignedSquareTemplates", {
+    name: "SETTINGS.5eGridAlignedSquareTemplatesN",
+    hint: "SETTINGS.5eGridAlignedSquareTemplatesL",
+    scope: "world",
+    config: true,
+    default: true,
+    type: Boolean
+  });
+
   // Proficiency modifier type
   game.settings.register("dnd5e", "proficiencyModifier", {
     name: "SETTINGS.5eProfN",
@@ -4461,6 +11366,16 @@ function registerSystemSettings() {
       bonus: "SETTINGS.5eProfBonus",
       dice: "SETTINGS.5eProfDice"
     }
+  });
+
+  // Allow feats during Ability Score Improvements
+  game.settings.register("dnd5e", "allowFeats", {
+    name: "SETTINGS.5eFeatsN",
+    hint: "SETTINGS.5eFeatsL",
+    scope: "world",
+    config: true,
+    default: true,
+    type: Boolean
   });
 
   // Use Honor ability score
@@ -4722,17 +11637,22 @@ class ActiveEffect5e extends ActiveEffect {
    */
   determineSuppression() {
     this.isSuppressed = false;
-    if ( this.disabled || (this.parent.documentName !== "Actor") ) return;
-    const parts = this.origin?.split(".") ?? [];
-    const [parentType, parentId, documentType, documentId, syntheticItem, syntheticItemId] = parts;
+    if ( this.disabled || (this.parent.documentName !== "Actor") || !this.origin ) return;
+    // Deliberately avoiding using fromUuidSync here, see: https://github.com/foundryvtt/dnd5e/pull/1980
+    const parsed = game.dnd5e.isV10 ? _parseUuid(this.origin) : parseUuid(this.origin);
+    if ( !parsed ) return;
+    const { collection, documentId: parentId, embedded } = parsed;
     let item;
     // Case 1: This is a linked or sidebar actor
-    if ( parentType === "Actor" ) {
+    if ( collection === game.actors ) {
+      const [documentType, documentId] = embedded;
       if ( (parentId !== this.parent.id) || (documentType !== "Item") ) return;
       item = this.parent.items.get(documentId);
     }
     // Case 2: This is a synthetic actor on the scene
-    else if ( parentType === "Scene" ) {
+    else if ( collection === game.scenes ) {
+      if ( embedded.length > 4 ) embedded.splice(2, 2);
+      const [, documentId, syntheticItem, syntheticItemId] = embedded;
       if ( (documentId !== this.parent.token?.id) || (syntheticItem !== "Item") ) return;
       item = this.parent.items.get(syntheticItemId);
     }
@@ -4755,9 +11675,10 @@ class ActiveEffect5e extends ActiveEffect {
     const effect = li.dataset.effectId ? owner.effects.get(li.dataset.effectId) : null;
     switch ( a.dataset.action ) {
       case "create":
+        const isActor = owner instanceof Actor;
         return owner.createEmbeddedDocuments("ActiveEffect", [{
-          label: game.i18n.localize("DND5E.EffectNew"),
-          icon: "icons/svg/aura.svg",
+          label: isActor ? game.i18n.localize("DND5E.EffectNew") : owner.name,
+          icon: isActor ? "icons/svg/aura.svg" : owner.img,
           origin: owner.uuid,
           "duration.rounds": li.dataset.effectType === "temporary" ? 1 : undefined,
           disabled: li.dataset.effectType === "inactive"
@@ -4765,7 +11686,7 @@ class ActiveEffect5e extends ActiveEffect {
       case "edit":
         return effect.sheet.render(true);
       case "delete":
-        return effect.delete();
+        return effect.deleteDialog();
       case "toggle":
         return effect.update({disabled: !effect.disabled});
     }
@@ -4806,7 +11727,7 @@ class ActiveEffect5e extends ActiveEffect {
 
     // Iterate over active effects, classifying them into categories
     for ( let e of effects ) {
-      e._getSourceName(); // Trigger a lookup for the source name
+      if ( game.dnd5e.isV10 ) e._getSourceName(); // Trigger a lookup for the source name
       if ( e.isSuppressed ) categories.suppressed.effects.push(e);
       else if ( e.disabled ) categories.inactive.effects.push(e);
       else if ( e.isTemporary ) categories.temporary.effects.push(e);
@@ -4815,482 +11736,249 @@ class ActiveEffect5e extends ActiveEffect {
     categories.suppressed.hidden = !categories.suppressed.effects.length;
     return categories;
   }
+
+  /* ~-~-~-~-~-~-~-~-~-~-~-~-~-~-~-~-~-~-~-~-~ */
+  /*  Deprecations and Compatibility           */
+  /* ~-~-~-~-~-~-~-~-~-~-~-~-~-~-~-~-~-~-~-~-~ */
+
+  _initialize(options) {
+    super._initialize(options);
+    if ( game.release.generation < 11 ) {
+      Object.defineProperty(this, "name", {
+        get() {
+          return this.label;
+        },
+        configurable: true,
+        enumerable: false
+      });
+    }
+  }
 }
 
-/**
- * Cached version of the base items compendia indices with the needed subtype fields.
- * @type {object}
- * @private
- */
-const _cachedIndices = {};
-
-/* -------------------------------------------- */
-/*  Trait Lists                                 */
-/* -------------------------------------------- */
+const { SchemaField, StringField } = foundry.data.fields;
 
 /**
- * Get the key path to the specified trait on an actor.
- * @param {string} trait  Trait as defined in `CONFIG.DND5E.traits`.
- * @returns {string}      Key path to this trait's object within an actor's system data.
+ * Data fields that stores information on the adventure or sourcebook where this document originated.
+ *
+ * @property {string} book     Book/publication where the item originated.
+ * @property {string} page     Page or section where the item can be found.
+ * @property {string} custom   Fully custom source label.
+ * @property {string} license  Type of license that covers this item.
  */
-function actorKeyPath(trait) {
-  const traitConfig = CONFIG.DND5E.traits[trait];
-  if ( traitConfig.actorKeyPath ) return traitConfig.actorKeyPath;
-  return `traits.${trait}`;
-}
+class SourceField extends SchemaField {
+  constructor(fields={}, options={}) {
+    super({
+      book: new StringField({label: "DND5E.SourceBook"}),
+      page: new StringField({label: "DND5E.SourcePage"}),
+      custom: new StringField({label: "DND5E.SourceCustom"}),
+      license: new StringField({label: "DND5E.SourceLicense"}),
+      ...fields
+    }, { label: "DND5E.Source", ...options });
+  }
 
-/* -------------------------------------------- */
+  /* -------------------------------------------- */
 
-/**
- * Fetch the categories object for the specified trait.
- * @param {string} trait  Trait as defined in `CONFIG.DND5E.traits`.
- * @returns {object}      Trait categories defined within `CONFIG.DND5E`.
- */
-function categories(trait) {
-  const traitConfig = CONFIG.DND5E.traits[trait];
-  return CONFIG.DND5E[traitConfig.configKey ?? trait];
-}
+  /** @inheritdoc */
+  initialize(value, model, options={}) {
+    const obj = super.initialize(value, model, options);
 
-/* -------------------------------------------- */
+    Object.defineProperty(obj, "label", {
+      get() {
+        if ( this.custom ) return this.custom;
+        const page = Number.isNumeric(this.page)
+          ? game.i18n.format("DND5E.SourcePageDisplay", { page: this.page }) : this.page;
+        return game.i18n.format("DND5E.SourceDisplay", { book: this.book ?? "", page: page ?? "" }).trim();
+      },
+      enumerable: false
+    });
+    Object.defineProperty(obj, "toString", {
+      value: () => {
+        foundry.utils.logCompatibilityWarning("Source has been converted to an object, the label can now be accessed "
+         + "using the `source#label` property.", { since: "DnD5e 2.4", until: "DnD5e 2.6" });
+        return obj.label;
+      },
+      enumerable: false
+    });
 
-/**
- * Get a list of choices for a specific trait.
- * @param {string} trait             Trait as defined in `CONFIG.DND5E.traits`.
- * @param {Set<string>} [chosen=[]]  Optional list of keys to be marked as chosen.
- * @returns {object}                 Object mapping proficiency ids to choice objects.
- */
-async function choices(trait, chosen=new Set()) {
-  const traitConfig = CONFIG.DND5E.traits[trait];
-  if ( foundry.utils.getType(chosen) === "Array" ) chosen = new Set(chosen);
-
-  let data = Object.entries(categories(trait)).reduce((obj, [key, label]) => {
-    obj[key] = { label, chosen: chosen.has(key) };
     return obj;
-  }, {});
+  }
+}
 
-  if ( traitConfig.children ) {
-    for ( const [categoryKey, childrenKey] of Object.entries(traitConfig.children) ) {
-      const children = CONFIG.DND5E[childrenKey];
-      if ( !children || !data[categoryKey] ) continue;
-      data[categoryKey].children = Object.entries(children).reduce((obj, [key, label]) => {
-        obj[key] = { label, chosen: chosen.has(key) };
-        return obj;
-      }, {});
+/**
+ * Data model template with item description & source.
+ *
+ * @property {object} description               Various item descriptions.
+ * @property {string} description.value         Full item description.
+ * @property {string} description.chat          Description displayed in chat card.
+ * @property {string} description.unidentified  Description displayed if item is unidentified.
+ * @property {SourceField} source               Adventure or sourcebook where this item originated.
+ * @mixin
+ */
+class ItemDescriptionTemplate extends SystemDataModel {
+  /** @inheritdoc */
+  static defineSchema() {
+    return {
+      description: new foundry.data.fields.SchemaField({
+        value: new foundry.data.fields.HTMLField({required: true, nullable: true, label: "DND5E.Description"}),
+        chat: new foundry.data.fields.HTMLField({required: true, nullable: true, label: "DND5E.DescriptionChat"}),
+        unidentified: new foundry.data.fields.HTMLField({
+          required: true, nullable: true, label: "DND5E.DescriptionUnidentified"
+        })
+      }),
+      source: new SourceField()
+    };
+  }
+
+  /* -------------------------------------------- */
+  /*  Migrations                                  */
+  /* -------------------------------------------- */
+
+  /** @inheritdoc */
+  static _migrateData(source) {
+    super._migrateData(source);
+    ItemDescriptionTemplate.#migrateSource(source);
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * Convert source string into custom object.
+   * @param {object} source  The candidate source data from which the model will be constructed.
+   */
+  static #migrateSource(source) {
+    if ( foundry.utils.getType(source.source) !== "Object" ) {
+      source.source = { custom: source.source };
     }
   }
-
-  if ( traitConfig.subtypes ) {
-    const keyPath = `system.${traitConfig.subtypes.keyPath}`;
-    const map = CONFIG.DND5E[`${trait}ProficienciesMap`];
-
-    // Merge all IDs lists together
-    const ids = traitConfig.subtypes.ids.reduce((obj, key) => {
-      if ( CONFIG.DND5E[key] ) Object.assign(obj, CONFIG.DND5E[key]);
-      return obj;
-    }, {});
-
-    // Fetch base items for all IDs
-    const baseItems = await Promise.all(Object.entries(ids).map(async ([key, id]) => {
-      const index = await getBaseItem(id);
-      return [key, index];
-    }));
-
-    // Sort base items as children of categories based on subtypes
-    for ( const [key, index] of baseItems ) {
-      if ( !index ) continue;
-
-      // Get the proper subtype, using proficiency map if needed
-      let type = foundry.utils.getProperty(index, keyPath);
-      if ( map?.[type] ) type = map[type];
-
-      const entry = { label: index.name, chosen: chosen.has(key) };
-
-      // No category for this type, add at top level
-      if ( !data[type] ) data[key] = entry;
-
-      // Add as child to appropriate category
-      else {
-        data[type].children ??= {};
-        data[type].children[key] = entry;
-      }
-    }
-  }
-
-  // Sort Categories
-  if ( traitConfig.sortCategories ) data = dnd5e.utils.sortObjectEntries(data, "label");
-
-  // Sort Children
-  for ( const category of Object.values(data) ) {
-    if ( !category.children ) continue;
-    category.children = dnd5e.utils.sortObjectEntries(category.children, "label");
-  }
-
-  return data;
 }
 
-/* -------------------------------------------- */
-
 /**
- * Fetch an item for the provided ID. If the provided ID contains a compendium pack name
- * it will be fetched from that pack, otherwise it will be fetched from the compendium defined
- * in `DND5E.sourcePacks.ITEMS`.
- * @param {string} identifier            Simple ID or compendium name and ID separated by a dot.
- * @param {object} [options]
- * @param {boolean} [options.indexOnly]  If set to true, only the index data will be fetched (will never return
- *                                       Promise).
- * @param {boolean} [options.fullItem]   If set to true, the full item will be returned as long as `indexOnly` is
- *                                       false.
- * @returns {Promise<Item5e>|object}     Promise for a `Document` if `indexOnly` is false & `fullItem` is true,
- *                                       otherwise else a simple object containing the minimal index data.
+ * Data definition for Class items.
+ * @mixes ItemDescriptionTemplate
+ *
+ * @property {string} identifier        Identifier slug for this class.
+ * @property {number} levels            Current number of levels in this class.
+ * @property {string} hitDice           Denomination of hit dice available as defined in `DND5E.hitDieTypes`.
+ * @property {number} hitDiceUsed       Number of hit dice consumed.
+ * @property {object[]} advancement     Advancement objects for this class.
+ * @property {object} spellcasting      Details on class's spellcasting ability.
+ * @property {string} spellcasting.progression  Spell progression granted by class as from `DND5E.spellProgression`.
+ * @property {string} spellcasting.ability      Ability score to use for spellcasting.
  */
-function getBaseItem(identifier, { indexOnly=false, fullItem=false }={}) {
-  let pack = CONFIG.DND5E.sourcePacks.ITEMS;
-  let [scope, collection, id] = identifier.split(".");
-  if ( scope && collection ) pack = `${scope}.${collection}`;
-  if ( !id ) id = identifier;
-
-  const packObject = game.packs.get(pack);
-
-  // Full Item5e document required, always async.
-  if ( fullItem && !indexOnly ) return packObject?.getDocument(id);
-
-  const cache = _cachedIndices[pack];
-  const loading = cache instanceof Promise;
-
-  // Return extended index if cached, otherwise normal index, guaranteed to never be async.
-  if ( indexOnly ) {
-    const index = packObject?.index.get(id);
-    return loading ? index : cache?.[id] ?? index;
-  }
-
-  // Returned cached version of extended index if available.
-  if ( loading ) return cache.then(() => _cachedIndices[pack][id]);
-  else if ( cache ) return cache[id];
-  if ( !packObject ) return;
-
-  // Build the extended index and return a promise for the data
-  const promise = packObject.getIndex({ fields: traitIndexFields() }).then(index => {
-    const store = index.reduce((obj, entry) => {
-      obj[entry._id] = entry;
-      return obj;
-    }, {});
-    _cachedIndices[pack] = store;
-    return store[id];
-  });
-  _cachedIndices[pack] = promise;
-  return promise;
-}
-
-/* -------------------------------------------- */
-
-/**
- * List of fields on items that should be indexed for retrieving subtypes.
- * @returns {string[]}  Index list to pass to `Compendium#getIndex`.
- * @protected
- */
-function traitIndexFields() {
-  const fields = [];
-  for ( const traitConfig of Object.values(CONFIG.DND5E.traits) ) {
-    if ( !traitConfig.subtypes ) continue;
-    fields.push(`system.${traitConfig.subtypes.keyPath}`);
-  }
-  return fields;
-}
-
-/* -------------------------------------------- */
-/*  Localized Formatting Methods                */
-/* -------------------------------------------- */
-
-/**
- * Get the localized label for a specific trait type.
- * @param {string} trait    Trait as defined in `CONFIG.DND5E.traits`.
- * @param {number} [count]  Count used to determine pluralization. If no count is provided, will default to
- *                          the 'other' pluralization.
- * @returns {string}        Localized label.
- */
-function traitLabel(trait, count) {
-  let typeCap;
-  if ( trait.length === 2 ) typeCap = trait.toUpperCase();
-  else typeCap = trait.capitalize();
-
-  const pluralRule = ( count !== undefined ) ? new Intl.PluralRules(game.i18n.lang).select(count) : "other";
-  return game.i18n.localize(`DND5E.Trait${typeCap}Plural.${pluralRule}`);
-}
-
-/* -------------------------------------------- */
-
-/**
- * Retrieve the proper display label for the provided key.
- * @param {string} trait  Trait as defined in `CONFIG.DND5E.traits`.
- * @param {string} key    Key for which to generate the label.
- * @returns {string}      Retrieved label.
- */
-function keyLabel(trait, key) {
-  const traitConfig = CONFIG.DND5E.traits[trait];
-  if ( categories(trait)[key] ) {
-    const category = categories(trait)[key];
-    if ( !traitConfig.labelKey ) return category;
-    return foundry.utils.getProperty(category, traitConfig.labelKey);
-  }
-
-  for ( const childrenKey of Object.values(traitConfig.children ?? {}) ) {
-    if ( CONFIG.DND5E[childrenKey]?.[key] ) return CONFIG.DND5E[childrenKey]?.[key];
-  }
-
-  for ( const idsKey of traitConfig.subtypes?.ids ?? [] ) {
-    if ( !CONFIG.DND5E[idsKey]?.[key] ) continue;
-    const index = getBaseItem(CONFIG.DND5E[idsKey][key], { indexOnly: true });
-    if ( index ) return index.name;
-    else break;
-  }
-
-  return key;
-}
-
-/* -------------------------------------------- */
-
-/**
- * Create a human readable description of the provided choice.
- * @param {string} trait        Trait as defined in `CONFIG.DND5E.traits`.
- * @param {TraitChoice} choice  Data for a specific choice.
- * @returns {string}
- */
-function choiceLabel(trait, choice) {
-  // Select from any trait values
-  if ( !choice.pool ) {
-    return game.i18n.format("DND5E.TraitConfigChooseAny", {
-      count: choice.count,
-      type: traitLabel(trait, choice.count).toLowerCase()
+class ClassData extends SystemDataModel.mixin(ItemDescriptionTemplate) {
+  /** @inheritdoc */
+  static defineSchema() {
+    return this.mergeSchema(super.defineSchema(), {
+      identifier: new IdentifierField({required: true, label: "DND5E.Identifier"}),
+      levels: new foundry.data.fields.NumberField({
+        required: true, nullable: false, integer: true, min: 0, initial: 1, label: "DND5E.ClassLevels"
+      }),
+      hitDice: new foundry.data.fields.StringField({
+        required: true, initial: "d6", blank: false, label: "DND5E.HitDice",
+        validate: v => /d\d+/.test(v), validationError: "must be a dice value in the format d#"
+      }),
+      hitDiceUsed: new foundry.data.fields.NumberField({
+        required: true, nullable: false, integer: true, initial: 0, min: 0, label: "DND5E.HitDiceUsed"
+      }),
+      advancement: new foundry.data.fields.ArrayField(new AdvancementField(), {label: "DND5E.AdvancementTitle"}),
+      spellcasting: new foundry.data.fields.SchemaField({
+        progression: new foundry.data.fields.StringField({
+          required: true, initial: "none", blank: false, label: "DND5E.SpellProgression"
+        }),
+        ability: new foundry.data.fields.StringField({required: true, label: "DND5E.SpellAbility"})
+      }, {label: "DND5E.Spellcasting"})
     });
   }
 
-  // Select from a list of options
-  const choices = choice.pool.map(key => keyLabel(trait, key));
-  const listFormatter = new Intl.ListFormat(game.i18n.lang, { type: "disjunction" });
-  return game.i18n.format("DND5E.TraitConfigChooseList", {
-    count: choice.count,
-    list: listFormatter.format(choices)
-  });
-}
+  /* -------------------------------------------- */
+  /*  Migrations                                  */
+  /* -------------------------------------------- */
 
-var trait = /*#__PURE__*/Object.freeze({
-  __proto__: null,
-  actorKeyPath: actorKeyPath,
-  categories: categories,
-  choiceLabel: choiceLabel,
-  choices: choices,
-  getBaseItem: getBaseItem,
-  keyLabel: keyLabel,
-  traitIndexFields: traitIndexFields,
-  traitLabel: traitLabel
-});
-
-/* -------------------------------------------- */
-/* D20 Roll                                     */
-/* -------------------------------------------- */
-
-/**
- * Configuration data for a D20 roll.
- *
- * @typedef {object} D20RollConfiguration
- *
- * @property {string[]} [parts=[]]  The dice roll component parts, excluding the initial d20.
- * @property {object} [data={}]     Data that will be used when parsing this roll.
- * @property {Event} [event]        The triggering event for this roll.
- *
- * ## D20 Properties
- * @property {boolean} [advantage]     Apply advantage to this roll (unless overridden by modifier keys or dialog)?
- * @property {boolean} [disadvantage]  Apply disadvantage to this roll (unless overridden by modifier keys or dialog)?
- * @property {number|null} [critical=20]  The value of the d20 result which represents a critical success,
- *                                     `null` will prevent critical successes.
- * @property {number|null} [fumble=1]  The value of the d20 result which represents a critical failure,
- *                                     `null` will prevent critical failures.
- * @property {number} [targetValue]    The value of the d20 result which should represent a successful roll.
- *
- * ## Flags
- * @property {boolean} [elvenAccuracy]   Allow Elven Accuracy to modify this roll?
- * @property {boolean} [halflingLucky]   Allow Halfling Luck to modify this roll?
- * @property {boolean} [reliableTalent]  Allow Reliable Talent to modify this roll?
- *
- * ## Roll Configuration Dialog
- * @property {boolean} [fastForward]           Should the roll configuration dialog be skipped?
- * @property {boolean} [chooseModifier=false]  If the configuration dialog is shown, should the ability modifier be
- *                                             configurable within that interface?
- * @property {string} [template]               The HTML template used to display the roll configuration dialog.
- * @property {string} [title]                  Title of the roll configuration dialog.
- * @property {object} [dialogOptions]          Additional options passed to the roll configuration dialog.
- *
- * ## Chat Message
- * @property {boolean} [chatMessage=true]  Should a chat message be created for this roll?
- * @property {object} [messageData={}]     Additional data which is applied to the created chat message.
- * @property {string} [rollMode]           Value of `CONST.DICE_ROLL_MODES` to apply as default for the chat message.
- * @property {object} [flavor]             Flavor text to use in the created chat message.
- */
-
-/**
- * A standardized helper function for managing core 5e d20 rolls.
- * Holding SHIFT, ALT, or CTRL when the attack is rolled will "fast-forward".
- * This chooses the default options of a normal attack with no bonus, Advantage, or Disadvantage respectively
- *
- * @param {D20RollConfiguration} configuration  Configuration data for the D20 roll.
- * @returns {Promise<D20Roll|null>}             The evaluated D20Roll, or null if the workflow was cancelled.
- */
-async function d20Roll({
-  parts=[], data={}, event,
-  advantage, disadvantage, critical=20, fumble=1, targetValue,
-  elvenAccuracy, halflingLucky, reliableTalent,
-  fastForward, chooseModifier=false, template, title, dialogOptions,
-  chatMessage=true, messageData={}, rollMode, flavor
-}={}) {
-
-  // Handle input arguments
-  const formula = ["1d20"].concat(parts).join(" + ");
-  const {advantageMode, isFF} = CONFIG.Dice.D20Roll.determineAdvantageMode({
-    advantage, disadvantage, fastForward, event
-  });
-  const defaultRollMode = rollMode || game.settings.get("core", "rollMode");
-  if ( chooseModifier && !isFF ) {
-    data.mod = "@mod";
-    if ( "abilityCheckBonus" in data ) data.abilityCheckBonus = "@abilityCheckBonus";
+  /** @inheritdoc */
+  static _migrateData(source) {
+    super._migrateData(source);
+    ClassData.#migrateLevels(source);
+    ClassData.#migrateSpellcastingData(source);
   }
 
-  // Construct the D20Roll instance
-  const roll = new CONFIG.Dice.D20Roll(formula, data, {
-    flavor: flavor || title,
-    advantageMode,
-    defaultRollMode,
-    rollMode,
-    critical,
-    fumble,
-    targetValue,
-    elvenAccuracy,
-    halflingLucky,
-    reliableTalent
-  });
+  /* -------------------------------------------- */
 
-  // Prompt a Dialog to further configure the D20Roll
-  if ( !isFF ) {
-    const configured = await roll.configureDialog({
-      title,
-      chooseModifier,
-      defaultRollMode,
-      defaultAction: advantageMode,
-      defaultAbility: data?.item?.ability || data?.defaultAbility,
-      template
-    }, dialogOptions);
-    if ( configured === null ) return null;
-  } else roll.options.rollMode ??= defaultRollMode;
-
-  // Evaluate the configured roll
-  await roll.evaluate({async: true});
-
-  // Create a Chat Message
-  if ( roll && chatMessage ) await roll.toMessage(messageData);
-  return roll;
-}
-
-/* -------------------------------------------- */
-/* Damage Roll                                  */
-/* -------------------------------------------- */
-
-/**
- * Configuration data for a damage roll.
- *
- * @typedef {object} DamageRollConfiguration
- *
- * @property {string[]} [parts=[]]  The dice roll component parts.
- * @property {object} [data={}]     Data that will be used when parsing this roll.
- * @property {Event} [event]        The triggering event for this roll.
- *
- * ## Critical Handling
- * @property {boolean} [allowCritical=true]  Is this damage roll allowed to be rolled as critical?
- * @property {boolean} [critical]            Apply critical to this roll (unless overridden by modifier key or dialog)?
- * @property {number} [criticalBonusDice]    A number of bonus damage dice that are added for critical hits.
- * @property {number} [criticalMultiplier]   Multiplier to use when calculating critical damage.
- * @property {boolean} [multiplyNumeric]     Should numeric terms be multiplied when this roll criticals?
- * @property {boolean} [powerfulCritical]    Should the critical dice be maximized rather than rolled?
- * @property {string} [criticalBonusDamage]  An extra damage term that is applied only on a critical hit.
- *
- * ## Roll Configuration Dialog
- * @property {boolean} [fastForward]        Should the roll configuration dialog be skipped?
- * @property {string} [template]            The HTML template used to render the roll configuration dialog.
- * @property {string} [title]               Title of the roll configuration dialog.
- * @property {object} [dialogOptions]       Additional options passed to the roll configuration dialog.
- *
- * ## Chat Message
- * @property {boolean} [chatMessage=true]  Should a chat message be created for this roll?
- * @property {object} [messageData={}]     Additional data which is applied to the created chat message.
- * @property {string} [rollMode]           Value of `CONST.DICE_ROLL_MODES` to apply as default for the chat message.
- * @property {string} [flavor]             Flavor text to use in the created chat message.
- */
-
-/**
- * A standardized helper function for managing core 5e damage rolls.
- * Holding SHIFT, ALT, or CTRL when the attack is rolled will "fast-forward".
- * This chooses the default options of a normal attack with no bonus, Critical, or no bonus respectively
- *
- * @param {DamageRollConfiguration} configuration  Configuration data for the Damage roll.
- * @returns {Promise<DamageRoll|null>}             The evaluated DamageRoll, or null if the workflow was canceled.
- */
-async function damageRoll({
-  parts=[], data={}, event,
-  allowCritical=true, critical, criticalBonusDice, criticalMultiplier,
-  multiplyNumeric, powerfulCritical, criticalBonusDamage,
-  fastForward, template, title, dialogOptions,
-  chatMessage=true, messageData={}, rollMode, flavor
-}={}) {
-
-  // Handle input arguments
-  const defaultRollMode = rollMode || game.settings.get("core", "rollMode");
-
-  // Construct the DamageRoll instance
-  const formula = parts.join(" + ");
-  const {isCritical, isFF} = _determineCriticalMode({critical, fastForward, event});
-  const roll = new CONFIG.Dice.DamageRoll(formula, data, {
-    flavor: flavor || title,
-    rollMode,
-    critical: isFF ? isCritical : false,
-    criticalBonusDice,
-    criticalMultiplier,
-    criticalBonusDamage,
-    multiplyNumeric: multiplyNumeric ?? game.settings.get("dnd5e", "criticalDamageModifiers"),
-    powerfulCritical: powerfulCritical ?? game.settings.get("dnd5e", "criticalDamageMaxDice")
-  });
-
-  // Prompt a Dialog to further configure the DamageRoll
-  if ( !isFF ) {
-    const configured = await roll.configureDialog({
-      title,
-      defaultRollMode: defaultRollMode,
-      defaultCritical: isCritical,
-      template,
-      allowCritical
-    }, dialogOptions);
-    if ( configured === null ) return null;
+  /**
+   * Migrate the class levels.
+   * @param {object} source  The candidate source data from which the model will be constructed.
+   */
+  static #migrateLevels(source) {
+    if ( typeof source.levels !== "string" ) return;
+    if ( source.levels === "" ) source.levels = 1;
+    else if ( Number.isNumeric(source.levels) ) source.levels = Number(source.levels);
   }
 
-  // Evaluate the configured roll
-  await roll.evaluate({async: true});
+  /* -------------------------------------------- */
 
-  // Create a Chat Message
-  if ( roll && chatMessage ) await roll.toMessage(messageData);
-  return roll;
-}
+  /**
+   * Migrate the class's spellcasting string to object.
+   * @param {object} source  The candidate source data from which the model will be constructed.
+   */
+  static #migrateSpellcastingData(source) {
+    if ( source.spellcasting?.progression === "" ) source.spellcasting.progression = "none";
+    if ( typeof source.spellcasting !== "string" ) return;
+    source.spellcasting = {
+      progression: source.spellcasting,
+      ability: ""
+    };
+  }
 
-/* -------------------------------------------- */
+  /* -------------------------------------------- */
 
-/**
- * Determines whether this d20 roll should be fast-forwarded, and whether advantage or disadvantage should be applied
- * @param {object} [config]
- * @param {Event} [config.event]          Event that triggered the roll.
- * @param {boolean} [config.critical]     Is this roll treated as a critical by default?
- * @param {boolean} [config.fastForward]  Should the roll dialog be skipped?
- * @returns {{isFF: boolean, isCritical: boolean}}  Whether the roll is fast-forward, and whether it is a critical hit
- */
-function _determineCriticalMode({event, critical=false, fastForward}={}) {
-  const isFF = fastForward ?? (event && (event.shiftKey || event.altKey || event.ctrlKey || event.metaKey));
-  if ( event?.altKey ) critical = true;
-  return {isFF: !!isFF, isCritical: critical};
+  /**
+   * Migrate the class's saves & skills into TraitAdvancements.
+   * @param {object} source  The candidate source data from which the model will be constructed.
+   * @protected
+   */
+  static _migrateTraitAdvancement(source) {
+    const system = source.system;
+    if ( !system?.advancement || system.advancement.find(a => a.type === "Trait") ) return;
+    let needsMigration = false;
+
+    if ( system.saves?.length ) {
+      const savesData = {
+        type: "Trait",
+        level: 1,
+        configuration: {
+          grants: system.saves.map(t => `saves:${t}`)
+        }
+      };
+      savesData.value = {
+        chosen: savesData.configuration.grants
+      };
+      system.advancement.push(new TraitAdvancement(savesData).toObject());
+      delete system.saves;
+      needsMigration = true;
+    }
+
+    if ( system.skills?.choices?.length ) {
+      const skillsData = {
+        type: "Trait",
+        level: 1,
+        configuration: {
+          choices: [{
+            count: system.skills.number ?? 1,
+            pool: system.skills.choices.map(t => `skills:${t}`)
+          }]
+        }
+      };
+      if ( system.skills.value?.length ) {
+        skillsData.value = {
+          chosen: system.skills.value.map(t => `skills:${t}`)
+        };
+      }
+      system.advancement.push(new TraitAdvancement(skillsData).toObject());
+      delete system.skills;
+      needsMigration = true;
+    }
+
+    if ( needsMigration ) foundry.utils.setProperty(source, "flags.dnd5e.persistSourceMigration", true);
+  }
 }
 
 /**
@@ -5402,7 +12090,8 @@ function _simplifyDiceTerms(terms) {
   // Split the unannotated terms into different die sizes and signs
   const diceQuantities = unannotated.reduce((obj, curr, i) => {
     if ( curr instanceof OperatorTerm ) return obj;
-    const key = `${unannotated[i - 1].operator}${curr.faces}`;
+    const face = curr.constructor?.name === "Coin" ? "c" : curr.faces;
+    const key = `${unannotated[i - 1].operator}${face}`;
     obj[key] = (obj[key] ?? 0) + curr.number;
     return obj;
   }, {});
@@ -5410,7 +12099,9 @@ function _simplifyDiceTerms(terms) {
   // Add new die and operator terms to simplified for each die size and sign
   const simplified = Object.entries(diceQuantities).flatMap(([key, number]) => ([
     new OperatorTerm({ operator: key.charAt(0) }),
-    new Die({ number, faces: parseInt(key.slice(1)) })
+    key.slice(1) === "c"
+      ? new Coin({ number: number })
+      : new Die({ number, faces: parseInt(key.slice(1)) })
   ]));
   return [...simplified, ...annotated];
 }
@@ -5503,48 +12194,43 @@ class AbilityUseDialog extends Dialog {
   /**
    * A constructor function which displays the Spell Cast Dialog app for a given Actor and Item.
    * Returns a Promise which resolves to the dialog FormData once the workflow has been completed.
-   * @param {Item5e} item  Item being used.
-   * @returns {Promise}    Promise that is resolved when the use dialog is acted upon.
+   * @param {Item5e} item                   Item being used.
+   * @param {ItemUseConfiguration} config   The ability use configuration's values.
+   * @returns {Promise}                     Promise that is resolved when the use dialog is acted upon.
    */
-  static async create(item) {
+  static async create(item, config) {
     if ( !item.isOwned ) throw new Error("You cannot display an ability usage dialog for an unowned item");
+    config ??= item._getUsageConfig();
+    const slotOptions = config.consumeSpellSlot ? this._createSpellSlotOptions(item.actor, item.system.level) : [];
+    const resourceOptions = this._createResourceOptions(item);
 
-    // Prepare data
-    const uses = item.system.uses ?? {};
-    const resource = item.system.consume ?? {};
-    const quantity = item.system.quantity ?? 0;
-    const recharge = item.system.recharge ?? {};
-    const recharges = !!recharge.value;
-    const sufficientUses = (quantity > 0 && !uses.value) || uses.value > 0;
-
-    // Prepare dialog form data
     const data = {
-      item: item,
-      title: game.i18n.format("DND5E.AbilityUseHint", {type: game.i18n.localize(`ITEM.Type${item.type.capitalize()}`), name: item.name}),
-      note: this._getAbilityUseNote(item, uses, recharge),
-      consumeSpellSlot: false,
-      consumeRecharge: recharges,
-      consumeResource: resource.target && (!item.hasAttack || (resource.type !== "ammo")),
-      consumeUses: uses.per && (uses.max > 0),
-      canUse: recharges ? recharge.charged : sufficientUses,
-      createTemplate: game.user.can("TEMPLATE_CREATE") && item.hasAreaTarget,
-      errors: []
+      item,
+      ...config,
+      slotOptions,
+      resourceOptions,
+      scaling: item.usageScaling,
+      note: this._getAbilityUseNote(item, config),
+      title: game.i18n.format("DND5E.AbilityUseHint", {
+        type: game.i18n.localize(CONFIG.Item.typeLabels[item.type]),
+        name: item.name
+      })
     };
-    if ( item.type === "spell" ) this._getSpellData(item.actor.system, item.system, data);
+    this._getAbilityUseWarnings(data);
 
     // Render the ability usage template
     const html = await renderTemplate("systems/dnd5e/templates/apps/ability-use.hbs", data);
 
     // Create the Dialog and return data as a Promise
-    const icon = data.isSpell ? "fa-magic" : "fa-fist-raised";
-    const label = game.i18n.localize(`DND5E.AbilityUse${data.isSpell ? "Cast" : "Use"}`);
+    const isSpell = item.type === "spell";
+    const label = game.i18n.localize(`DND5E.AbilityUse${isSpell ? "Cast" : "Use"}`);
     return new Promise(resolve => {
       const dlg = new this(item, {
         title: `${item.name}: ${game.i18n.localize("DND5E.AbilityUseConfig")}`,
         content: html,
         buttons: {
           use: {
-            icon: `<i class="fas ${icon}"></i>`,
+            icon: `<i class="fas ${isSpell ? "fa-magic" : "fa-fist-raised"}"></i>`,
             label: label,
             callback: html => {
               const fd = new FormDataExtended(html[0].querySelector("form"));
@@ -5564,34 +12250,24 @@ class AbilityUseDialog extends Dialog {
   /* -------------------------------------------- */
 
   /**
-   * Get dialog data related to limited spell slots.
-   * @param {object} actorData  System data from the actor using the spell.
-   * @param {object} itemData   System data from the spell being used.
-   * @param {object} data       Data for the dialog being presented.
-   * @returns {object}          Modified dialog data.
+   * Create an array of spell slot options for a select.
+   * @param {Actor5e} actor  The actor with spell slots.
+   * @param {number} level   The minimum level.
+   * @returns {object[]}     Array of spell slot select options.
    * @private
    */
-  static _getSpellData(actorData, itemData, data) {
-
-    // Determine whether the spell may be up-cast
-    const lvl = itemData.level;
-    const consumeSpellSlot = (lvl > 0) && CONFIG.DND5E.spellUpcastModes.includes(itemData.preparation.mode);
-
-    // If can't upcast, return early and don't bother calculating available spell slots
-    if (!consumeSpellSlot) {
-      return foundry.utils.mergeObject(data, { isSpell: true, consumeSpellSlot });
-    }
-
+  static _createSpellSlotOptions(actor, level) {
     // Determine the levels which are feasible
     let lmax = 0;
-    const spellLevels = Array.fromRange(10).reduce((arr, i) => {
-      if ( i < lvl ) return arr;
+    const options = Array.fromRange(Object.keys(CONFIG.DND5E.spellLevels).length).reduce((arr, i) => {
+      if ( i < level ) return arr;
       const label = CONFIG.DND5E.spellLevels[i];
-      const l = actorData.spells[`spell${i}`] || {max: 0, override: null};
+      const l = actor.system.spells[`spell${i}`] || {max: 0, override: null};
       let max = parseInt(l.override || l.max || 0);
       let slots = Math.clamped(parseInt(l.value || 0), 0, max);
       if ( max > 0 ) lmax = i;
       arr.push({
+        key: `spell${i}`,
         level: i,
         label: i > 0 ? game.i18n.format("DND5E.SpellLevelSlot", {level: label, n: slots}) : label,
         canCast: max > 0,
@@ -5600,62 +12276,119 @@ class AbilityUseDialog extends Dialog {
       return arr;
     }, []).filter(sl => sl.level <= lmax);
 
-    // If this character has pact slots, present them as an option for casting the spell.
-    const pact = actorData.spells.pact;
-    if (pact.level >= lvl) {
-      spellLevels.push({
-        level: "pact",
+    // If this character has pact slots, present them as well.
+    const pact = actor.system.spells.pact;
+    if ( pact.level >= level ) {
+      options.push({
+        key: "pact",
+        level: pact.level,
         label: `${game.i18n.format("DND5E.SpellLevelPact", {level: pact.level, n: pact.value})}`,
         canCast: true,
         hasSlots: pact.value > 0
       });
     }
-    const canCast = spellLevels.some(l => l.hasSlots);
-    if ( !canCast ) data.errors.push(game.i18n.format("DND5E.SpellCastNoSlots", {
-      level: CONFIG.DND5E.spellLevels[lvl],
-      name: data.item.name
-    }));
 
-    // Merge spell casting data
-    return foundry.utils.mergeObject(data, { isSpell: true, consumeSpellSlot, spellLevels });
+    return options;
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * Configure resource consumption options for a select.
+   * @param {Item5e} item     The item.
+   * @returns {object|null}   Object of select options, or null if the item does not or cannot scale with resources.
+   * @protected
+   */
+  static _createResourceOptions(item) {
+    const consume = item.system.consume || {};
+    if ( (item.type !== "spell") || !consume.scale ) return null;
+    const spellLevels = Object.keys(CONFIG.DND5E.spellLevels).length - 1;
+
+    const min = consume.amount || 1;
+    const cap = spellLevels + min - item.system.level;
+
+    let target;
+    let value;
+    let label;
+    switch ( consume.type ) {
+      case "ammo":
+      case "material": {
+        target = item.actor.items.get(consume.target);
+        label = target?.name;
+        value = target?.system.quantity;
+        break;
+      }
+      case "attribute": {
+        target = item.actor;
+        value = foundry.utils.getProperty(target.system, consume.target);
+        break;
+      }
+      case "charges": {
+        target = item.actor.items.get(consume.target);
+        label = target?.name;
+        value = target?.system.uses.value;
+        break;
+      }
+      case "hitDice": {
+        target = item.actor;
+        if ( ["smallest", "largest"].includes(consume.target) ) {
+          label = game.i18n.localize(`DND5E.ConsumeHitDice${consume.target.capitalize()}Long`);
+          value = target.system.attributes.hd;
+        } else {
+          value = Object.values(item.actor.classes ?? {}).reduce((acc, cls) => {
+            if ( cls.system.hitDice !== consume.target ) return acc;
+            const hd = cls.system.levels - cls.system.hitDiceUsed;
+            return acc + hd;
+          }, 0);
+          label = `${game.i18n.localize("DND5E.HitDice")} (${consume.target})`;
+        }
+        break;
+      }
+    }
+
+    if ( !target ) return null;
+
+    const max = Math.min(cap, value);
+    return Array.fromRange(max, 1).reduce((acc, n) => {
+      if ( n >= min ) acc[n] = `[${n}/${value}] ${label ?? consume.target}`;
+      return acc;
+    }, {});
   }
 
   /* -------------------------------------------- */
 
   /**
    * Get the ability usage note that is displayed.
-   * @param {object} item                                     Data for the item being used.
-   * @param {{value: number, max: number, per: string}} uses  Object uses and recovery configuration.
-   * @param {{charged: boolean, value: string}} recharge      Object recharge configuration.
-   * @returns {string}                                        Localized string indicating available uses.
+   * @param {object} item                   Data for the item being used.
+   * @param {ItemUseConfiguration} config   The ability use configuration's values.
+   * @returns {string}                      The note to display.
    * @private
    */
-  static _getAbilityUseNote(item, uses, recharge) {
+  static _getAbilityUseNote(item, config) {
+    const { quantity, recharge, uses } = item.system;
 
     // Zero quantity
-    const quantity = item.system.quantity;
     if ( quantity <= 0 ) return game.i18n.localize("DND5E.AbilityUseUnavailableHint");
 
     // Abilities which use Recharge
-    if ( recharge.value ) {
+    if ( config.consumeUsage && recharge?.value ) {
       return game.i18n.format(recharge.charged ? "DND5E.AbilityUseChargedHint" : "DND5E.AbilityUseRechargeHint", {
-        type: game.i18n.localize(`ITEM.Type${item.type.capitalize()}`)
+        type: game.i18n.localize(CONFIG.Item.typeLabels[item.type])
       });
     }
 
     // Does not use any resource
-    if ( !uses.per || !uses.max ) return "";
+    if ( !uses?.per || !uses?.max ) return "";
 
     // Consumables
-    if ( item.type === "consumable" ) {
+    if ( uses.autoDestroy ) {
       let str = "DND5E.AbilityUseNormalHint";
       if ( uses.value > 1 ) str = "DND5E.AbilityUseConsumableChargeHint";
-      else if ( item.system.quantity === 1 && uses.autoDestroy ) str = "DND5E.AbilityUseConsumableDestroyHint";
-      else if ( item.system.quantity > 1 ) str = "DND5E.AbilityUseConsumableQuantityHint";
+      else if ( quantity > 1 ) str = "DND5E.AbilityUseConsumableQuantityHint";
       return game.i18n.format(str, {
         type: game.i18n.localize(`DND5E.Consumable${item.system.consumableType.capitalize()}`),
         value: uses.value,
-        quantity: item.system.quantity,
+        quantity: quantity,
         max: uses.max,
         per: CONFIG.DND5E.limitedUsePeriods[uses.per]
       });
@@ -5664,118 +12397,95 @@ class AbilityUseDialog extends Dialog {
     // Other Items
     else {
       return game.i18n.format("DND5E.AbilityUseNormalHint", {
-        type: game.i18n.localize(`ITEM.Type${item.type.capitalize()}`),
+        type: game.i18n.localize(CONFIG.Item.typeLabels[item.type]),
         value: uses.value,
         max: uses.max,
         per: CONFIG.DND5E.limitedUsePeriods[uses.per]
       });
     }
   }
-}
-
-/**
- * Object describing the proficiency for a specific ability or skill.
- *
- * @param {number} proficiency   Actor's flat proficiency bonus based on their current level.
- * @param {number} multiplier    Value by which to multiply the actor's base proficiency value.
- * @param {boolean} [roundDown]  Should half-values be rounded up or down?
- */
-class Proficiency {
-  constructor(proficiency, multiplier, roundDown=true) {
-
-    /**
-     * Base proficiency value of the actor.
-     * @type {number}
-     * @private
-     */
-    this._baseProficiency = Number(proficiency ?? 0);
-
-    /**
-     * Value by which to multiply the actor's base proficiency value.
-     * @type {number}
-     */
-    this.multiplier = Number(multiplier ?? 0);
-
-    /**
-     * Direction decimal results should be rounded ("up" or "down").
-     * @type {string}
-     */
-    this.rounding = roundDown ? "down" : "up";
-  }
 
   /* -------------------------------------------- */
 
   /**
-   * Calculate an actor's proficiency modifier based on level or CR.
-   * @param {number} level  Level or CR To use for calculating proficiency modifier.
-   * @returns {number}      Proficiency modifier.
+   * Get the ability usage warnings to display.
+   * @param {object} data  Template data for the AbilityUseDialog. **Will be mutated**
+   * @private
    */
-  static calculateMod(level) {
-    return Math.floor((level + 7) / 4);
-  }
+  static _getAbilityUseWarnings(data) {
+    const warnings = [];
+    const item = data.item;
+    const { quantity, level, consume, consumableType } = item.system;
+    const scale = item.usageScaling;
 
-  /* -------------------------------------------- */
-
-  /**
-   * Flat proficiency value regardless of proficiency mode.
-   * @type {number}
-   */
-  get flat() {
-    const roundMethod = (this.rounding === "down") ? Math.floor : Math.ceil;
-    return roundMethod(this.multiplier * this._baseProficiency);
-  }
-
-  /* -------------------------------------------- */
-
-  /**
-   * Dice-based proficiency value regardless of proficiency mode.
-   * @type {string}
-   */
-  get dice() {
-    if ( (this._baseProficiency === 0) || (this.multiplier === 0) ) return "0";
-    const roundTerm = (this.rounding === "down") ? "floor" : "ceil";
-    if ( this.multiplier === 0.5 ) {
-      return `${roundTerm}(1d${this._baseProficiency * 2} / 2)`;
-    } else {
-      return `${this.multiplier}d${this._baseProficiency * 2}`;
+    if ( (scale === "slot") && data.slotOptions.every(o => !o.hasSlots) ) {
+      // Warn that the actor has no spell slots of any level with which to use this item.
+      warnings.push(game.i18n.format("DND5E.SpellCastNoSlotsLeft", {
+        name: item.name
+      }));
+    } else if ( (scale === "slot") && !data.slotOptions.some(o => (o.level === level) && o.hasSlots) ) {
+      // Warn that the actor has no spell slots of this particular level with which to use this item.
+      warnings.push(game.i18n.format("DND5E.SpellCastNoSlots", {
+        level: CONFIG.DND5E.spellLevels[level],
+        name: item.name
+      }));
+    } else if ( (scale === "resource") && foundry.utils.isEmpty(data.resourceOptions) ) {
+      // Warn that the resource does not have enough left.
+      warnings.push(game.i18n.format("DND5E.ConsumeWarningNoQuantity", {
+        name: item.name,
+        type: CONFIG.DND5E.abilityConsumptionTypes[consume.type]
+      }));
     }
+
+    // Warn that the resource item is missing.
+    if ( item.hasResource ) {
+      const isItem = ["ammo", "material", "charges"].includes(consume.type);
+      if ( isItem && !item.actor.items.get(consume.target) ) {
+        warnings.push(game.i18n.format("DND5E.ConsumeWarningNoSource", {
+          name: item.name, type: CONFIG.DND5E.abilityConsumptionTypes[consume.type]
+        }));
+      }
+    }
+
+    // Display warnings that the item or its resource item will be destroyed.
+    if ( item.type === "consumable" ) {
+      const type = game.i18n.localize(`DND5E.Consumable${consumableType.capitalize()}`);
+      if ( this._willLowerQuantity(item) && (quantity === 1) ) {
+        warnings.push(game.i18n.format("DND5E.AbilityUseConsumableDestroyHint", {type}));
+      }
+
+      const resource = item.actor.items.get(consume.target);
+      const qty = consume.amount || 1;
+      if ( resource && (resource.system.quantity === 1) && this._willLowerQuantity(resource, qty) ) {
+        warnings.push(game.i18n.format("DND5E.AbilityUseConsumableDestroyResourceHint", {type, name: resource.name}));
+      }
+    }
+
+    data.warnings = warnings;
   }
 
   /* -------------------------------------------- */
 
   /**
-   * Either flat or dice proficiency term based on configured setting.
-   * @type {string}
+   * Get whether an update for an item's limited uses will result in lowering its quantity.
+   * @param {Item5e} item       The item targeted for updates.
+   * @param {number} [consume]  The amount of limited uses to subtract.
+   * @returns {boolean}
+   * @private
    */
-  get term() {
-    return (game.settings.get("dnd5e", "proficiencyModifier") === "dice") ? this.dice : String(this.flat);
-  }
-
-  /* -------------------------------------------- */
-
-  /**
-   * Whether the proficiency is greater than zero.
-   * @type {boolean}
-   */
-  get hasProficiency() {
-    return (this._baseProficiency > 0) && (this.multiplier > 0);
-  }
-
-  /* -------------------------------------------- */
-
-  /**
-   * Override the default `toString` method to return flat proficiency for backwards compatibility in formula.
-   * @returns {string}  Flat proficiency value.
-   */
-  toString() {
-    return this.term;
+  static _willLowerQuantity(item, consume=1) {
+    const hasUses = item.hasLimitedUses;
+    const uses = item.system.uses;
+    if ( !hasUses || !uses.autoDestroy ) return false;
+    const value = uses.value - consume;
+    return value <= 0;
   }
 }
 
 /**
  * Override and extend the basic Item implementation.
  */
-class Item5e extends Item {
+class Item5e extends SystemDocumentMixin(Item) {
 
   /**
    * Caches an item linked to this one, such as a subclass associated with a class.
@@ -5789,59 +12499,42 @@ class Item5e extends Item {
   /* -------------------------------------------- */
 
   /**
-   * Which ability score modifier is used by this item?
-   * @type {string|null}
+   * Is this Item an activatable item?
+   * @type {boolean}
    */
-  get abilityMod() {
-
-    // Case 1 - defined directly by the item
-    if ( this.system.ability ) return this.system.ability;
-
-    // Case 2 - inferred from a parent actor
-    if ( this.actor && ("abilities" in this.actor.system) ) {
-      const abilities = this.actor.system.abilities;
-      const spellcasting = this.actor.system.attributes.spellcasting;
-
-      // Special rules per item type
-      switch ( this.type ) {
-        case "consumable":
-          if ( this.system.consumableType === "scroll" ) return spellcasting || "int";
-          break;
-        case "spell":
-          return spellcasting || "int";
-        case "tool":
-          return "int";
-        case "weapon":
-          // Finesse weapons - Str or Dex (PHB pg. 147)
-          if ( this.system.properties.fin === true ) {
-            return abilities.dex.mod >= abilities.str.mod ? "dex" : "str";
-          }
-          // Ranged weapons - Dex (PH p.194)
-          if ( ["simpleR", "martialR"].includes(this.system.weaponType) ) return "dex";
-          break;
-      }
-
-      // If a specific attack type is defined
-      if ( this.hasAttack ) return {
-        mwak: "str",
-        rwak: "dex",
-        msak: spellcasting || "int",
-        rsak: spellcasting || "int"
-      }[this.system.actionType];
-    }
-
-    // Case 3 - unknown
-    return null;
+  get isActive() {
+    return this.system.isActive ?? false;
   }
 
-  /* -------------------------------------------- */
+  /**
+   * Which ability score modifier is used by this item?
+   * @type {string|null}
+   * @see {@link ActionTemplate#abilityMod}
+   */
+  get abilityMod() {
+    return this.system.abilityMod ?? null;
+  }
+
+  /* --------------------------------------------- */
 
   /**
-   * Return an item's identifier.
-   * @type {string}
+   * What is the critical hit threshold for this item, if applicable?
+   * @type {number|null}
+   * @see {@link ActionTemplate#criticalThreshold}
    */
-  get identifier() {
-    return this.system.identifier || this.name.slugify({strict: true});
+  get criticalThreshold() {
+    return this.system.criticalThreshold ?? null;
+  }
+
+  /* --------------------------------------------- */
+
+  /**
+   * Does the Item implement an ability check as part of its usage?
+   * @type {boolean}
+   * @see {@link ActionTemplate#hasAbilityCheck}
+   */
+  get hasAbilityCheck() {
+    return this.system.hasAbilityCheck ?? false;
   }
 
   /* -------------------------------------------- */
@@ -5857,11 +12550,23 @@ class Item5e extends Item {
   /* -------------------------------------------- */
 
   /**
+   * Does the Item have an area of effect target?
+   * @type {boolean}
+   * @see {@link ActivatedEffectTemplate#hasAreaTarget}
+   */
+  get hasAreaTarget() {
+    return this.system.hasAreaTarget ?? false;
+  }
+
+  /* -------------------------------------------- */
+
+  /**
    * Does the Item implement an attack roll as part of its usage?
    * @type {boolean}
+   * @see {@link ActionTemplate#hasAttack}
    */
   get hasAttack() {
-    return ["mwak", "rwak", "msak", "rsak"].includes(this.system.actionType);
+    return this.system.hasAttack ?? false;
   }
 
   /* -------------------------------------------- */
@@ -5869,19 +12574,98 @@ class Item5e extends Item {
   /**
    * Does the Item implement a damage roll as part of its usage?
    * @type {boolean}
+   * @see {@link ActionTemplate#hasDamage}
    */
   get hasDamage() {
-    return !!(this.system.damage && this.system.damage.parts.length);
+    return this.system.hasDamage ?? false;
   }
 
   /* -------------------------------------------- */
 
   /**
-   * Does the Item implement a versatile damage roll as part of its usage?
+   * Does the Item target one or more distinct targets?
    * @type {boolean}
+   * @see {@link ActivatedEffectTemplate#hasIndividualTarget}
    */
-  get isVersatile() {
-    return !!(this.hasDamage && this.system.damage.versatile);
+  get hasIndividualTarget() {
+    return this.system.hasIndividualTarget ?? false;
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * Is this Item limited in its ability to be used by charges or by recharge?
+   * @type {boolean}
+   * @see {@link ActivatedEffectTemplate#hasLimitedUses}
+   * @see {@link FeatData#hasLimitedUses}
+   */
+  get hasLimitedUses() {
+    return this.system.hasLimitedUses ?? false;
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * Does this Item draw from a resource?
+   * @type {boolean}
+   * @see {@link ActivatedEffectTemplate#hasResource}
+   */
+  get hasResource() {
+    return this.system.hasResource ?? false;
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * Does this Item draw from ammunition?
+   * @type {boolean}
+   * @see {@link ActivatedEffectTemplate#hasAmmo}
+   */
+  get hasAmmo() {
+    return this.system.hasAmmo ?? false;
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * Does the Item implement a saving throw as part of its usage?
+   * @type {boolean}
+   * @see {@link ActionTemplate#hasSave}
+   */
+  get hasSave() {
+    return this.system.hasSave ?? false;
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * Does the Item have a target?
+   * @type {boolean}
+   * @see {@link ActivatedEffectTemplate#hasTarget}
+   */
+  get hasTarget() {
+    return this.system.hasTarget ?? false;
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * Return an item's identifier.
+   * @type {string}
+   */
+  get identifier() {
+    return this.system.identifier || this.name.slugify({strict: true});
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * Is this item any of the armor subtypes?
+   * @type {boolean}
+   * @see {@link EquipmentTemplate#isArmor}
+   */
+  get isArmor() {
+    return this.system.isArmor ?? false;
   }
 
   /* -------------------------------------------- */
@@ -5889,9 +12673,23 @@ class Item5e extends Item {
   /**
    * Does the item provide an amount of healing instead of conventional damage?
    * @type {boolean}
+   * @see {@link ActionTemplate#isHealing}
    */
   get isHealing() {
-    return (this.system.actionType === "heal") && this.system.damage.parts.length;
+    return this.system.isHealing ?? false;
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * Is this item a separate large object like a siege engine or vehicle component that is
+   * usually mounted on fixtures rather than equipped, and has its own AC and HP?
+   * @type {boolean}
+   * @see {@link EquipmentData#isMountable}
+   * @see {@link WeaponData#isMountable}
+   */
+  get isMountable() {
+    return this.system.isMountable ?? false;
   }
 
   /* -------------------------------------------- */
@@ -5904,6 +12702,17 @@ class Item5e extends Item {
   get isOriginalClass() {
     if ( this.type !== "class" || !this.isEmbedded ) return null;
     return this.id === this.parent.system.details.originalClass;
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * Does the Item implement a versatile damage roll as part of its usage?
+   * @type {boolean}
+   * @see {@link ActionTemplate#isVersatile}
+   */
+  get isVersatile() {
+    return this.system.isVersatile ?? false;
   }
 
   /* -------------------------------------------- */
@@ -5934,81 +12743,31 @@ class Item5e extends Item {
   /* -------------------------------------------- */
 
   /**
-   * Does the Item implement a saving throw as part of its usage?
-   * @type {boolean}
-   */
-  get hasSave() {
-    const save = this.system.save || {};
-    return !!(save.ability && save.scaling);
-  }
-
-  /* --------------------------------------------- */
-
-  /**
-   * Does the Item implement an ability check as part of its usage?
-   * @type {boolean}
-   */
-  get hasAbilityCheck() {
-    return (this.system.actionType === "abil") && this.system.ability;
-  }
-
-  /* -------------------------------------------- */
-
-  /**
-   * Does the Item have a target?
-   * @type {boolean}
-   */
-  get hasTarget() {
-    const target = this.system.target;
-    return target && !["none", ""].includes(target.type);
-  }
-
-  /* -------------------------------------------- */
-
-  /**
-   * Does the Item have an area of effect target?
-   * @type {boolean}
-   */
-  get hasAreaTarget() {
-    const target = this.system.target;
-    return target && (target.type in CONFIG.DND5E.areaTargetTypes);
-  }
-
-  /* -------------------------------------------- */
-
-  /**
-   * Is this Item limited in its ability to be used by charges or by recharge?
-   * @type {boolean}
-   */
-  get hasLimitedUses() {
-    let recharge = this.system.recharge || {};
-    let uses = this.system.uses || {};
-    return !!recharge.value || (uses.per && (uses.max > 0));
-  }
-
-  /* -------------------------------------------- */
-
-  /**
-   * Is this item any of the armor subtypes?
-   * @type {boolean}
-   */
-  get isArmor() {
-    return this.system.armor?.type in CONFIG.DND5E.armorTypes;
-  }
-
-  /* -------------------------------------------- */
-
-  /**
    * Retrieve scale values for current level from advancement data.
    * @type {object}
    */
   get scaleValues() {
-    if ( !["class", "subclass"].includes(this.type) || !this.advancement.byType.ScaleValue ) return {};
-    const level = this.type === "class" ? this.system.levels : this.class?.system.levels ?? 0;
+    if ( !this.advancement.byType.ScaleValue ) return {};
+    const level = this.type === "class" ? this.system.levels : this.type === "subclass" ? this.class?.system.levels
+      : this.parent?.system.details.level ?? 0;
     return this.advancement.byType.ScaleValue.reduce((obj, advancement) => {
       obj[advancement.identifier] = advancement.valueForLevel(level);
       return obj;
     }, {});
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * Does this item scale with any kind of consumption?
+   * @type {string|null}
+   */
+  get usageScaling() {
+    const { level, preparation, consume } = this.system;
+    const isLeveled = (this.type === "spell") && (level > 0);
+    if ( isLeveled && CONFIG.DND5E.spellUpcastModes.includes(preparation.mode) ) return "slot";
+    else if ( isLeveled && this.hasResource && consume.scale ) return "resource";
+    return null;
   }
 
   /* -------------------------------------------- */
@@ -6163,23 +12922,29 @@ class Item5e extends Item {
 
     // Ability Activation Label
     const act = this.system.activation ?? {};
-    if ( ["none", ""].includes(act.type) ) act.type = null;   // Backwards compatibility
-    this.labels.activation = act.type ? [act.cost, C.abilityActivationTypes[act.type]].filterJoin(" ") : "";
+    if ( !act.type ) act.type = null;   // Backwards compatibility
+    this.labels.activation = act.type ? [
+      (act.type in C.staticAbilityActivationTypes) ? null : act.cost,
+      C.abilityActivationTypes[act.type]
+    ].filterJoin(" ") : "";
 
     // Target Label
     let tgt = this.system.target ?? {};
     if ( ["none", ""].includes(tgt.type) ) tgt.type = null;   // Backwards compatibility
     if ( [null, "self"].includes(tgt.type) ) tgt.value = tgt.units = null;
     else if ( tgt.units === "touch" ) tgt.value = null;
-    this.labels.target = tgt.type
-      ? [tgt.value, C.distanceUnits[tgt.units], C.targetTypes[tgt.type]].filterJoin(" ") : "";
+
+    if ( this.hasTarget ) {
+      this.labels.target = [tgt.value, C.distanceUnits[tgt.units], C.targetTypes[tgt.type]].filterJoin(" ");
+    }
 
     // Range Label
     let rng = this.system.range ?? {};
     if ( ["none", ""].includes(rng.units) ) rng.units = null; // Backwards compatibility
     if ( [null, "touch", "self"].includes(rng.units) ) rng.value = rng.long = null;
-    this.labels.range = rng.units
-      ? [rng.value, rng.long ? `/ ${rng.long}` : null, C.distanceUnits[rng.units]].filterJoin(" ") : "";
+    if ( this.isActive && rng.units ) {
+      this.labels.range = [rng.value, rng.long ? `/ ${rng.long}` : null, C.distanceUnits[rng.units]].filterJoin(" ");
+    } else this.labels.range = game.i18n.localize("DND5E.None");
 
     // Recharge Label
     let chg = this.system.recharge ?? {};
@@ -6214,22 +12979,38 @@ class Item5e extends Item {
     this.advancement = {
       byId: {},
       byLevel: Object.fromEntries(
-        Array.fromRange(CONFIG.DND5E.maxLevel + 1).slice(minAdvancementLevel).map(l => [l, []])
+        Array.fromRange(CONFIG.DND5E.maxLevel + 1, minAdvancementLevel).map(l => [l, []])
       ),
       byType: {},
       needingConfiguration: []
     };
     for ( const advancement of this.system.advancement ?? [] ) {
-      if ( !(advancement instanceof Advancement$1) ) continue;
+      if ( !(advancement instanceof Advancement) ) continue;
       this.advancement.byId[advancement.id] = advancement;
       this.advancement.byType[advancement.type] ??= [];
       this.advancement.byType[advancement.type].push(advancement);
-      advancement.levels.forEach(l => this.advancement.byLevel[l].push(advancement));
+      advancement.levels.forEach(l => this.advancement.byLevel[l]?.push(advancement));
       if ( !advancement.levels.length ) this.advancement.needingConfiguration.push(advancement);
     }
     Object.entries(this.advancement.byLevel).forEach(([lvl, data]) => data.sort((a, b) => {
       return a.sortingValueForLevel(lvl).localeCompare(b.sortingValueForLevel(lvl));
     }));
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * Determine an item's proficiency level based on its parent actor's proficiencies.
+   * @protected
+   */
+  _prepareProficiency() {
+    if ( !["spell", "weapon", "equipment", "tool", "feat", "consumable"].includes(this.type) ) return;
+    if ( !this.actor?.system.attributes?.prof ) {
+      this.system.prof = new Proficiency(0, 0);
+      return;
+    }
+
+    this.system.prof = new Proficiency(this.actor.system.attributes.prof, this.system.proficiencyMultiplier ?? 0);
   }
 
   /* -------------------------------------------- */
@@ -6242,10 +13023,7 @@ class Item5e extends Item {
   prepareFinalAttributes() {
 
     // Proficiency
-    if ( this.actor?.system.attributes?.prof ) {
-      const isProficient = (this.type === "spell") || this.system.proficient; // Always proficient in spell attacks.
-      this.system.prof = new Proficiency(this.actor?.system.attributes.prof, isProficient);
-    }
+    this._prepareProficiency();
 
     // Class data
     if ( this.type === "class" ) this.system.isOriginalClass = this.isOriginalClass;
@@ -6253,7 +13031,7 @@ class Item5e extends Item {
     // Action usage
     if ( "actionType" in this.system ) {
       this.labels.abilityCheck = game.i18n.format("DND5E.AbilityPromptTitle", {
-        ability: CONFIG.DND5E.abilities[this.system.ability]
+        ability: CONFIG.DND5E.abilities[this.system.ability]?.label ?? ""
       });
 
       // Saving throws
@@ -6320,7 +13098,7 @@ class Item5e extends Item {
     }
 
     // Update labels
-    const abl = CONFIG.DND5E.abilities[save.ability] ?? "";
+    const abl = CONFIG.DND5E.abilities[save.ability]?.label ?? "";
     this.labels.save = game.i18n.format("DND5E.SaveDC", {dc: save.dc || "", ability: abl});
     return save.dc;
   }
@@ -6351,12 +13129,12 @@ class Item5e extends Item {
     if ( !this.isOwned ) return {rollData, parts};
 
     // Ability score modifier
-    parts.push("@mod");
+    if ( this.system.ability !== "none" ) parts.push("@mod");
 
-    // Add proficiency bonus if an explicit proficiency flag is present or for non-item features
-    if ( !["weapon", "consumable"].includes(this.type) || this.system.proficient ) {
+    // Add proficiency bonus.
+    if ( this.system.prof?.hasProficiency ) {
       parts.push("@prof");
-      if ( this.system.prof?.hasProficiency ) rollData.prof = this.system.prof.term;
+      rollData.prof = this.system.prof.term;
     }
 
     // Actor-level global bonus to attack rolls
@@ -6364,17 +13142,15 @@ class Item5e extends Item {
     if ( actorBonus.attack ) parts.push(actorBonus.attack);
 
     // One-time bonus provided by consumed ammunition
-    if ( (this.system.consume?.type === "ammo") && this.actor.items ) {
-      const ammoItem = this.actor.items.get(this.system.consume.target);
-      if ( ammoItem ) {
-        const ammoItemQuantity = ammoItem.system.quantity;
-        const ammoCanBeConsumed = ammoItemQuantity && (ammoItemQuantity - (this.system.consume.amount ?? 0) >= 0);
-        const ammoItemAttackBonus = ammoItem.system.attackBonus;
-        const ammoIsTypeConsumable = (ammoItem.type === "consumable") && (ammoItem.system.consumableType === "ammo");
-        if ( ammoCanBeConsumed && ammoItemAttackBonus && ammoIsTypeConsumable ) {
-          parts.push("@ammo");
-          rollData.ammo = ammoItemAttackBonus;
-        }
+    const ammo = this.hasAmmo ? this.actor.items.get(this.system.consume.target) : null;
+    if ( ammo ) {
+      const ammoItemQuantity = ammo.system.quantity;
+      const ammoCanBeConsumed = ammoItemQuantity && (ammoItemQuantity - (this.system.consume.amount ?? 0) >= 0);
+      const ammoItemAttackBonus = ammo.system.attackBonus;
+      const ammoIsTypeConsumable = (ammo.type === "consumable") && (ammo.system.consumableType === "ammo");
+      if ( ammoCanBeConsumed && ammoItemAttackBonus && ammoIsTypeConsumable ) {
+        parts.push("@ammo");
+        rollData.ammo = ammoItemAttackBonus;
       }
     }
 
@@ -6383,30 +13159,6 @@ class Item5e extends Item {
     const formula = simplifyRollFormula(roll.formula) || "0";
     this.labels.toHit = !/^[+-]/.test(formula) ? `+ ${formula}` : formula;
     return {rollData, parts};
-  }
-
-  /* -------------------------------------------- */
-
-  /**
-   * Retrieve an item's critical hit threshold. Uses the smallest value from among the following sources:
-   * - item document
-   * - item document's actor (if it has one)
-   * - item document's ammunition (if it has any)
-   * - the constant '20'
-   * @returns {number|null}  The minimum value that must be rolled to be considered a critical hit.
-   */
-  getCriticalThreshold() {
-    const actorFlags = this.actor.flags.dnd5e || {};
-    if ( !this.hasAttack ) return null;
-    let actorThreshold = null;
-    let itemThreshold = this.system.critical?.threshold ?? Infinity;
-    let ammoThreshold = Infinity;
-    if ( this.type === "weapon" ) actorThreshold = actorFlags.weaponCriticalThreshold;
-    else if ( this.type === "spell" ) actorThreshold = actorFlags.spellCriticalThreshold;
-    if ( this.system.consume?.type === "ammo" ) {
-      ammoThreshold = this.actor.items.get(this.system.consume.target)?.system.critical.threshold ?? Infinity;
-    }
-    return Math.min(itemThreshold, ammoThreshold, actorThreshold ?? 20);
   }
 
   /* -------------------------------------------- */
@@ -6503,14 +13255,12 @@ class Item5e extends Item {
    * Configuration data for an item usage being prepared.
    *
    * @typedef {object} ItemUseConfiguration
-   * @property {boolean} createMeasuredTemplate  Trigger a template creation
-   * @property {boolean} consumeQuantity         Should the item's quantity be consumed?
-   * @property {boolean} consumeRecharge         Should a recharge be consumed?
-   * @property {boolean} consumeResource         Should a linked (non-ammo) resource be consumed?
-   * @property {number|string|null} consumeSpellLevel  Specific spell level to consume, or "pact" for pact level.
-   * @property {boolean} consumeSpellSlot        Should any spell slot be consumed?
-   * @property {boolean} consumeUsage            Should limited uses be consumed?
-   * @property {boolean} needsConfiguration      Is user-configuration needed?
+   * @property {boolean} createMeasuredTemplate     Should this item create a template?
+   * @property {boolean} consumeResource            Should this item consume a (non-ammo) resource?
+   * @property {boolean} consumeSpellSlot           Should this item (a spell) consume a spell slot?
+   * @property {boolean} consumeUsage               Should this item consume its limited uses or recharge?
+   * @property {string|number|null} slotLevel       The spell slot type or level to consume by default.
+   * @property {number|null} resourceAmount         The amount to consume by default when scaling with consumption.
    */
 
   /**
@@ -6524,21 +13274,6 @@ class Item5e extends Item {
    * @property {object} flags             Additional flags added to the chat message.
    * @property {Event} event              The browser event which triggered the item usage, if any.
    */
-
-  /**
-   * Trigger an item usage, optionally creating a chat message with followup actions.
-   * @param {ItemUseOptions} [options]           Options used for configuring item usage.
-   * @returns {Promise<ChatMessage|object|void>} Chat message if options.createMessage is true, message data if it is
-   *                                             false, and nothing if the roll wasn't performed.
-   * @deprecated since 2.0 in favor of `Item5e#use`, targeted for removal in 2.4
-   */
-  async roll(options={}) {
-    foundry.utils.logCompatibilityWarning(
-      "Item5e#roll has been renamed Item5e#use. Support for the old name will be removed in future versions.",
-      { since: "DnD5e 2.0", until: "DnD5e 2.4" }
-    );
-    return this.use(undefined, options);
-  }
 
   /**
    * Trigger an item usage, optionally creating a chat message with followup actions.
@@ -6559,25 +13294,13 @@ class Item5e extends Item {
       "flags.dnd5e.use": {type: this.type, itemId: this.id, itemUuid: this.uuid}
     }, options);
 
-    // Reference aspects of the item data necessary for usage
-    const resource = is.consume || {};        // Resource consumption
-    const isSpell = item.type === "spell";    // Does the item require a spell slot?
-    const requireSpellSlot = isSpell && (is.level > 0) && CONFIG.DND5E.spellUpcastModes.includes(is.preparation.mode);
-
     // Define follow-up actions resulting from the item usage
-    config = foundry.utils.mergeObject({
-      createMeasuredTemplate: item.hasAreaTarget,
-      consumeQuantity: is.uses?.autoDestroy ?? false,
-      consumeRecharge: !!is.recharge?.value,
-      consumeResource: !!resource.target && (!item.hasAttack || (resource.type !== "ammo")),
-      consumeSpellLevel: requireSpellSlot ? is.preparation.mode === "pact" ? "pact" : is.level : null,
-      consumeSpellSlot: requireSpellSlot,
-      consumeUsage: !!is.uses?.per && (is.uses?.max > 0)
-    }, config);
-
-    // Display a configuration dialog to customize the usage
-    if ( config.needsConfiguration === undefined ) config.needsConfiguration = config.createMeasuredTemplate
-      || config.consumeRecharge || config.consumeResource || config.consumeSpellSlot || config.consumeUsage;
+    if ( config.consumeSlotLevel ) {
+      console.warn("You are passing 'consumeSlotLevel' to the ItemUseConfiguration object, which now expects a key as 'slotLevel'.");
+      config.slotLevel = config.consumeSlotLevel;
+      delete config.consumeSlotLevel;
+    }
+    config = foundry.utils.mergeObject(this._getUsageConfig(), config);
 
     /**
      * A hook event that fires before an item usage is configured.
@@ -6590,24 +13313,35 @@ class Item5e extends Item {
      */
     if ( Hooks.call("dnd5e.preUseItem", item, config, options) === false ) return;
 
+    // Are any default values necessitating a prompt?
+    const needsConfiguration = Object.values(config).includes(true);
+
     // Display configuration dialog
-    if ( (options.configureDialog !== false) && config.needsConfiguration ) {
-      const configuration = await AbilityUseDialog.create(item);
+    if ( (options.configureDialog !== false) && needsConfiguration ) {
+      const configuration = await AbilityUseDialog.create(item, config);
       if ( !configuration ) return;
       foundry.utils.mergeObject(config, configuration);
     }
 
-    // Handle spell upcasting
-    if ( isSpell && (config.consumeSpellSlot || config.consumeSpellLevel) ) {
-      const upcastLevel = config.consumeSpellLevel === "pact" ? as.spells.pact.level
-        : parseInt(config.consumeSpellLevel);
-      if ( upcastLevel && (upcastLevel !== is.level) ) {
-        item = item.clone({"system.level": upcastLevel}, {keepId: true});
+    // Handle upcasting
+    if ( item.type === "spell" ) {
+      let level = null;
+      if ( config.slotLevel ) {
+        // A spell slot was consumed.
+        level = Number.isInteger(config.slotLevel) ? config.slotLevel
+          : config.slotLevel === "pact" ? as.spells.pact.level : parseInt(config.slotLevel.replace("spell", ""));
+      } else if ( config.resourceAmount ) {
+        // A quantity of the resource was consumed.
+        const diff = config.resourceAmount - (this.system.consume.amount || 1);
+        level = is.level + diff;
+      }
+      if ( level && (level !== is.level) ) {
+        item = item.clone({"system.level": level}, {keepId: true});
         item.prepareData();
         item.prepareFinalAttributes();
       }
     }
-    if ( isSpell ) foundry.utils.mergeObject(options.flags, {"dnd5e.use.spellLevel": item.system.level});
+    if ( item.type === "spell" ) foundry.utils.mergeObject(options.flags, {"dnd5e.use.spellLevel": item.system.level});
 
     /**
      * A hook event that fires before an item's resource consumption has been calculated.
@@ -6636,16 +13370,17 @@ class Item5e extends Item {
      * @param {object} usage.actorUpdates       Updates that will be applied to the actor.
      * @param {object} usage.itemUpdates        Updates that will be applied to the item being used.
      * @param {object[]} usage.resourceUpdates  Updates that will be applied to other items on the actor.
+     * @param {Set<string>} usage.deleteIds     Item ids for those which consumption will delete.
      * @returns {boolean}                       Explicitly return `false` to prevent item from being used.
      */
     if ( Hooks.call("dnd5e.itemUsageConsumption", item, config, options, usage) === false ) return;
 
     // Commit pending data updates
-    const { actorUpdates, itemUpdates, resourceUpdates } = usage;
+    const { actorUpdates, itemUpdates, resourceUpdates, deleteIds } = usage;
     if ( !foundry.utils.isEmpty(itemUpdates) ) await item.update(itemUpdates);
-    if ( config.consumeQuantity && (item.system.quantity === 0) ) await item.delete();
+    if ( !foundry.utils.isEmpty(deleteIds) ) await this.actor.deleteEmbeddedDocuments("Item", [...deleteIds]);
     if ( !foundry.utils.isEmpty(actorUpdates) ) await this.actor.update(actorUpdates);
-    if ( resourceUpdates.length ) await this.actor.updateEmbeddedDocuments("Item", resourceUpdates);
+    if ( !foundry.utils.isEmpty(resourceUpdates) ) await this.actor.updateEmbeddedDocuments("Item", resourceUpdates);
 
     // Prepare card data & display it if options.createMessage is true
     const cardData = await item.displayCard(options);
@@ -6655,7 +13390,13 @@ class Item5e extends Item {
     if ( config.createMeasuredTemplate ) {
       try {
         templates = await (dnd5e.canvas.AbilityTemplate.fromItem(item))?.drawPreview();
-      } catch(err) {}
+      } catch(err) {
+        Hooks.onError("Item5e#use", err, {
+          msg: game.i18n.localize("DND5E.PlaceTemplateError"),
+          log: "error",
+          notify: "error"
+        });
+      }
     }
 
     /**
@@ -6672,6 +13413,40 @@ class Item5e extends Item {
     return cardData;
   }
 
+  /**
+   * Prepare an object of possible and default values for item usage. A value that is `null` is ignored entirely.
+   * @returns {ItemUseConfiguration}  Configuration data for the roll.
+   */
+  _getUsageConfig() {
+    const { consume, uses, target, level, preparation } = this.system;
+
+    const config = {
+      consumeSpellSlot: null,
+      slotLevel: null,
+      consumeUsage: null,
+      consumeResource: null,
+      resourceAmount: null,
+      createMeasuredTemplate: null
+    };
+
+    const scaling = this.usageScaling;
+    if ( scaling === "slot" ) {
+      config.consumeSpellSlot = true;
+      config.slotLevel = (preparation?.mode === "pact") ? "pact" : `spell${level}`;
+    } else if ( scaling === "resource" ) {
+      config.resourceAmount = consume.amount || 1;
+    }
+    if ( this.hasLimitedUses ) config.consumeUsage = uses.prompt;
+    if ( this.hasResource ) {
+      config.consumeResource = true;
+      // Do not suggest consuming your own uses if also consuming them through resources.
+      if ( consume.target === this.id ) config.consumeUsage = null;
+    }
+    if ( game.user.can("TEMPLATE_CREATE") && this.hasAreaTarget ) config.createMeasuredTemplate = target.prompt;
+
+    return config;
+  }
+
   /* -------------------------------------------- */
 
   /**
@@ -6681,86 +13456,103 @@ class Item5e extends Item {
    * @returns {object|boolean}             A set of data changes to apply when the item is used, or false.
    * @protected
    */
-  _getUsageUpdates({
-    consumeQuantity, consumeRecharge, consumeResource, consumeSpellSlot,
-    consumeSpellLevel, consumeUsage}) {
+  _getUsageUpdates(config) {
     const actorUpdates = {};
     const itemUpdates = {};
     const resourceUpdates = [];
+    const deleteIds = new Set();
 
-    // Consume Recharge
-    if ( consumeRecharge ) {
-      const recharge = this.system.recharge || {};
-      if ( recharge.charged === false ) {
-        ui.notifications.warn(game.i18n.format("DND5E.ItemNoUses", {name: this.name}));
-        return false;
-      }
-      itemUpdates["system.recharge.charged"] = false;
+    // Consume own limited uses or recharge
+    if ( config.consumeUsage ) {
+      const canConsume = this._handleConsumeUses(itemUpdates, actorUpdates, resourceUpdates, deleteIds);
+      if ( canConsume === false ) return false;
     }
 
     // Consume Limited Resource
-    if ( consumeResource ) {
-      const canConsume = this._handleConsumeResource(itemUpdates, actorUpdates, resourceUpdates);
+    if ( config.consumeResource ) {
+      const canConsume = this._handleConsumeResource(config, itemUpdates, actorUpdates, resourceUpdates, deleteIds);
       if ( canConsume === false ) return false;
     }
 
     // Consume Spell Slots
-    if ( consumeSpellSlot && consumeSpellLevel ) {
-      if ( Number.isNumeric(consumeSpellLevel) ) consumeSpellLevel = `spell${consumeSpellLevel}`;
-      const level = this.actor?.system.spells[consumeSpellLevel];
+    if ( config.consumeSpellSlot ) {
+      const level = this.actor?.system.spells[config.slotLevel];
       const spells = Number(level?.value ?? 0);
       if ( spells === 0 ) {
-        const labelKey = consumeSpellLevel === "pact" ? "DND5E.SpellProgPact" : `DND5E.SpellLevel${this.system.level}`;
+        const labelKey = config.slotLevel === "pact" ? "DND5E.SpellProgPact" : `DND5E.SpellLevel${this.system.level}`;
         const label = game.i18n.localize(labelKey);
         ui.notifications.warn(game.i18n.format("DND5E.SpellCastNoSlots", {name: this.name, level: label}));
         return false;
       }
-      actorUpdates[`system.spells.${consumeSpellLevel}.value`] = Math.max(spells - 1, 0);
-    }
-
-    // Consume Limited Usage
-    if ( consumeUsage ) {
-      const uses = this.system.uses || {};
-      const available = Number(uses.value ?? 0);
-      let used = false;
-      const remaining = Math.max(available - 1, 0);
-      if ( available >= 1 ) {
-        used = true;
-        itemUpdates["system.uses.value"] = remaining;
-      }
-
-      // Reduce quantity if not reducing usages or if usages hit zero, and we are set to consumeQuantity
-      if ( consumeQuantity && (!used || (remaining === 0)) ) {
-        const q = Number(this.system.quantity ?? 1);
-        if ( q >= 1 ) {
-          used = true;
-          itemUpdates["system.quantity"] = Math.max(q - 1, 0);
-          itemUpdates["system.uses.value"] = uses.max ?? 1;
-        }
-      }
-
-      // If the item was not used, return a warning
-      if ( !used ) {
-        ui.notifications.warn(game.i18n.format("DND5E.ItemNoUses", {name: this.name}));
-        return false;
-      }
+      actorUpdates[`system.spells.${config.slotLevel}.value`] = Math.max(spells - 1, 0);
     }
 
     // Return the configured usage
-    return {itemUpdates, actorUpdates, resourceUpdates};
+    return {itemUpdates, actorUpdates, resourceUpdates, deleteIds};
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * Handle update actions required when consuming an item's uses or recharge
+   * @param {object} itemUpdates        An object of data updates applied to this item
+   * @param {object} actorUpdates       An object of data updates applied to the item owner (Actor)
+   * @param {object[]} resourceUpdates  An array of updates to apply to other items owned by the actor
+   * @param {Set<string>} deleteIds     A set of item ids that will be deleted off the actor
+   * @returns {boolean|void}            Return false to block further progress, or return nothing to continue
+   * @protected
+   */
+  _handleConsumeUses(itemUpdates, actorUpdates, resourceUpdates, deleteIds) {
+    const recharge = this.system.recharge || {};
+    const uses = this.system.uses || {};
+    const quantity = this.system.quantity ?? 1;
+    let used = false;
+
+    // Consume recharge.
+    if ( recharge.value ) {
+      if ( recharge.charged ) {
+        itemUpdates["system.recharge.charged"] = false;
+        used = true;
+      }
+    }
+
+    // Consume uses (or quantity).
+    else if ( uses.max && uses.per && (uses.value > 0) ) {
+      const remaining = Math.max(uses.value - 1, 0);
+
+      if ( remaining > 0 || (!remaining && !uses.autoDestroy) ) {
+        used = true;
+        itemUpdates["system.uses.value"] = remaining;
+      } else if ( quantity >= 2 ) {
+        used = true;
+        itemUpdates["system.quantity"] = quantity - 1;
+        itemUpdates["system.uses.value"] = uses.max;
+      } else if ( quantity === 1 ) {
+        used = true;
+        deleteIds.add(this.id);
+      }
+    }
+
+    // If the item was not used, return a warning
+    if ( !used ) {
+      ui.notifications.warn(game.i18n.format("DND5E.ItemNoUses", {name: this.name}));
+      return false;
+    }
   }
 
   /* -------------------------------------------- */
 
   /**
    * Handle update actions required when consuming an external resource
-   * @param {object} itemUpdates        An object of data updates applied to this item
-   * @param {object} actorUpdates       An object of data updates applied to the item owner (Actor)
-   * @param {object[]} resourceUpdates  An array of updates to apply to other items owned by the actor
-   * @returns {boolean|void}            Return false to block further progress, or return nothing to continue
+   * @param {ItemUseConfiguration} usageConfig  Configuration data for an item usage being prepared.
+   * @param {object} itemUpdates                An object of data updates applied to this item
+   * @param {object} actorUpdates               An object of data updates applied to the item owner (Actor)
+   * @param {object[]} resourceUpdates          An array of updates to apply to other items owned by the actor
+   * @param {Set<string>} deleteIds             A set of item ids that will be deleted off the actor
+   * @returns {boolean|void}                    Return false to block further progress, or return nothing to continue
    * @protected
    */
-  _handleConsumeResource(itemUpdates, actorUpdates, resourceUpdates) {
+  _handleConsumeResource(usageConfig, itemUpdates, actorUpdates, resourceUpdates, deleteIds) {
     const consume = this.system.consume || {};
     if ( !consume.type ) return;
 
@@ -6773,7 +13565,7 @@ class Item5e extends Item {
 
     // Identify the consumed resource and its current quantity
     let resource = null;
-    let amount = Number(consume.amount ?? 1);
+    let amount = usageConfig.resourceAmount ? usageConfig.resourceAmount : (consume.amount || 1);
     let quantity = 0;
     switch ( consume.type ) {
       case "attribute":
@@ -6830,7 +13622,7 @@ class Item5e extends Item {
           if ( consume.target === "largest" ) sort *= -1;
           return sort;
         });
-        let toConsume = consume.amount;
+        let toConsume = amount;
         for ( const cls of resource ) {
           const available = (toConsume > 0 ? cls.system.levels : 0) - cls.system.hitDiceUsed;
           const delta = toConsume > 0 ? Math.min(toConsume, available) : Math.max(toConsume, available);
@@ -6845,6 +13637,16 @@ class Item5e extends Item {
         const uses = resource.system.uses || {};
         const recharge = resource.system.recharge || {};
         const update = {_id: consume.target};
+        // Reduce quantity of, or delete, the external resource.
+        if ( uses.per && uses.max && uses.autoDestroy && (remaining === 0) ) {
+          update["system.quantity"] = Math.max(resource.system.quantity - 1, 0);
+          update["system.uses.value"] = uses.max ?? 1;
+          if ( update["system.quantity"] === 0 ) deleteIds.add(resource.id);
+          else resourceUpdates.push(update);
+          break;
+        }
+
+        // Regular consumption.
         if ( uses.per && uses.max ) update["system.uses.value"] = remaining;
         else if ( recharge.value ) update["system.recharge.charged"] = false;
         resourceUpdates.push(update);
@@ -6940,7 +13742,6 @@ class Item5e extends Item {
    */
   async getChatData(htmlOptions={}) {
     const data = this.toObject().system;
-    const labels = this.labels;
 
     // Rich text description
     data.description.value = await TextEditor.enrichHTML(data.description.value, {
@@ -6950,160 +13751,14 @@ class Item5e extends Item {
       ...htmlOptions
     });
 
-    // Item type specific properties
-    const props = [];
-    switch ( this.type ) {
-      case "consumable":
-        this._consumableChatData(data, labels, props); break;
-      case "equipment":
-        this._equipmentChatData(data, labels, props); break;
-      case "feat":
-        this._featChatData(data, labels, props); break;
-      case "loot":
-        this._lootChatData(data, labels, props); break;
-      case "spell":
-        this._spellChatData(data, labels, props); break;
-      case "tool":
-        this._toolChatData(data, labels, props); break;
-      case "weapon":
-        this._weaponChatData(data, labels, props); break;
-    }
+    // Type specific properties
+    data.properties = [
+      ...this.system.chatProperties ?? [],
+      ...this.system.equippableItemChatProperties ?? [],
+      ...this.system.activatedEffectChatProperties ?? []
+    ].filter(p => p);
 
-    // Equipment properties
-    if ( data.hasOwnProperty("equipped") && !["loot", "tool"].includes(this.type) ) {
-      if ( data.attunement === CONFIG.DND5E.attunementTypes.REQUIRED ) {
-        props.push(CONFIG.DND5E.attunements[CONFIG.DND5E.attunementTypes.REQUIRED]);
-      }
-      props.push(
-        game.i18n.localize(data.equipped ? "DND5E.Equipped" : "DND5E.Unequipped"),
-        game.i18n.localize(data.proficient ? "DND5E.Proficient" : "DND5E.NotProficient")
-      );
-    }
-
-    // Ability activation properties
-    if ( data.hasOwnProperty("activation") ) {
-      props.push(
-        labels.activation + (data.activation?.condition ? ` (${data.activation.condition})` : ""),
-        labels.target,
-        labels.range,
-        labels.duration
-      );
-    }
-
-    // Filter properties and return
-    data.properties = props.filter(p => !!p);
     return data;
-  }
-
-  /* -------------------------------------------- */
-
-  /**
-   * Prepare chat card data for consumable type items.
-   * @param {object} data     Copy of item data being use to display the chat message.
-   * @param {object} labels   Specially prepared item labels.
-   * @param {string[]} props  Existing list of properties to be displayed. *Will be mutated.*
-   * @private
-   */
-  _consumableChatData(data, labels, props) {
-    props.push(
-      CONFIG.DND5E.consumableTypes[data.consumableType],
-      `${data.uses.value}/${data.uses.max} ${game.i18n.localize("DND5E.Charges")}`
-    );
-    data.hasCharges = data.uses.value >= 0;
-  }
-
-  /* -------------------------------------------- */
-
-  /**
-   * Prepare chat card data for equipment type items.
-   * @param {object} data     Copy of item data being use to display the chat message.
-   * @param {object} labels   Specially prepared item labels.
-   * @param {string[]} props  Existing list of properties to be displayed. *Will be mutated.*
-   * @private
-   */
-  _equipmentChatData(data, labels, props) {
-    props.push(
-      CONFIG.DND5E.equipmentTypes[data.armor.type],
-      labels.armor || null,
-      data.stealth ? game.i18n.localize("DND5E.StealthDisadvantage") : null
-    );
-  }
-
-  /* -------------------------------------------- */
-
-  /**
-   * Prepare chat card data for items of the Feat type.
-   * @param {object} data     Copy of item data being use to display the chat message.
-   * @param {object} labels   Specially prepared item labels.
-   * @param {string[]} props  Existing list of properties to be displayed. *Will be mutated.*
-   * @private
-   */
-  _featChatData(data, labels, props) {
-    props.push(data.requirements);
-  }
-
-  /* -------------------------------------------- */
-
-  /**
-   * Prepare chat card data for loot type items.
-   * @param {object} data     Copy of item data being use to display the chat message.
-   * @param {object} labels   Specially prepared item labels.
-   * @param {string[]} props  Existing list of properties to be displayed. *Will be mutated.*
-   * @private
-   */
-  _lootChatData(data, labels, props) {
-    props.push(
-      game.i18n.localize("ITEM.TypeLoot"),
-      data.weight ? `${data.weight} ${game.i18n.localize("DND5E.AbbreviationLbs")}` : null
-    );
-  }
-
-  /* -------------------------------------------- */
-
-  /**
-   * Render a chat card for Spell type data.
-   * @param {object} data     Copy of item data being use to display the chat message.
-   * @param {object} labels   Specially prepared item labels.
-   * @param {string[]} props  Existing list of properties to be displayed. *Will be mutated.*
-   * @private
-   */
-  _spellChatData(data, labels, props) {
-    props.push(
-      labels.level,
-      labels.components.vsm + (labels.materials ? ` (${labels.materials})` : ""),
-      ...labels.components.tags
-    );
-  }
-
-  /* -------------------------------------------- */
-
-  /**
-   * Prepare chat card data for tool type items.
-   * @param {object} data     Copy of item data being use to display the chat message.
-   * @param {object} labels   Specially prepared item labels.
-   * @param {string[]} props  Existing list of properties to be displayed. *Will be mutated.*
-   * @private
-   */
-  _toolChatData(data, labels, props) {
-    props.push(
-      CONFIG.DND5E.abilities[data.ability] || null,
-      CONFIG.DND5E.proficiencyLevels[data.proficient || 0]
-    );
-  }
-
-  /* -------------------------------------------- */
-
-  /**
-   * Prepare chat card data for weapon type items.
-   * @param {object} data     Copy of item data being use to display the chat message.
-   * @param {object} labels   Specially prepared item labels.
-   * @param {string[]} props  Existing list of properties to be displayed. *Will be mutated.*
-   * @private
-   */
-  _weaponChatData(data, labels, props) {
-    props.push(
-      CONFIG.DND5E.weaponTypes[data.weaponType]
-    );
   }
 
   /* -------------------------------------------- */
@@ -7127,19 +13782,14 @@ class Item5e extends Item {
     if ( options.spellLevel ) rollData.item.level = options.spellLevel;
 
     // Handle ammunition consumption
-    delete this._ammo;
-    let ammo = null;
     let ammoUpdate = [];
     const consume = this.system.consume;
-    if ( consume?.type === "ammo" ) {
-      ammo = this.actor.items.get(consume.target);
-      if ( ammo?.system ) {
-        const q = ammo.system.quantity;
-        const consumeAmount = consume.amount ?? 0;
-        if ( q && (q - consumeAmount >= 0) ) {
-          this._ammo = ammo;
-          title += ` [${ammo.name}]`;
-        }
+    const ammo = this.hasAmmo ? this.actor.items.get(consume.target) : null;
+    if ( ammo ) {
+      const q = ammo.system.quantity;
+      const consumeAmount = consume.amount ?? 0;
+      if ( q && (q - consumeAmount >= 0) ) {
+        title += ` [${ammo.name}]`;
       }
 
       // Get pending ammunition update
@@ -7156,7 +13806,7 @@ class Item5e extends Item {
     const rollConfig = foundry.utils.mergeObject({
       actor: this.actor,
       data: rollData,
-      critical: this.getCriticalThreshold(),
+      critical: this.criticalThreshold,
       title,
       flavor: title,
       elvenAccuracy,
@@ -7274,11 +13924,11 @@ class Item5e extends Item {
     }
 
     // Only add the ammunition damage if the ammunition is a consumable with type 'ammo'
-    if ( this._ammo && (this._ammo.type === "consumable") && (this._ammo.system.consumableType === "ammo") ) {
+    const ammo = this.hasAmmo ? this.actor.items.get(this.system.consume.target) : null;
+    if ( ammo ) {
       parts.push("@ammo");
-      rollData.ammo = this._ammo.system.damage.parts.map(p => p[0]).join("+");
-      rollConfig.flavor += ` [${this._ammo.name}]`;
-      delete this._ammo;
+      rollData.ammo = ammo.system.damage.parts.map(p => p[0]).join("+");
+      rollConfig.flavor += ` [${ammo.name}]`;
     }
 
     // Factor in extra critical damage dice from the Barbarian's "Brutal Critical"
@@ -7507,79 +14157,12 @@ class Item5e extends Item {
    */
   async rollToolCheck(options={}) {
     if ( this.type !== "tool" ) throw new Error("Wrong item type!");
-
-    // Prepare roll data
-    const rollData = this.getRollData();
-    const abl = this.system.ability;
-    const parts = ["@mod", "@abilityCheckBonus"];
-    const title = `${this.name} - ${game.i18n.localize("DND5E.ToolCheck")}`;
-
-    // Add proficiency
-    if ( this.system.prof?.hasProficiency ) {
-      parts.push("@prof");
-      rollData.prof = this.system.prof.term;
-    }
-
-    // Add tool bonuses
-    if ( this.system.bonus ) {
-      parts.push("@toolBonus");
-      rollData.toolBonus = Roll.replaceFormulaData(this.system.bonus, rollData);
-    }
-
-    // Add ability-specific check bonus
-    const checkBonus = foundry.utils.getProperty(rollData, `abilities.${abl}.bonuses.check`);
-    if ( checkBonus ) rollData.abilityCheckBonus = Roll.replaceFormulaData(checkBonus, rollData);
-    else rollData.abilityCheckBonus = 0;
-
-    // Add global actor bonus
-    const globalBonus = this.actor.system.bonuses?.abilities || {};
-    if ( globalBonus.check ) {
-      parts.push("@checkBonus");
-      rollData.checkBonus = Roll.replaceFormulaData(globalBonus.check, rollData);
-    }
-
-    // Compose the roll data
-    const rollConfig = foundry.utils.mergeObject({
-      data: rollData,
-      title: title,
-      flavor: title,
-      dialogOptions: {
-        width: 400,
-        top: options.event ? options.event.clientY - 80 : null,
-        left: window.innerWidth - 710
-      },
-      chooseModifier: true,
-      halflingLucky: this.actor.getFlag("dnd5e", "halflingLucky" ),
-      reliableTalent: (this.system.proficient >= 1) && this.actor.getFlag("dnd5e", "reliableTalent"),
-      messageData: {
-        speaker: options.speaker || ChatMessage.getSpeaker({actor: this.actor}),
-        "flags.dnd5e.roll": {type: "tool", itemId: this.id, itemUuid: this.uuid}
-      }
-    }, options);
-    rollConfig.parts = parts.concat(options.parts ?? []);
-
-    /**
-     * A hook event that fires before a tool check is rolled for an Item.
-     * @function dnd5e.preRollToolCheck
-     * @memberof hookEvents
-     * @param {Item5e} item                  Item for which the roll is being performed.
-     * @param {D20RollConfiguration} config  Configuration data for the pending roll.
-     * @returns {boolean}                    Explicitly return false to prevent the roll from being performed.
-     */
-    if ( Hooks.call("dnd5e.preRollToolCheck", this, rollConfig) === false ) return;
-
-    const roll = await d20Roll(rollConfig);
-
-    /**
-     * A hook event that fires after a tool check has been rolled for an Item.
-     * @function dnd5e.rollToolCheck
-     * @memberof hookEvents
-     * @param {Item5e} item   Item for which the roll was performed.
-     * @param {D20Roll} roll  The resulting roll.
-     */
-    if ( roll ) Hooks.callAll("dnd5e.rollToolCheck", this, roll);
-
-    return roll;
+    return this.actor?.rollToolCheck(this.system.baseItem, {
+      ability: this.system.ability,
+      bonus: this.system.bonus,
+      prof: this.system.prof,
+      ...options
+    });
   }
 
   /* -------------------------------------------- */
@@ -7654,8 +14237,10 @@ class Item5e extends Item {
     const storedData = message.getFlag("dnd5e", "itemData");
     const item = storedData ? new this(storedData, {parent: actor}) : actor.items.get(card.dataset.itemId);
     if ( !item ) {
-      const err = game.i18n.format("DND5E.ActionWarningNoItem", {item: card.dataset.itemId, name: actor.name});
-      return ui.notifications.error(err);
+      ui.notifications.error(game.i18n.format("DND5E.ActionWarningNoItem", {
+        item: card.dataset.itemId, name: actor.name
+      }));
+      return null;
     }
     const spellLevel = parseInt(card.dataset.spellLevel) || null;
 
@@ -7689,8 +14274,14 @@ class Item5e extends Item {
         await item.rollToolCheck({event}); break;
       case "placeTemplate":
         try {
-          await dnd5e.canvas.AbilityTemplate.fromItem(item)?.drawPreview();
-        } catch(err) {}
+          await dnd5e.canvas.AbilityTemplate.fromItem(item, {"flags.dnd5e.spellLevel": spellLevel})?.drawPreview();
+        } catch(err) {
+          Hooks.onError("Item5e._onChatCardAction", err, {
+            msg: game.i18n.localize("DND5E.PlaceTemplateError"),
+            log: "error",
+            notify: "error"
+          });
+        }
         break;
       case "abilityCheck":
         targets = this._getChatCardTargets(card);
@@ -7753,7 +14344,7 @@ class Item5e extends Item {
   static _getChatCardTargets(card) {
     let targets = canvas.tokens.controlled.filter(t => !!t.actor);
     if ( !targets.length && game.user.character ) targets = targets.concat(game.user.character.getActiveTokens());
-    if ( !targets.length ) ui.notifications.warn(game.i18n.localize("DND5E.ActionWarningNoToken"));
+    if ( !targets.length ) ui.notifications.warn("DND5E.ActionWarningNoToken", {localize: true});
     return targets;
   }
 
@@ -7781,7 +14372,10 @@ class Item5e extends Item {
       throw new Error(`${type} advancement cannot be added to ${this.name}`);
     }
 
+    const createData = foundry.utils.deepClone(data);
     const advancement = new Advancement(data, {parent: this});
+    if ( advancement._preCreate(createData) === false ) return;
+
     const advancementCollection = this.toObject().system.advancement;
     advancementCollection.push(advancement.toObject());
     if ( source ) return this.updateSource({"system.advancement": advancementCollection});
@@ -7834,7 +14428,7 @@ class Item5e extends Item {
   deleteAdvancement(id, { source=false }={}) {
     if ( !this.system.advancement ) return this;
 
-    const advancementCollection = this.system.advancement.filter(a => a._id !== id);
+    const advancementCollection = this.toObject().system.advancement.filter(a => a._id !== id);
     if ( source ) return this.updateSource({"system.advancement": advancementCollection});
     return this.update({"system.advancement": advancementCollection});
   }
@@ -7881,7 +14475,7 @@ class Item5e extends Item {
 
   /** @inheritdoc */
   async _preCreate(data, options, user) {
-    await super._preCreate(data, options, user);
+    if ( (await super._preCreate(data, options, user)) === false ) return false;
 
     // Create class identifier based on name
     if ( ["class", "subclass"].includes(this.type) && !this.system.identifier ) {
@@ -7898,11 +14492,11 @@ class Item5e extends Item {
       case "spell":
         updates = this._onCreateOwnedSpell(data, isNPC);
         break;
-      case "tool":
-        updates = this._onCreateOwnedTool(data, isNPC);
-        break;
       case "weapon":
         updates = this._onCreateOwnedWeapon(data, isNPC);
+        break;
+      case "feat":
+        updates = this._onCreateOwnedFeature(data, isNPC);
         break;
     }
     if ( updates ) return this.updateSource(updates);
@@ -7926,12 +14520,12 @@ class Item5e extends Item {
 
   /** @inheritdoc */
   async _preUpdate(changed, options, user) {
-    await super._preUpdate(changed, options, user);
+    if ( (await super._preUpdate(changed, options, user)) === false ) return false;
     if ( (this.type !== "class") || !("levels" in (changed.system || {})) ) return;
 
     // Check to make sure the updated class level isn't below zero
     if ( changed.system.levels <= 0 ) {
-      ui.notifications.warn(game.i18n.localize("DND5E.MaxClassLevelMinimumWarn"));
+      ui.notifications.warn("DND5E.MaxClassLevelMinimumWarn", {localize: true});
       changed.system.levels = 1;
     }
 
@@ -7978,16 +14572,6 @@ class Item5e extends Item {
     if ( foundry.utils.getProperty(data, "system.equipped") === undefined ) {
       updates["system.equipped"] = isNPC;  // NPCs automatically equip equipment
     }
-    if ( foundry.utils.getProperty(data, "system.proficient") === undefined ) {
-      if ( isNPC ) {
-        updates["system.proficient"] = true;  // NPCs automatically have equipment proficiency
-      } else {
-        const armorProf = CONFIG.DND5E.armorProficienciesMap[this.system.armor?.type]; // Player characters check proficiency
-        const actorArmorProfs = this.parent.system.traits?.armorProf?.value || new Set();
-        updates["system.proficient"] = (armorProf === true) || actorArmorProfs.has(armorProf)
-          || actorArmorProfs.has(this.system.baseItem);
-      }
-    }
     return updates;
   }
 
@@ -8012,54 +14596,31 @@ class Item5e extends Item {
   /* -------------------------------------------- */
 
   /**
-   * Pre-creation logic for the automatic configuration of owned tool type Items.
-   * @param {object} data       Data for the newly created item.
-   * @param {boolean} isNPC     Is this actor an NPC?
-   * @returns {object}          Updates to apply to the item data.
-   * @private
-   */
-  _onCreateOwnedTool(data, isNPC) {
-    const updates = {};
-    if ( data.system?.proficient === undefined ) {
-      if ( isNPC ) updates["system.proficient"] = 1;
-      else {
-        const actorToolProfs = this.parent.system.traits?.toolProf?.value || new Set();
-        const proficient = actorToolProfs.has(this.system.toolType) || actorToolProfs.has(this.system.baseItem);
-        updates["system.proficient"] = Number(proficient);
-      }
-    }
-    return updates;
-  }
-
-  /* -------------------------------------------- */
-
-  /**
    * Pre-creation logic for the automatic configuration of owned weapon type Items.
    * @param {object} data       Data for the newly created item.
    * @param {boolean} isNPC     Is this actor an NPC?
-   * @returns {object}          Updates to apply to the item data.
+   * @returns {object|void}     Updates to apply to the item data.
    * @private
    */
   _onCreateOwnedWeapon(data, isNPC) {
-
-    // NPCs automatically equip items and are proficient with them
-    if ( isNPC ) {
-      const updates = {};
-      if ( !foundry.utils.hasProperty(data, "system.equipped") ) updates["system.equipped"] = true;
-      if ( !foundry.utils.hasProperty(data, "system.proficient") ) updates["system.proficient"] = true;
-      return updates;
-    }
-    if ( data.system?.proficient !== undefined ) return {};
-
-    // Some weapon types are always proficient
-    const weaponProf = CONFIG.DND5E.weaponProficienciesMap[this.system.weaponType];
+    if ( !isNPC ) return;
+    // NPCs automatically equip items.
     const updates = {};
-    if ( weaponProf === true ) updates["system.proficient"] = true;
+    if ( !foundry.utils.hasProperty(data, "system.equipped") ) updates["system.equipped"] = true;
+    return updates;
+  }
 
-    // Characters may have proficiency in this weapon type (or specific base weapon)
-    else {
-      const actorProfs = this.parent.system.traits?.weaponProf?.value || new Set();
-      updates["system.proficient"] = actorProfs.has(weaponProf) || actorProfs.has(this.system.baseItem);
+  /**
+   * Pre-creation logic for the automatic configuration of owned feature type Items.
+   * @param {object} data       Data for the newly created item.
+   * @param {boolean} isNPC     Is this actor an NPC?
+   * @returns {object}          Updates to apply to the item data.
+   * @private
+   */
+  _onCreateOwnedFeature(data, isNPC) {
+    const updates = {};
+    if ( isNPC && !foundry.utils.getProperty(data, "system.type.value") ) {
+      updates["system.type.value"] = "monster"; // Set features on NPCs to be 'monster features'.
     }
     return updates;
   }
@@ -8070,15 +14631,28 @@ class Item5e extends Item {
 
   /**
    * Create a consumable spell scroll Item from a spell Item.
-   * @param {Item5e} spell      The spell to be made into a scroll
-   * @returns {Item5e}          The created scroll consumable item
+   * @param {Item5e|object} spell     The spell or item data to be made into a scroll
+   * @param {object} [options]        Additional options that modify the created scroll
+   * @returns {Item5e}                The created scroll consumable item
    */
-  static async createScrollFromSpell(spell) {
+  static async createScrollFromSpell(spell, options={}) {
 
     // Get spell data
     const itemData = (spell instanceof Item5e) ? spell.toObject() : spell;
+
+    /**
+     * A hook event that fires before the item data for a scroll is created.
+     * @function dnd5e.preCreateScrollFromSpell
+     * @memberof hookEvents
+     * @param {object} itemData    The initial item data of the spell to convert to a scroll
+     * @param {object} [options]   Additional options that modify the created scroll
+     * @returns {boolean}          Explicitly return false to prevent the scroll to be created.
+     */
+    if ( Hooks.call("dnd5e.preCreateScrollFromSpell", itemData, options) === false ) return;
+
     let {
-      actionType, description, source, activation, duration, target, range, damage, formula, save, level, attackBonus
+      actionType, description, source, activation, duration, target,
+      range, damage, formula, save, level, attackBonus, ability, components
     } = itemData.system;
 
     // Get scroll data
@@ -8095,11 +14669,18 @@ class Item5e extends Item {
     const scrollDetails = scrollDescription.slice(scrollIntroEnd + pdel.length);
 
     // Create a composite description from the scroll description and the spell details
-    const desc = `${scrollIntro}<hr/><h3>${itemData.name} (Level ${level})</h3><hr/>${description.value}<hr/><h3>Scroll Details</h3><hr/>${scrollDetails}`;
+    const desc = `
+      ${scrollIntro}
+      <hr><h3>${itemData.name} (${game.i18n.format("DND5E.LevelNumber", {level})})</h3>
+      ${(components.concentration ? `<p><em>${game.i18n.localize("DND5E.ScrollRequiresConcentration")}</em></p>` : "")}
+      <hr>${description.value}<hr>
+      <h3>${game.i18n.localize("DND5E.ScrollDetails")}</h3><hr>${scrollDetails}
+    `;
 
     // Used a fixed attack modifier and saving throw according to the level of spell scroll.
     if ( ["mwak", "rwak", "msak", "rsak"].includes(actionType) ) {
-      attackBonus = `${scrollData.system.attackBonus} - @mod`;
+      attackBonus = scrollData.system.attackBonus;
+      ability = "none";
     }
     if ( save.ability ) {
       save.scaling = "flat";
@@ -8111,11 +14692,32 @@ class Item5e extends Item {
       name: `${game.i18n.localize("DND5E.SpellScroll")}: ${itemData.name}`,
       img: itemData.img,
       system: {
-        description: {value: desc.trim()}, source, actionType, activation, duration, target, range, damage, formula,
-        save, level, attackBonus
+        description: {value: desc.trim()}, source, actionType, activation, duration, target,
+        range, damage, formula, save, level, attackBonus, ability
       }
     });
+    foundry.utils.mergeObject(spellScrollData, options);
+
+    /**
+     * A hook event that fires after the item data for a scroll is created but before the item is returned.
+     * @function dnd5e.createScrollFromSpell
+     * @memberof hookEvents
+     * @param {Item5e|object} spell       The spell or item data to be made into a scroll.
+     * @param {object} spellScrollData    The final item data used to make the scroll.
+     */
+    Hooks.callAll("dnd5e.createScrollFromSpell", spell, spellScrollData);
     return new this(spellScrollData);
+  }
+
+  /* -------------------------------------------- */
+  /*  Migrations & Deprecations                   */
+  /* -------------------------------------------- */
+
+  /** @inheritdoc */
+  static migrateData(source) {
+    source = super.migrateData(source);
+    if ( source.type === "class" ) ClassData._migrateTraitAdvancement(source);
+    return source;
   }
 }
 
@@ -8179,7 +14781,8 @@ class ActorAbilityConfig extends BaseConfigSheet {
 
   /** @override */
   get title() {
-    return `${game.i18n.format("DND5E.AbilityConfigureTitle", {ability: CONFIG.DND5E.abilities[this._abilityId]})}: ${this.document.name}`;
+    return `${game.i18n.format("DND5E.AbilityConfigureTitle", {
+      ability: CONFIG.DND5E.abilities[this._abilityId].label})}: ${this.document.name}`;
   }
 
   /* -------------------------------------------- */
@@ -8187,10 +14790,11 @@ class ActorAbilityConfig extends BaseConfigSheet {
   /** @override */
   getData(options) {
     const src = this.document.toObject();
+    const ability = CONFIG.DND5E.abilities[this._abilityId].label;
     return {
       ability: src.system.abilities[this._abilityId] ?? this.document.system.abilities[this._abilityId] ?? {},
-      labelSaves: game.i18n.format("DND5E.AbilitySaveConfigure", {ability: CONFIG.DND5E.abilities[this._abilityId]}),
-      labelChecks: game.i18n.format("DND5E.AbilityCheckConfigure", {ability: CONFIG.DND5E.abilities[this._abilityId]}),
+      labelSaves: game.i18n.format("DND5E.AbilitySaveConfigure", {ability}),
+      labelChecks: game.i18n.format("DND5E.AbilityCheckConfigure", {ability}),
       abilityId: this._abilityId,
       proficiencyLevels: {
         0: CONFIG.DND5E.proficiencyLevels[0],
@@ -8478,7 +15082,7 @@ class ActorHitPointsConfig extends BaseConfigSheet {
       this.clone.updateSource({"system.attributes.hp.max": roll.total});
       this.render();
     } catch(error) {
-      ui.notifications.error(game.i18n.localize("DND5E.HPFormulaError"));
+      ui.notifications.error("DND5E.HPFormulaError", {localize: true});
       throw error;
     }
   }
@@ -8543,35 +15147,32 @@ class ActorInitiativeConfig extends BaseConfigSheet {
  */
 class ActorMovementConfig extends BaseConfigSheet {
 
-  /** @override */
+  /** @inheritdoc */
   static get defaultOptions() {
     return foundry.utils.mergeObject(super.defaultOptions, {
       classes: ["dnd5e"],
       template: "systems/dnd5e/templates/apps/movement-config.hbs",
       width: 300,
-      height: "auto"
+      height: "auto",
+      sheetConfig: false,
+      keyPath: "system.attributes.movement"
     });
   }
 
   /* -------------------------------------------- */
 
-  /** @override */
+  /** @inheritdoc */
   get title() {
     return `${game.i18n.localize("DND5E.MovementConfig")}: ${this.document.name}`;
   }
 
   /* -------------------------------------------- */
 
-  /** @override */
+  /** @inheritdoc */
   getData(options={}) {
     const source = this.document.toObject();
-
-    // Current movement values
-    const movement = source.system.attributes?.movement || {};
-    for ( let [k, v] of Object.entries(movement) ) {
-      if ( ["units", "hover"].includes(k) ) continue;
-      movement[k] = Number.isNumeric(v) ? v.toNearest(0.1) : 0;
-    }
+    const movement = foundry.utils.getProperty(source, this.options.keyPath) ?? {};
+    const raceData = this.document.system.details?.race?.system?.movement ?? {};
 
     // Allowed speeds
     const speeds = source.type === "group" ? {
@@ -8586,13 +15187,19 @@ class ActorMovementConfig extends BaseConfigSheet {
       swim: "DND5E.MovementSwim"
     };
 
-    // Return rendering context
     return {
-      speeds,
       movement,
-      selectUnits: source.type !== "group",
-      canHover: source.type !== "group",
-      units: CONFIG.DND5E.movementUnits
+      movements: Object.entries(speeds).reduce((obj, [k, label]) => {
+        obj[k] = { label, value: movement[k], placeholder: raceData[k] ?? 0 };
+        return obj;
+      }, {}),
+      selectUnits: Object.hasOwn(movement, "units"),
+      canHover: Object.hasOwn(movement, "hover"),
+      units: CONFIG.DND5E.movementUnits,
+      unitsPlaceholder: game.i18n.format("DND5E.AutomaticValue", {
+        value: CONFIG.DND5E.movementUnits[raceData.units ?? Object.keys(CONFIG.DND5E.movementUnits)[0]]?.toLowerCase()
+      }),
+      keyPath: this.options.keyPath
     };
   }
 }
@@ -8608,7 +15215,8 @@ class ActorSensesConfig extends BaseConfigSheet {
       classes: ["dnd5e"],
       template: "systems/dnd5e/templates/apps/senses-config.hbs",
       width: 300,
-      height: "auto"
+      height: "auto",
+      keyPath: "system.attributes.senses"
     });
   }
 
@@ -8623,20 +15231,21 @@ class ActorSensesConfig extends BaseConfigSheet {
 
   /** @inheritdoc */
   getData(options) {
-    const source = this.document.toObject().system.attributes?.senses || {};
-    const data = {
-      senses: {},
-      special: source.special ?? "",
-      units: source.units, movementUnits: CONFIG.DND5E.movementUnits
-    };
-    for ( let [name, label] of Object.entries(CONFIG.DND5E.senses) ) {
-      const v = Number(source[name]);
-      data.senses[name] = {
-        label: game.i18n.localize(label),
-        value: Number.isNumeric(v) ? v.toNearest(0.1) : 0
-      };
-    }
-    return data;
+    const source = this.document.toObject();
+    const senses = foundry.utils.getProperty(source, this.options.keyPath) ?? {};
+    const raceData = this.document.system.details?.race?.system?.senses ?? {};
+    return foundry.utils.mergeObject(super.getData(options), {
+      senses: Object.entries(CONFIG.DND5E.senses).reduce((obj, [k, label]) => {
+        obj[k] = { label, value: senses[k], placeholder: raceData[k] ?? 0 };
+        return obj;
+      }, {}),
+      special: senses.special ?? "",
+      units: senses.units, movementUnits: CONFIG.DND5E.movementUnits,
+      unitsPlaceholder: game.i18n.format("DND5E.AutomaticValue", {
+        value: CONFIG.DND5E.movementUnits[raceData.units ?? Object.keys(CONFIG.DND5E.movementUnits)[0]]?.toLowerCase()
+      }),
+      keyPath: this.options.keyPath
+    });
   }
 }
 
@@ -8772,2978 +15381,11 @@ class ActorSheetFlags extends BaseConfigSheet {
 }
 
 /**
- * A simple form to set skill configuration for a given skill.
- *
- * @param {Actor} actor                 The Actor instance being displayed within the sheet.
- * @param {ApplicationOptions} options  Additional application configuration options.
- * @param {string} skillId              The skill key as defined in CONFIG.DND5E.skills.
- */
-class ActorSkillConfig extends BaseConfigSheet {
-  constructor(actor, options, skillId) {
-    super(actor, options);
-    this._skillId = skillId;
-  }
-
-  /* -------------------------------------------- */
-
-  /** @inheritdoc */
-  static get defaultOptions() {
-    return foundry.utils.mergeObject(super.defaultOptions, {
-      classes: ["dnd5e"],
-      template: "systems/dnd5e/templates/apps/skill-config.hbs",
-      width: 500,
-      height: "auto"
-    });
-  }
-
-  /* -------------------------------------------- */
-
-  /** @inheritdoc */
-  get title() {
-    const label = CONFIG.DND5E.skills[this._skillId].label;
-    return `${game.i18n.format("DND5E.SkillConfigureTitle", {skill: label})}: ${this.document.name}`;
-  }
-
-  /* -------------------------------------------- */
-
-  /** @inheritdoc */
-  getData(options) {
-    const src = this.document.toObject();
-    return {
-      abilities: CONFIG.DND5E.abilities,
-      skill: src.system.skills?.[this._skillId] ?? this.document.system.skills[this._skillId] ?? {},
-      skillId: this._skillId,
-      proficiencyLevels: CONFIG.DND5E.proficiencyLevels,
-      bonusGlobal: src.system.bonuses?.abilities.skill
-    };
-  }
-
-  /* -------------------------------------------- */
-
-  /** @inheritdoc */
-  _updateObject(event, formData) {
-    const passive = formData[`system.skills.${this._skillId}.bonuses.passive`];
-    const passiveRoll = new Roll(passive);
-    if ( !passiveRoll.isDeterministic ) {
-      const message = game.i18n.format("DND5E.FormulaCannotContainDiceError", {
-        name: game.i18n.localize("DND5E.SkillBonusPassive")
-      });
-      ui.notifications.error(message);
-      throw new Error(message);
-    }
-    super._updateObject(event, formData);
-  }
-}
-
-/**
- * A helper Dialog subclass for rolling Hit Dice on short rest.
- *
- * @param {Actor5e} actor           Actor that is taking the short rest.
- * @param {object} [dialogData={}]  An object of dialog data which configures how the modal window is rendered.
- * @param {object} [options={}]     Dialog rendering options.
- */
-class ShortRestDialog extends Dialog {
-  constructor(actor, dialogData={}, options={}) {
-    super(dialogData, options);
-
-    /**
-     * Store a reference to the Actor document which is resting
-     * @type {Actor}
-     */
-    this.actor = actor;
-
-    /**
-     * Track the most recently used HD denomination for re-rendering the form
-     * @type {string}
-     */
-    this._denom = null;
-  }
-
-  /* -------------------------------------------- */
-
-  /** @inheritDoc */
-  static get defaultOptions() {
-    return foundry.utils.mergeObject(super.defaultOptions, {
-      template: "systems/dnd5e/templates/apps/short-rest.hbs",
-      classes: ["dnd5e", "dialog"]
-    });
-  }
-
-  /* -------------------------------------------- */
-
-  /** @inheritDoc */
-  getData() {
-    const data = super.getData();
-
-    // Determine Hit Dice
-    data.availableHD = this.actor.items.reduce((hd, item) => {
-      if ( item.type === "class" ) {
-        const {levels, hitDice, hitDiceUsed} = item.system;
-        const denom = hitDice ?? "d6";
-        const available = parseInt(levels ?? 1) - parseInt(hitDiceUsed ?? 0);
-        hd[denom] = denom in hd ? hd[denom] + available : available;
-      }
-      return hd;
-    }, {});
-    data.canRoll = this.actor.system.attributes.hd > 0;
-    data.denomination = this._denom;
-
-    // Determine rest type
-    const variant = game.settings.get("dnd5e", "restVariant");
-    data.promptNewDay = variant !== "epic";     // It's never a new day when only resting 1 minute
-    data.newDay = false;                        // It may be a new day, but not by default
-    return data;
-  }
-
-  /* -------------------------------------------- */
-
-
-  /** @inheritDoc */
-  activateListeners(html) {
-    super.activateListeners(html);
-    let btn = html.find("#roll-hd");
-    btn.click(this._onRollHitDie.bind(this));
-  }
-
-  /* -------------------------------------------- */
-
-  /**
-   * Handle rolling a Hit Die as part of a Short Rest action
-   * @param {Event} event     The triggering click event
-   * @protected
-   */
-  async _onRollHitDie(event) {
-    event.preventDefault();
-    const btn = event.currentTarget;
-    this._denom = btn.form.hd.value;
-    await this.actor.rollHitDie(this._denom);
-    this.render();
-  }
-
-  /* -------------------------------------------- */
-
-  /**
-   * A helper constructor function which displays the Short Rest dialog and returns a Promise once it's workflow has
-   * been resolved.
-   * @param {object} [options={}]
-   * @param {Actor5e} [options.actor]  Actor that is taking the short rest.
-   * @returns {Promise}                Promise that resolves when the rest is completed or rejects when canceled.
-   */
-  static async shortRestDialog({ actor }={}) {
-    return new Promise((resolve, reject) => {
-      const dlg = new this(actor, {
-        title: `${game.i18n.localize("DND5E.ShortRest")}: ${actor.name}`,
-        buttons: {
-          rest: {
-            icon: '<i class="fas fa-bed"></i>',
-            label: game.i18n.localize("DND5E.Rest"),
-            callback: html => {
-              let newDay = false;
-              if ( game.settings.get("dnd5e", "restVariant") !== "epic" ) {
-                newDay = html.find('input[name="newDay"]')[0].checked;
-              }
-              resolve(newDay);
-            }
-          },
-          cancel: {
-            icon: '<i class="fas fa-times"></i>',
-            label: game.i18n.localize("Cancel"),
-            callback: reject
-          }
-        },
-        close: reject
-      });
-      dlg.render(true);
-    });
-  }
-}
-
-/**
- * A helper Dialog subclass for completing a long rest.
- *
- * @param {Actor5e} actor           Actor that is taking the long rest.
- * @param {object} [dialogData={}]  An object of dialog data which configures how the modal window is rendered.
- * @param {object} [options={}]     Dialog rendering options.
- */
-class LongRestDialog extends Dialog {
-  constructor(actor, dialogData={}, options={}) {
-    super(dialogData, options);
-    this.actor = actor;
-  }
-
-  /* -------------------------------------------- */
-
-  /** @inheritDoc */
-  static get defaultOptions() {
-    return foundry.utils.mergeObject(super.defaultOptions, {
-      template: "systems/dnd5e/templates/apps/long-rest.hbs",
-      classes: ["dnd5e", "dialog"]
-    });
-  }
-
-  /* -------------------------------------------- */
-
-  /** @inheritDoc */
-  getData() {
-    const data = super.getData();
-    const variant = game.settings.get("dnd5e", "restVariant");
-    data.promptNewDay = variant !== "gritty";     // It's always a new day when resting 1 week
-    data.newDay = variant === "normal";           // It's probably a new day when resting normally (8 hours)
-    return data;
-  }
-
-  /* -------------------------------------------- */
-
-  /**
-   * A helper constructor function which displays the Long Rest confirmation dialog and returns a Promise once it's
-   * workflow has been resolved.
-   * @param {object} [options={}]
-   * @param {Actor5e} [options.actor]  Actor that is taking the long rest.
-   * @returns {Promise}                Promise that resolves when the rest is completed or rejects when canceled.
-   */
-  static async longRestDialog({ actor } = {}) {
-    return new Promise((resolve, reject) => {
-      const dlg = new this(actor, {
-        title: `${game.i18n.localize("DND5E.LongRest")}: ${actor.name}`,
-        buttons: {
-          rest: {
-            icon: '<i class="fas fa-bed"></i>',
-            label: game.i18n.localize("DND5E.Rest"),
-            callback: html => {
-              let newDay = true;
-              if (game.settings.get("dnd5e", "restVariant") !== "gritty") {
-                newDay = html.find('input[name="newDay"]')[0].checked;
-              }
-              resolve(newDay);
-            }
-          },
-          cancel: {
-            icon: '<i class="fas fa-times"></i>',
-            label: game.i18n.localize("Cancel"),
-            callback: reject
-          }
-        },
-        default: "rest",
-        close: reject
-      });
-      dlg.render(true);
-    });
-  }
-}
-
-/**
- * Extend the base Actor class to implement additional system-specific logic.
- */
-class Actor5e extends Actor {
-
-  /**
-   * The data source for Actor5e.classes allowing it to be lazily computed.
-   * @type {Object<Item5e>}
-   * @private
-   */
-  _classes;
-
-  /* -------------------------------------------- */
-  /*  Properties                                  */
-  /* -------------------------------------------- */
-
-  /**
-   * A mapping of classes belonging to this Actor.
-   * @type {Object<Item5e>}
-   */
-  get classes() {
-    if ( this._classes !== undefined ) return this._classes;
-    if ( !["character", "npc"].includes(this.type) ) return this._classes = {};
-    return this._classes = this.items.filter(item => item.type === "class").reduce((obj, cls) => {
-      obj[cls.identifier] = cls;
-      return obj;
-    }, {});
-  }
-
-  /* -------------------------------------------- */
-
-  /**
-   * Is this Actor currently polymorphed into some other creature?
-   * @type {boolean}
-   */
-  get isPolymorphed() {
-    return this.getFlag("dnd5e", "isPolymorphed") || false;
-  }
-
-  /* -------------------------------------------- */
-
-  /**
-   * The Actor's currently equipped armor, if any.
-   * @type {Item5e|null}
-   */
-  get armor() {
-    return this.system.attributes.ac.equippedArmor ?? null;
-  }
-
-  /* -------------------------------------------- */
-
-  /**
-   * The Actor's currently equipped shield, if any.
-   * @type {Item5e|null}
-   */
-  get shield() {
-    return this.system.attributes.ac.equippedShield ?? null;
-  }
-
-  /* -------------------------------------------- */
-  /*  Methods                                     */
-  /* -------------------------------------------- */
-
-  /** @inheritdoc */
-  _initializeSource(source, options={}) {
-    source = super._initializeSource(source, options);
-    if ( !source._id || !options.pack || dnd5e.moduleArt.suppressArt ) return source;
-    const uuid = `Compendium.${options.pack}.${source._id}`;
-    const art = game.dnd5e.moduleArt.map.get(uuid);
-    if ( art?.actor || art?.token ) {
-      if ( art.actor ) source.img = art.actor;
-      if ( typeof art.token === "string" ) source.prototypeToken.texture.src = art.token;
-      else if ( art.token ) foundry.utils.mergeObject(source.prototypeToken, art.token);
-      const biography = source.system.details?.biography;
-      if ( art.credit && biography ) {
-        if ( typeof biography.value !== "string" ) biography.value = "";
-        biography.value += `<p>${art.credit}</p>`;
-      }
-    }
-    return source;
-  }
-
-  /* -------------------------------------------- */
-
-  /** @inheritDoc */
-  prepareData() {
-    this._classes = undefined;
-    this._preparationWarnings = [];
-    super.prepareData();
-    this.items.forEach(item => item.prepareFinalAttributes());
-  }
-
-  /* -------------------------------------------- */
-
-  /** @inheritDoc */
-  prepareBaseData() {
-
-    // Delegate preparation to type-subclass
-    if ( this.type === "group" ) {  // Eventually other types will also support this
-      return this.system._prepareBaseData();
-    }
-
-    this._prepareBaseAbilities();
-    this._prepareBaseSkills();
-    this._prepareBaseArmorClass();
-
-    // Type-specific preparation
-    switch ( this.type ) {
-      case "character":
-        return this._prepareCharacterData();
-      case "npc":
-        return this._prepareNPCData();
-      case "vehicle":
-        return this._prepareVehicleData();
-    }
-  }
-
-  /* --------------------------------------------- */
-
-  /** @inheritDoc */
-  applyActiveEffects() {
-    this._prepareScaleValues();
-    // The Active Effects do not have access to their parent at preparation time, so we wait until this stage to
-    // determine whether they are suppressed or not.
-    this.effects.forEach(e => e.determineSuppression());
-    return super.applyActiveEffects();
-  }
-
-  /* -------------------------------------------- */
-
-  /** @inheritDoc */
-  prepareDerivedData() {
-
-    // Delegate preparation to type-subclass
-    if ( this.type === "group" ) {  // Eventually other types will also support this
-      return this.system._prepareDerivedData();
-    }
-
-    const flags = this.flags.dnd5e || {};
-    this.labels = {};
-
-    // Retrieve data for polymorphed actors
-    let originalSaves = null;
-    let originalSkills = null;
-    if ( this.isPolymorphed ) {
-      const transformOptions = flags.transformOptions;
-      const original = game.actors?.get(flags.originalActor);
-      if ( original ) {
-        if ( transformOptions.mergeSaves ) originalSaves = original.system.abilities;
-        if ( transformOptions.mergeSkills ) originalSkills = original.system.skills;
-      }
-    }
-
-    // Prepare abilities, skills, & everything else
-    const globalBonuses = this.system.bonuses?.abilities ?? {};
-    const rollData = this.getRollData();
-    const checkBonus = simplifyBonus(globalBonuses?.check, rollData);
-    this._prepareAbilities(rollData, globalBonuses, checkBonus, originalSaves);
-    this._prepareSkills(rollData, globalBonuses, checkBonus, originalSkills);
-    this._prepareArmorClass();
-    this._prepareEncumbrance();
-    this._prepareHitPoints(rollData);
-    this._prepareInitiative(rollData, checkBonus);
-    this._prepareSpellcasting();
-  }
-
-  /* -------------------------------------------- */
-
-  /**
-   * Return the amount of experience required to gain a certain character level.
-   * @param {number} level  The desired level.
-   * @returns {number}      The XP required.
-   */
-  getLevelExp(level) {
-    const levels = CONFIG.DND5E.CHARACTER_EXP_LEVELS;
-    return levels[Math.min(level, levels.length - 1)];
-  }
-
-  /* -------------------------------------------- */
-
-  /**
-   * Return the amount of experience granted by killing a creature of a certain CR.
-   * @param {number} cr     The creature's challenge rating.
-   * @returns {number}      The amount of experience granted per kill.
-   */
-  getCRExp(cr) {
-    if ( cr < 1.0 ) return Math.max(200 * cr, 10);
-    return CONFIG.DND5E.CR_EXP_LEVELS[cr];
-  }
-
-  /* -------------------------------------------- */
-
-  /**
-   * @inheritdoc
-   * @param {object} [options]
-   * @param {boolean} [options.deterministic] Whether to force deterministic values for data properties that could be
-   *                                            either a die term or a flat term.
-   */
-  getRollData({ deterministic=false }={}) {
-    const data = {...super.getRollData()};
-    if ( this.type === "group" ) return data;
-    data.prof = new Proficiency(this.system.attributes.prof, 1);
-    if ( deterministic ) data.prof = data.prof.flat;
-    data.attributes = foundry.utils.deepClone(data.attributes);
-    data.attributes.spellmod = data.abilities[data.attributes.spellcasting || "int"]?.mod ?? 0;
-    data.classes = {};
-    for ( const [identifier, cls] of Object.entries(this.classes) ) {
-      data.classes[identifier] = {...cls.system};
-      if ( cls.subclass ) data.classes[identifier].subclass = cls.subclass.system;
-    }
-    return data;
-  }
-
-  /* -------------------------------------------- */
-  /*  Base Data Preparation Helpers               */
-  /* -------------------------------------------- */
-
-  /**
-   * Update the actor's abilities list to match the abilities configured in `DND5E.abilities`.
-   * Mutates the system.abilities object.
-   * @protected
-   */
-  _prepareBaseAbilities() {
-    if ( !("abilities" in this.system) ) return;
-    const abilities = {};
-    for ( const key of Object.keys(CONFIG.DND5E.abilities) ) {
-      abilities[key] = this.system.abilities[key];
-      if ( !abilities[key] ) {
-        abilities[key] = foundry.utils.deepClone(game.system.template.Actor.templates.common.abilities.cha);
-
-        // Honor: Charisma for NPC, 0 for vehicles
-        if ( key === "hon" ) {
-          if ( this.type === "vehicle" ) abilities[key].value = 0;
-          else if ( this.type === "npc" ) abilities[key].value = this.system.abilities.cha?.value ?? 10;
-        }
-
-        // Sanity: Wisdom for NPC, 0 for vehicles
-        else if ( key === "san" ) {
-          if ( this.type === "vehicle" ) abilities[key].value = 0;
-          else if ( this.type === "npc" ) abilities[key].value = this.system.abilities.wis?.value ?? 10;
-        }
-      }
-    }
-    this.system.abilities = abilities;
-  }
-
-  /* -------------------------------------------- */
-
-  /**
-   * Update the actor's skill list to match the skills configured in `DND5E.skills`.
-   * Mutates the system.skills object.
-   * @protected
-   */
-  _prepareBaseSkills() {
-    if ( !("skills" in this.system) ) return;
-    const skills = {};
-    for ( const [key, skill] of Object.entries(CONFIG.DND5E.skills) ) {
-      skills[key] = this.system.skills[key];
-      if ( !skills[key] ) {
-        skills[key] = foundry.utils.deepClone(game.system.template.Actor.templates.creature.skills.acr);
-        skills[key].ability = skill.ability;
-      }
-    }
-    this.system.skills = skills;
-  }
-
-  /* -------------------------------------------- */
-
-  /**
-   * Initialize derived AC fields for Active Effects to target.
-   * Mutates the system.attributes.ac object.
-   * @protected
-   */
-  _prepareBaseArmorClass() {
-    const ac = this.system.attributes.ac;
-    ac.armor = 10;
-    ac.shield = ac.bonus = ac.cover = 0;
-  }
-
-  /* -------------------------------------------- */
-
-  /**
-   * Derive any values that have been scaled by the Advancement system.
-   * Mutates the value of the `system.scale` object.
-   * @protected
-   */
-  _prepareScaleValues() {
-    this.system.scale = Object.entries(this.classes).reduce((scale, [identifier, cls]) => {
-      scale[identifier] = cls.scaleValues;
-      if ( cls.subclass ) scale[cls.subclass.identifier] = cls.subclass.scaleValues;
-      return scale;
-    }, {});
-  }
-
-  /* -------------------------------------------- */
-
-  /**
-   * Perform any Character specific preparation.
-   * Mutates several aspects of the system data object.
-   * @protected
-   */
-  _prepareCharacterData() {
-    this.system.details.level = 0;
-    this.system.attributes.hd = 0;
-    this.system.attributes.attunement.value = 0;
-
-    for ( const item of this.items ) {
-      // Class levels & hit dice
-      if ( item.type === "class" ) {
-        const classLevels = parseInt(item.system.levels) || 1;
-        this.system.details.level += classLevels;
-        this.system.attributes.hd += classLevels - (parseInt(item.system.hitDiceUsed) || 0);
-      }
-
-      // Attuned items
-      else if ( item.system.attunement === CONFIG.DND5E.attunementTypes.ATTUNED ) {
-        this.system.attributes.attunement.value += 1;
-      }
-    }
-
-    // Character proficiency bonus
-    this.system.attributes.prof = Proficiency.calculateMod(this.system.details.level);
-
-    // Experience required for next level
-    const xp = this.system.details.xp;
-    xp.max = this.getLevelExp(this.system.details.level || 1);
-    const prior = this.getLevelExp(this.system.details.level - 1 || 0);
-    const required = xp.max - prior;
-    const pct = Math.round((xp.value - prior) * 100 / required);
-    xp.pct = Math.clamped(pct, 0, 100);
-  }
-
-  /* -------------------------------------------- */
-
-  /**
-   * Perform any NPC specific preparation.
-   * Mutates several aspects of the system data object.
-   * @protected
-   */
-  _prepareNPCData() {
-    const cr = this.system.details.cr;
-
-    // Attuned items
-    this.system.attributes.attunement.value = this.items.filter(i => {
-      return i.system.attunement === CONFIG.DND5E.attunementTypes.ATTUNED;
-    }).length;
-
-    // Kill Experience
-    this.system.details.xp ??= {};
-    this.system.details.xp.value = this.getCRExp(cr);
-
-    // Proficiency
-    this.system.attributes.prof = Proficiency.calculateMod(Math.max(cr, 1));
-
-    // Spellcaster Level
-    if ( this.system.attributes.spellcasting && !Number.isNumeric(this.system.details.spellLevel) ) {
-      this.system.details.spellLevel = Math.max(cr, 1);
-    }
-  }
-
-  /* -------------------------------------------- */
-
-  /**
-   * Perform any Vehicle specific preparation.
-   * Mutates several aspects of the system data object.
-   * @protected
-   */
-  _prepareVehicleData() {
-    this.system.attributes.prof = 0;
-  }
-
-  /* -------------------------------------------- */
-  /*  Derived Data Preparation Helpers            */
-  /* -------------------------------------------- */
-
-  /**
-   * Prepare abilities.
-   * @param {object} bonusData      Data produced by `getRollData` to be applied to bonus formulas.
-   * @param {object} globalBonuses  Global bonus data.
-   * @param {number} checkBonus     Global ability check bonus.
-   * @param {object} originalSaves  A transformed actor's original actor's abilities.
-   * @protected
-   */
-  _prepareAbilities(bonusData, globalBonuses, checkBonus, originalSaves) {
-    const flags = this.flags.dnd5e ?? {};
-    const dcBonus = simplifyBonus(this.system.bonuses?.spell?.dc, bonusData);
-    const saveBonus = simplifyBonus(globalBonuses.save, bonusData);
-    for ( const [id, abl] of Object.entries(this.system.abilities) ) {
-      if ( flags.diamondSoul ) abl.proficient = 1;  // Diamond Soul is proficient in all saves
-      abl.mod = Math.floor((abl.value - 10) / 2);
-
-      const isRA = this._isRemarkableAthlete(id);
-      abl.checkProf = new Proficiency(this.system.attributes.prof, (isRA || flags.jackOfAllTrades) ? 0.5 : 0, !isRA);
-      const saveBonusAbl = simplifyBonus(abl.bonuses?.save, bonusData);
-      abl.saveBonus = saveBonusAbl + saveBonus;
-
-      abl.saveProf = new Proficiency(this.system.attributes.prof, abl.proficient);
-      const checkBonusAbl = simplifyBonus(abl.bonuses?.check, bonusData);
-      abl.checkBonus = checkBonusAbl + checkBonus;
-
-      abl.save = abl.mod + abl.saveBonus;
-      if ( Number.isNumeric(abl.saveProf.term) ) abl.save += abl.saveProf.flat;
-      abl.dc = 8 + abl.mod + this.system.attributes.prof + dcBonus;
-
-      // If we merged saves when transforming, take the highest bonus here.
-      if ( originalSaves && abl.proficient ) abl.save = Math.max(abl.save, originalSaves[id].save);
-    }
-  }
-
-  /* -------------------------------------------- */
-
-  /**
-   * Prepare skill checks. Mutates the values of system.skills.
-   * @param {object} bonusData       Data produced by `getRollData` to be applied to bonus formulas.
-   * @param {object} globalBonuses   Global bonus data.
-   * @param {number} checkBonus      Global ability check bonus.
-   * @param {object} originalSkills  A transformed actor's original actor's skills.
-   * @protected
-   */
-  _prepareSkills(bonusData, globalBonuses, checkBonus, originalSkills) {
-    if ( this.type === "vehicle" ) return;
-    const flags = this.flags.dnd5e ?? {};
-
-    // Skill modifiers
-    const feats = CONFIG.DND5E.characterFlags;
-    const skillBonus = simplifyBonus(globalBonuses.skill, bonusData);
-    for ( const [id, skl] of Object.entries(this.system.skills) ) {
-      const ability = this.system.abilities[skl.ability];
-      skl.value = Math.clamped(Number(skl.value).toNearest(0.5), 0, 2) ?? 0;
-      const baseBonus = simplifyBonus(skl.bonuses?.check, bonusData);
-      let roundDown = true;
-
-      // Remarkable Athlete
-      if ( this._isRemarkableAthlete(skl.ability) && (skl.value < 0.5) ) {
-        skl.value = 0.5;
-        roundDown = false;
-      }
-
-      // Jack of All Trades
-      else if ( flags.jackOfAllTrades && (skl.value < 0.5) ) {
-        skl.value = 0.5;
-      }
-
-      // Polymorph Skill Proficiencies
-      if ( originalSkills ) {
-        skl.value = Math.max(skl.value, originalSkills[id].value);
-      }
-
-      // Compute modifier
-      const checkBonusAbl = simplifyBonus(ability?.bonuses?.check, bonusData);
-      skl.bonus = baseBonus + checkBonus + checkBonusAbl + skillBonus;
-      skl.mod = ability?.mod ?? 0;
-      skl.prof = new Proficiency(this.system.attributes.prof, skl.value, roundDown);
-      skl.proficient = skl.value;
-      skl.total = skl.mod + skl.bonus;
-      if ( Number.isNumeric(skl.prof.term) ) skl.total += skl.prof.flat;
-
-      // Compute passive bonus
-      const passive = flags.observantFeat && (feats.observantFeat.skills.includes(id)) ? 5 : 0;
-      const passiveBonus = simplifyBonus(skl.bonuses?.passive, bonusData);
-      skl.passive = 10 + skl.mod + skl.bonus + skl.prof.flat + passive + passiveBonus;
-    }
-  }
-
-  /* -------------------------------------------- */
-
-  /**
-   * Prepare a character's AC value from their equipped armor and shield.
-   * Mutates the value of the `system.attributes.ac` object.
-   */
-  _prepareArmorClass() {
-    const ac = this.system.attributes.ac;
-
-    // Apply automatic migrations for older data structures
-    let cfg = CONFIG.DND5E.armorClasses[ac.calc];
-    if ( !cfg ) {
-      ac.calc = "flat";
-      if ( Number.isNumeric(ac.value) ) ac.flat = Number(ac.value);
-      cfg = CONFIG.DND5E.armorClasses.flat;
-    }
-
-    // Identify Equipped Items
-    const armorTypes = new Set(Object.keys(CONFIG.DND5E.armorTypes));
-    const {armors, shields} = this.itemTypes.equipment.reduce((obj, equip) => {
-      const armor = equip.system.armor;
-      if ( !equip.system.equipped || !armorTypes.has(armor?.type) ) return obj;
-      if ( armor.type === "shield" ) obj.shields.push(equip);
-      else obj.armors.push(equip);
-      return obj;
-    }, {armors: [], shields: []});
-
-    // Determine base AC
-    switch ( ac.calc ) {
-
-      // Flat AC (no additional bonuses)
-      case "flat":
-        ac.value = Number(ac.flat);
-        return;
-
-      // Natural AC (includes bonuses)
-      case "natural":
-        ac.base = Number(ac.flat);
-        break;
-
-      default:
-        let formula = ac.calc === "custom" ? ac.formula : cfg.formula;
-        if ( armors.length ) {
-          if ( armors.length > 1 ) this._preparationWarnings.push({
-            message: game.i18n.localize("DND5E.WarnMultipleArmor"), type: "warning"
-          });
-          const armorData = armors[0].system.armor;
-          const isHeavy = armorData.type === "heavy";
-          ac.armor = armorData.value ?? ac.armor;
-          ac.dex = isHeavy ? 0 : Math.min(armorData.dex ?? Infinity, this.system.abilities.dex?.mod ?? 0);
-          ac.equippedArmor = armors[0];
-        }
-        else ac.dex = this.system.abilities.dex?.mod ?? 0;
-
-        const rollData = this.getRollData({ deterministic: true });
-        rollData.attributes.ac = ac;
-        try {
-          const replaced = Roll.replaceFormulaData(formula, rollData);
-          ac.base = Roll.safeEval(replaced);
-        } catch(err) {
-          this._preparationWarnings.push({
-            message: game.i18n.localize("DND5E.WarnBadACFormula"), link: "armor", type: "error"
-          });
-          const replaced = Roll.replaceFormulaData(CONFIG.DND5E.armorClasses.default.formula, rollData);
-          ac.base = Roll.safeEval(replaced);
-        }
-        break;
-    }
-
-    // Equipped Shield
-    if ( shields.length ) {
-      if ( shields.length > 1 ) this._preparationWarnings.push({
-        message: game.i18n.localize("DND5E.WarnMultipleShields"), type: "warning"
-      });
-      ac.shield = shields[0].system.armor.value ?? 0;
-      ac.equippedShield = shields[0];
-    }
-
-    // Compute total AC and return
-    ac.value = ac.base + ac.shield + ac.bonus + ac.cover;
-  }
-
-  /* -------------------------------------------- */
-
-  /**
-   * Prepare the level and percentage of encumbrance for an Actor.
-   * Optionally include the weight of carried currency by applying the standard rule from the PHB pg. 143.
-   * Mutates the value of the `system.attributes.encumbrance` object.
-   * @protected
-   */
-  _prepareEncumbrance() {
-    const encumbrance = this.system.attributes.encumbrance ??= {};
-
-    // Get the total weight from items
-    const physicalItems = ["weapon", "equipment", "consumable", "tool", "backpack", "loot"];
-    let weight = this.items.reduce((weight, i) => {
-      if ( !physicalItems.includes(i.type) ) return weight;
-      const q = i.system.quantity || 0;
-      const w = i.system.weight || 0;
-      return weight + (q * w);
-    }, 0);
-
-    // [Optional] add Currency Weight (for non-transformed actors)
-    const currency = this.system.currency;
-    if ( game.settings.get("dnd5e", "currencyWeight") && currency ) {
-      const numCoins = Object.values(currency).reduce((val, denom) => val + Math.max(denom, 0), 0);
-      const currencyPerWeight = game.settings.get("dnd5e", "metricWeightUnits")
-        ? CONFIG.DND5E.encumbrance.currencyPerWeight.metric
-        : CONFIG.DND5E.encumbrance.currencyPerWeight.imperial;
-      weight += numCoins / currencyPerWeight;
-    }
-
-    // Determine the Encumbrance size class
-    let mod = {tiny: 0.5, sm: 1, med: 1, lg: 2, huge: 4, grg: 8}[this.system.traits.size] || 1;
-    if ( this.flags.dnd5e?.powerfulBuild ) mod = Math.min(mod * 2, 8);
-
-    const strengthMultiplier = game.settings.get("dnd5e", "metricWeightUnits")
-      ? CONFIG.DND5E.encumbrance.strMultiplier.metric
-      : CONFIG.DND5E.encumbrance.strMultiplier.imperial;
-
-    // Populate final Encumbrance values
-    encumbrance.value = weight.toNearest(0.1);
-    encumbrance.max = ((this.system.abilities.str?.value ?? 10) * strengthMultiplier * mod).toNearest(0.1);
-    encumbrance.pct = Math.clamped((encumbrance.value * 100) / encumbrance.max, 0, 100);
-    encumbrance.encumbered = encumbrance.pct > (200 / 3);
-  }
-
-  /* -------------------------------------------- */
-
-  /**
-   * Prepare hit points for characters.
-   * @param {object} rollData  Data produced by `getRollData` to be applied to bonus formulas.
-   * @protected
-   */
-  _prepareHitPoints(rollData) {
-    if ( this.type !== "character" || (this.system._source.attributes.hp.max !== null) ) return;
-    const hp = this.system.attributes.hp;
-
-    const abilityId = CONFIG.DND5E.hitPointsAbility || "con";
-    const abilityMod = (this.system.abilities[abilityId]?.mod ?? 0);
-    const base = Object.values(this.classes).reduce((total, item) => {
-      const advancement = item.advancement.byType.HitPoints?.[0];
-      return total + (advancement?.getAdjustedTotal(abilityMod) ?? 0);
-    }, 0);
-    const levelBonus = simplifyBonus(hp.bonuses.level, rollData) * this.system.details.level;
-    const overallBonus = simplifyBonus(hp.bonuses.overall, rollData);
-
-    hp.max = base + levelBonus + overallBonus;
-  }
-
-  /* -------------------------------------------- */
-
-  /**
-   * Prepare the initiative data for an actor.
-   * Mutates the value of the system.attributes.init object.
-   * @param {object} bonusData         Data produced by getRollData to be applied to bonus formulas
-   * @param {number} globalCheckBonus  Global ability check bonus
-   * @protected
-   */
-  _prepareInitiative(bonusData, globalCheckBonus=0) {
-    const init = this.system.attributes.init ??= {};
-    const flags = this.flags.dnd5e || {};
-
-    // Compute initiative modifier
-    const abilityId = init.ability || CONFIG.DND5E.initiativeAbility;
-    const ability = this.system.abilities?.[abilityId] || {};
-    init.mod = ability.mod ?? 0;
-
-    // Initiative proficiency
-    const prof = this.system.attributes.prof ?? 0;
-    const ra = flags.remarkableAthlete && ["str", "dex", "con"].includes(abilityId);
-    init.prof = new Proficiency(prof, (flags.jackOfAllTrades || ra) ? 0.5 : 0, !ra);
-
-    // Total initiative includes all numeric terms
-    const initBonus = simplifyBonus(init.bonus, bonusData);
-    const abilityBonus = simplifyBonus(ability.bonuses?.check, bonusData);
-    init.total = init.mod + initBonus + abilityBonus + globalCheckBonus
-      + (flags.initiativeAlert ? 5 : 0)
-      + (Number.isNumeric(init.prof.term) ? init.prof.flat : 0);
-  }
-
-  /* -------------------------------------------- */
-  /*  Spellcasting Preparation                    */
-  /* -------------------------------------------- */
-
-  /**
-   * Prepare data related to the spell-casting capabilities of the Actor.
-   * Mutates the value of the system.spells object.
-   * @protected
-   */
-  _prepareSpellcasting() {
-    if ( !this.system.spells ) return;
-
-    // Spellcasting DC
-    const spellcastingAbility = this.system.abilities[this.system.attributes.spellcasting];
-    this.system.attributes.spelldc = spellcastingAbility ? spellcastingAbility.dc : 8 + this.system.attributes.prof;
-
-    // Translate the list of classes into spellcasting progression
-    const progression = { slot: 0, pact: 0 };
-    const types = {};
-
-    // NPCs don't get spell levels from classes
-    if ( this.type === "npc" ) {
-      progression.slot = this.system.details.spellLevel ?? 0;
-      types.leveled = 1;
-    }
-
-    else {
-      // Grab all classes with spellcasting
-      const classes = this.items.filter(cls => {
-        if ( cls.type !== "class" ) return false;
-        const type = cls.spellcasting.type;
-        if ( !type ) return false;
-        types[type] ??= 0;
-        types[type] += 1;
-        return true;
-      });
-
-      for ( const cls of classes ) this.constructor.computeClassProgression(
-        progression, cls, { actor: this, count: types[cls.spellcasting.type] }
-      );
-    }
-
-    for ( const type of Object.keys(CONFIG.DND5E.spellcastingTypes) ) {
-      this.constructor.prepareSpellcastingSlots(this.system.spells, type, progression, { actor: this });
-    }
-  }
-
-  /* -------------------------------------------- */
-
-  /**
-   * Contribute to the actor's spellcasting progression.
-   * @param {object} progression                             Spellcasting progression data. *Will be mutated.*
-   * @param {Item5e} cls                                     Class for whom this progression is being computed.
-   * @param {object} [config={}]
-   * @param {Actor5e|null} [config.actor]                    Actor for whom the data is being prepared.
-   * @param {SpellcastingDescription} [config.spellcasting]  Spellcasting descriptive object.
-   * @param {number} [config.count=1]                        Number of classes with this type of spellcasting.
-   */
-  static computeClassProgression(progression, cls, {actor, spellcasting, count=1}={}) {
-    const type = cls.spellcasting.type;
-    spellcasting = spellcasting ?? cls.spellcasting;
-
-    /**
-     * A hook event that fires while computing the spellcasting progression for each class on each actor.
-     * The actual hook names include the spellcasting type (e.g. `dnd5e.computeLeveledProgression`).
-     * @param {object} progression                    Spellcasting progression data. *Will be mutated.*
-     * @param {Actor5e|null} [actor]                  Actor for whom the data is being prepared.
-     * @param {Item5e} cls                            Class for whom this progression is being computed.
-     * @param {SpellcastingDescription} spellcasting  Spellcasting descriptive object.
-     * @param {number} count                          Number of classes with this type of spellcasting.
-     * @returns {boolean}  Explicitly return false to prevent default progression from being calculated.
-     * @function dnd5e.computeSpellcastingProgression
-     * @memberof hookEvents
-     */
-    const allowed = Hooks.call(
-      `dnd5e.compute${type.capitalize()}Progression`, progression, actor, cls, spellcasting, count
-    );
-
-    if ( allowed && (type === "pact") ) {
-      this.computePactProgression(progression, actor, cls, spellcasting, count);
-    } else if ( allowed && (type === "leveled") ) {
-      this.computeLeveledProgression(progression, actor, cls, spellcasting, count);
-    }
-  }
-
-  /* -------------------------------------------- */
-
-  /**
-   * Contribute to the actor's spellcasting progression for a class with leveled spellcasting.
-   * @param {object} progression                    Spellcasting progression data. *Will be mutated.*
-   * @param {Actor5e} actor                         Actor for whom the data is being prepared.
-   * @param {Item5e} cls                            Class for whom this progression is being computed.
-   * @param {SpellcastingDescription} spellcasting  Spellcasting descriptive object.
-   * @param {number} count                          Number of classes with this type of spellcasting.
-   */
-  static computeLeveledProgression(progression, actor, cls, spellcasting, count) {
-    const prog = CONFIG.DND5E.spellcastingTypes.leveled.progression[spellcasting.progression];
-    if ( !prog ) return;
-    const rounding = prog.roundUp ? Math.ceil : Math.floor;
-    progression.slot += rounding(spellcasting.levels / prog.divisor ?? 1);
-    // Single-classed, non-full progression rounds up, rather than down.
-    if ( (count === 1) && (prog.divisor > 1) && progression.slot ) {
-      progression.slot = Math.ceil(spellcasting.levels / prog.divisor);
-    }
-  }
-
-  /* -------------------------------------------- */
-
-  /**
-   * Contribute to the actor's spellcasting progression for a class with pact spellcasting.
-   * @param {object} progression                    Spellcasting progression data. *Will be mutated.*
-   * @param {Actor5e} actor                         Actor for whom the data is being prepared.
-   * @param {Item5e} cls                            Class for whom this progression is being computed.
-   * @param {SpellcastingDescription} spellcasting  Spellcasting descriptive object.
-   * @param {number} count                          Number of classes with this type of spellcasting.
-   */
-  static computePactProgression(progression, actor, cls, spellcasting, count) {
-    progression.pact += spellcasting.levels;
-  }
-
-  /* -------------------------------------------- */
-
-  /**
-   * Prepare actor's spell slots using progression data.
-   * @param {object} spells           The `data.spells` object within actor's data. *Will be mutated.*
-   * @param {string} type             Type of spellcasting slots being prepared.
-   * @param {object} progression      Spellcasting progression data.
-   * @param {object} [config]
-   * @param {Actor5e} [config.actor]  Actor for whom the data is being prepared.
-   */
-  static prepareSpellcastingSlots(spells, type, progression, {actor}={}) {
-    /**
-     * A hook event that fires to convert the provided spellcasting progression into spell slots.
-     * The actual hook names include the spellcasting type (e.g. `dnd5e.prepareLeveledSlots`).
-     * @param {object} spells        The `data.spells` object within actor's data. *Will be mutated.*
-     * @param {Actor5e} actor        Actor for whom the data is being prepared.
-     * @param {object} progression   Spellcasting progression data.
-     * @returns {boolean}            Explicitly return false to prevent default preparation from being performed.
-     * @function dnd5e.prepareSpellcastingSlots
-     * @memberof hookEvents
-     */
-    const allowed = Hooks.call(`dnd5e.prepare${type.capitalize()}Slots`, spells, actor, progression);
-
-    if ( allowed && (type === "pact") ) this.preparePactSlots(spells, actor, progression);
-    else if ( allowed && (type === "leveled") ) this.prepareLeveledSlots(spells, actor, progression);
-  }
-
-  /* -------------------------------------------- */
-
-  /**
-   * Prepare leveled spell slots using progression data.
-   * @param {object} spells        The `data.spells` object within actor's data. *Will be mutated.*
-   * @param {Actor5e} actor        Actor for whom the data is being prepared.
-   * @param {object} progression   Spellcasting progression data.
-   */
-  static prepareLeveledSlots(spells, actor, progression) {
-    const levels = Math.clamped(progression.slot, 0, CONFIG.DND5E.maxLevel);
-    const slots = CONFIG.DND5E.SPELL_SLOT_TABLE[Math.min(levels, CONFIG.DND5E.SPELL_SLOT_TABLE.length) - 1] ?? [];
-    for ( const [n, slot] of Object.entries(spells) ) {
-      const level = parseInt(n.slice(-1));
-      if ( Number.isNaN(level) ) continue;
-      slot.max = Number.isNumeric(slot.override) ? Math.max(parseInt(slot.override), 0) : slots[level - 1] ?? 0;
-      slot.value = parseInt(slot.value); // TODO: DataModels should remove the need for this
-    }
-  }
-
-  /* -------------------------------------------- */
-
-  /**
-   * Prepare pact spell slots using progression data.
-   * @param {object} spells        The `data.spells` object within actor's data. *Will be mutated.*
-   * @param {Actor5e} actor        Actor for whom the data is being prepared.
-   * @param {object} progression   Spellcasting progression data.
-   */
-  static preparePactSlots(spells, actor, progression) {
-    // Pact spell data:
-    // - pact.level: Slot level for pact casting
-    // - pact.max: Total number of pact slots
-    // - pact.value: Currently available pact slots
-    // - pact.override: Override number of available spell slots
-
-    let pactLevel = Math.clamped(progression.pact, 0, CONFIG.DND5E.maxLevel);
-    spells.pact ??= {};
-    const override = Number.isNumeric(spells.pact.override) ? parseInt(spells.pact.override) : null;
-
-    // Pact slot override
-    if ( (pactLevel === 0) && (actor.type === "npc") && (override !== null) ) {
-      pactLevel = actor.system.details.spellLevel;
-    }
-
-    // TODO: Allow pact level and slot count to be configured
-    if ( pactLevel > 0 ) {
-      spells.pact.level = Math.ceil(Math.min(10, pactLevel) / 2); // TODO: Allow custom max pact level
-      if ( override === null ) {
-        spells.pact.max = Math.max(1, Math.min(pactLevel, 2), Math.min(pactLevel - 8, 3), Math.min(pactLevel - 13, 4));
-      } else {
-        spells.pact.max = Math.max(override, 1);
-      }
-      spells.pact.value = Math.min(spells.pact.value, spells.pact.max);
-    }
-
-    else {
-      spells.pact.max = override || 0;
-      spells.pact.level = spells.pact.max > 0 ? 1 : 0;
-    }
-  }
-
-  /* -------------------------------------------- */
-  /*  Event Handlers                              */
-  /* -------------------------------------------- */
-
-  /** @inheritdoc */
-  async _preCreate(data, options, user) {
-    await super._preCreate(data, options, user);
-    const sourceId = this.getFlag("core", "sourceId");
-    if ( sourceId?.startsWith("Compendium.") ) return;
-
-    // Configure prototype token settings
-    if ( "size" in (this.system.traits || {}) ) {
-      const s = CONFIG.DND5E.tokenSizes[this.system.traits.size || "med"];
-      const prototypeToken = {width: s, height: s};
-      if ( this.type === "character" ) Object.assign(prototypeToken, {
-        sight: { enabled: true }, actorLink: true, disposition: 1
-      });
-      this.updateSource({prototypeToken});
-    }
-  }
-
-  /* -------------------------------------------- */
-
-  /** @inheritdoc */
-  async _preUpdate(changed, options, user) {
-    await super._preUpdate(changed, options, user);
-
-    // Apply changes in Actor size to Token width/height
-    if ( "size" in (this.system.traits || {}) ) {
-      const newSize = foundry.utils.getProperty(changed, "system.traits.size");
-      if ( newSize && (newSize !== this.system.traits?.size) ) {
-        let size = CONFIG.DND5E.tokenSizes[newSize];
-        if ( !foundry.utils.hasProperty(changed, "prototypeToken.width") ) {
-          changed.prototypeToken ||= {};
-          changed.prototypeToken.height = size;
-          changed.prototypeToken.width = size;
-        }
-      }
-    }
-
-    // Reset death save counters
-    if ( "hp" in (this.system.attributes || {}) ) {
-      const isDead = this.system.attributes.hp.value <= 0;
-      if ( isDead && (foundry.utils.getProperty(changed, "system.attributes.hp.value") > 0) ) {
-        foundry.utils.setProperty(changed, "system.attributes.death.success", 0);
-        foundry.utils.setProperty(changed, "system.attributes.death.failure", 0);
-      }
-    }
-  }
-
-  /* -------------------------------------------- */
-
-  /**
-   * Assign a class item as the original class for the Actor based on which class has the most levels.
-   * @returns {Promise<Actor5e>}  Instance of the updated actor.
-   * @protected
-   */
-  _assignPrimaryClass() {
-    const classes = this.itemTypes.class.sort((a, b) => b.system.levels - a.system.levels);
-    const newPC = classes[0]?.id || "";
-    return this.update({"system.details.originalClass": newPC});
-  }
-
-  /* -------------------------------------------- */
-  /*  Gameplay Mechanics                          */
-  /* -------------------------------------------- */
-
-  /** @override */
-  async modifyTokenAttribute(attribute, value, isDelta, isBar) {
-    if ( attribute === "attributes.hp" ) {
-      const hp = this.system.attributes.hp;
-      const delta = isDelta ? (-1 * value) : (hp.value + hp.temp) - value;
-      return this.applyDamage(delta);
-    }
-    return super.modifyTokenAttribute(attribute, value, isDelta, isBar);
-  }
-
-  /* -------------------------------------------- */
-
-  /**
-   * Apply a certain amount of damage or healing to the health pool for Actor
-   * @param {number} amount       An amount of damage (positive) or healing (negative) to sustain
-   * @param {number} multiplier   A multiplier which allows for resistance, vulnerability, or healing
-   * @returns {Promise<Actor5e>}  A Promise which resolves once the damage has been applied
-   */
-  async applyDamage(amount=0, multiplier=1) {
-    amount = Math.floor(parseInt(amount) * multiplier);
-    const hp = this.system.attributes.hp;
-    if ( !hp ) return this; // Group actors don't have HP at the moment
-
-    // Deduct damage from temp HP first
-    const tmp = parseInt(hp.temp) || 0;
-    const dt = amount > 0 ? Math.min(tmp, amount) : 0;
-
-    // Remaining goes to health
-    const tmpMax = parseInt(hp.tempmax) || 0;
-    const dh = Math.clamped(hp.value - (amount - dt), 0, hp.max + tmpMax);
-
-    // Update the Actor
-    const updates = {
-      "system.attributes.hp.temp": tmp - dt,
-      "system.attributes.hp.value": dh
-    };
-
-    // Delegate damage application to a hook
-    // TODO replace this in the future with a better modifyTokenAttribute function in the core
-    const allowed = Hooks.call("modifyTokenAttribute", {
-      attribute: "attributes.hp",
-      value: amount,
-      isDelta: false,
-      isBar: true
-    }, updates);
-    return allowed !== false ? this.update(updates, {dhp: -amount}) : this;
-  }
-
-  /* -------------------------------------------- */
-
-  /**
-   * Apply a certain amount of temporary hit point, but only if it's more than the actor currently has.
-   * @param {number} amount       An amount of temporary hit points to set
-   * @returns {Promise<Actor5e>}  A Promise which resolves once the temp HP has been applied
-   */
-  async applyTempHP(amount=0) {
-    amount = parseInt(amount);
-    const hp = this.system.attributes.hp;
-
-    // Update the actor if the new amount is greater than the current
-    const tmp = parseInt(hp.temp) || 0;
-    return amount > tmp ? this.update({"system.attributes.hp.temp": amount}) : this;
-  }
-
-  /* -------------------------------------------- */
-
-  /**
-   * Get a color used to represent the current hit points of an Actor.
-   * @param {number} current        The current HP value
-   * @param {number} max            The maximum HP value
-   * @returns {Color}               The color used to represent the HP percentage
-   */
-  static getHPColor(current, max) {
-    const pct = Math.clamped(current, 0, max) / max;
-    return Color.fromRGB([(1-(pct/2)), pct, 0]);
-  }
-
-  /* -------------------------------------------- */
-
-  /**
-   * Determine whether the provided ability is usable for remarkable athlete.
-   * @param {string} ability  Ability type to check.
-   * @returns {boolean}       Whether the actor has the remarkable athlete flag and the ability is physical.
-   * @private
-   */
-  _isRemarkableAthlete(ability) {
-    return this.getFlag("dnd5e", "remarkableAthlete")
-      && CONFIG.DND5E.characterFlags.remarkableAthlete.abilities.includes(ability);
-  }
-
-  /* -------------------------------------------- */
-  /*  Rolling                                     */
-  /* -------------------------------------------- */
-
-  /**
-   * Roll a Skill Check
-   * Prompt the user for input regarding Advantage/Disadvantage and any Situational Bonus
-   * @param {string} skillId      The skill id (e.g. "ins")
-   * @param {object} options      Options which configure how the skill check is rolled
-   * @returns {Promise<D20Roll>}  A Promise which resolves to the created Roll instance
-   */
-  async rollSkill(skillId, options={}) {
-    const skl = this.system.skills[skillId];
-    const abl = this.system.abilities[skl.ability];
-    const globalBonuses = this.system.bonuses?.abilities ?? {};
-    const parts = ["@mod", "@abilityCheckBonus"];
-    const data = this.getRollData();
-
-    // Add ability modifier
-    data.mod = skl.mod;
-    data.defaultAbility = skl.ability;
-
-    // Include proficiency bonus
-    if ( skl.prof.hasProficiency ) {
-      parts.push("@prof");
-      data.prof = skl.prof.term;
-    }
-
-    // Global ability check bonus
-    if ( globalBonuses.check ) {
-      parts.push("@checkBonus");
-      data.checkBonus = Roll.replaceFormulaData(globalBonuses.check, data);
-    }
-
-    // Ability-specific check bonus
-    if ( abl?.bonuses?.check ) data.abilityCheckBonus = Roll.replaceFormulaData(abl.bonuses.check, data);
-    else data.abilityCheckBonus = 0;
-
-    // Skill-specific skill bonus
-    if ( skl.bonuses?.check ) {
-      const checkBonusKey = `${skillId}CheckBonus`;
-      parts.push(`@${checkBonusKey}`);
-      data[checkBonusKey] = Roll.replaceFormulaData(skl.bonuses.check, data);
-    }
-
-    // Global skill check bonus
-    if ( globalBonuses.skill ) {
-      parts.push("@skillBonus");
-      data.skillBonus = Roll.replaceFormulaData(globalBonuses.skill, data);
-    }
-
-    // Reliable Talent applies to any skill check we have full or better proficiency in
-    const reliableTalent = (skl.value >= 1 && this.getFlag("dnd5e", "reliableTalent"));
-
-    // Roll and return
-    const flavor = game.i18n.format("DND5E.SkillPromptTitle", {skill: CONFIG.DND5E.skills[skillId]?.label ?? ""});
-    const rollData = foundry.utils.mergeObject({
-      data: data,
-      title: `${flavor}: ${this.name}`,
-      flavor,
-      chooseModifier: true,
-      halflingLucky: this.getFlag("dnd5e", "halflingLucky"),
-      reliableTalent,
-      messageData: {
-        speaker: options.speaker || ChatMessage.getSpeaker({actor: this}),
-        "flags.dnd5e.roll": {type: "skill", skillId }
-      }
-    }, options);
-    rollData.parts = parts.concat(options.parts ?? []);
-
-    /**
-     * A hook event that fires before a skill check is rolled for an Actor.
-     * @function dnd5e.preRollSkill
-     * @memberof hookEvents
-     * @param {Actor5e} actor                Actor for which the skill check is being rolled.
-     * @param {D20RollConfiguration} config  Configuration data for the pending roll.
-     * @param {string} skillId               ID of the skill being rolled as defined in `DND5E.skills`.
-     * @returns {boolean}                    Explicitly return `false` to prevent skill check from being rolled.
-     */
-    if ( Hooks.call("dnd5e.preRollSkill", this, rollData, skillId) === false ) return;
-
-    const roll = await d20Roll(rollData);
-
-    /**
-     * A hook event that fires after a skill check has been rolled for an Actor.
-     * @function dnd5e.rollSkill
-     * @memberof hookEvents
-     * @param {Actor5e} actor   Actor for which the skill check has been rolled.
-     * @param {D20Roll} roll    The resulting roll.
-     * @param {string} skillId  ID of the skill that was rolled as defined in `DND5E.skills`.
-     */
-    if ( roll ) Hooks.callAll("dnd5e.rollSkill", this, roll, skillId);
-
-    return roll;
-  }
-
-  /* -------------------------------------------- */
-
-  /**
-   * Roll a generic ability test or saving throw.
-   * Prompt the user for input on which variety of roll they want to do.
-   * @param {string} abilityId    The ability id (e.g. "str")
-   * @param {object} options      Options which configure how ability tests or saving throws are rolled
-   */
-  rollAbility(abilityId, options={}) {
-    const label = CONFIG.DND5E.abilities[abilityId] ?? "";
-    new Dialog({
-      title: `${game.i18n.format("DND5E.AbilityPromptTitle", {ability: label})}: ${this.name}`,
-      content: `<p>${game.i18n.format("DND5E.AbilityPromptText", {ability: label})}</p>`,
-      buttons: {
-        test: {
-          label: game.i18n.localize("DND5E.ActionAbil"),
-          callback: () => this.rollAbilityTest(abilityId, options)
-        },
-        save: {
-          label: game.i18n.localize("DND5E.ActionSave"),
-          callback: () => this.rollAbilitySave(abilityId, options)
-        }
-      }
-    }).render(true);
-  }
-
-  /* -------------------------------------------- */
-
-  /**
-   * Roll an Ability Test
-   * Prompt the user for input regarding Advantage/Disadvantage and any Situational Bonus
-   * @param {string} abilityId    The ability ID (e.g. "str")
-   * @param {object} options      Options which configure how ability tests are rolled
-   * @returns {Promise<D20Roll>}  A Promise which resolves to the created Roll instance
-   */
-  async rollAbilityTest(abilityId, options={}) {
-    const label = CONFIG.DND5E.abilities[abilityId] ?? "";
-    const abl = this.system.abilities[abilityId];
-    const globalBonuses = this.system.bonuses?.abilities ?? {};
-    const parts = [];
-    const data = this.getRollData();
-
-    // Add ability modifier
-    parts.push("@mod");
-    data.mod = abl?.mod ?? 0;
-
-    // Include proficiency bonus
-    if ( abl?.checkProf.hasProficiency ) {
-      parts.push("@prof");
-      data.prof = abl.checkProf.term;
-    }
-
-    // Add ability-specific check bonus
-    if ( abl?.bonuses?.check ) {
-      const checkBonusKey = `${abilityId}CheckBonus`;
-      parts.push(`@${checkBonusKey}`);
-      data[checkBonusKey] = Roll.replaceFormulaData(abl.bonuses.check, data);
-    }
-
-    // Add global actor bonus
-    if ( globalBonuses.check ) {
-      parts.push("@checkBonus");
-      data.checkBonus = Roll.replaceFormulaData(globalBonuses.check, data);
-    }
-
-    // Roll and return
-    const flavor = game.i18n.format("DND5E.AbilityPromptTitle", {ability: label});
-    const rollData = foundry.utils.mergeObject({
-      data,
-      title: `${flavor}: ${this.name}`,
-      flavor,
-      halflingLucky: this.getFlag("dnd5e", "halflingLucky"),
-      messageData: {
-        speaker: options.speaker || ChatMessage.getSpeaker({actor: this}),
-        "flags.dnd5e.roll": {type: "ability", abilityId }
-      }
-    }, options);
-    rollData.parts = parts.concat(options.parts ?? []);
-
-    /**
-     * A hook event that fires before an ability test is rolled for an Actor.
-     * @function dnd5e.preRollAbilityTest
-     * @memberof hookEvents
-     * @param {Actor5e} actor                Actor for which the ability test is being rolled.
-     * @param {D20RollConfiguration} config  Configuration data for the pending roll.
-     * @param {string} abilityId             ID of the ability being rolled as defined in `DND5E.abilities`.
-     * @returns {boolean}                    Explicitly return `false` to prevent ability test from being rolled.
-     */
-    if ( Hooks.call("dnd5e.preRollAbilityTest", this, rollData, abilityId) === false ) return;
-
-    const roll = await d20Roll(rollData);
-
-    /**
-     * A hook event that fires after an ability test has been rolled for an Actor.
-     * @function dnd5e.rollAbilityTest
-     * @memberof hookEvents
-     * @param {Actor5e} actor     Actor for which the ability test has been rolled.
-     * @param {D20Roll} roll      The resulting roll.
-     * @param {string} abilityId  ID of the ability that was rolled as defined in `DND5E.abilities`.
-     */
-    if ( roll ) Hooks.callAll("dnd5e.rollAbilityTest", this, roll, abilityId);
-
-    return roll;
-  }
-
-  /* -------------------------------------------- */
-
-  /**
-   * Roll an Ability Saving Throw
-   * Prompt the user for input regarding Advantage/Disadvantage and any Situational Bonus
-   * @param {string} abilityId    The ability ID (e.g. "str")
-   * @param {object} options      Options which configure how ability tests are rolled
-   * @returns {Promise<D20Roll>}  A Promise which resolves to the created Roll instance
-   */
-  async rollAbilitySave(abilityId, options={}) {
-    const label = CONFIG.DND5E.abilities[abilityId] ?? "";
-    const abl = this.system.abilities[abilityId];
-    const globalBonuses = this.system.bonuses?.abilities ?? {};
-    const parts = [];
-    const data = this.getRollData();
-
-    // Add ability modifier
-    parts.push("@mod");
-    data.mod = abl?.mod ?? 0;
-
-    // Include proficiency bonus
-    if ( abl?.saveProf.hasProficiency ) {
-      parts.push("@prof");
-      data.prof = abl.saveProf.term;
-    }
-
-    // Include ability-specific saving throw bonus
-    if ( abl?.bonuses?.save ) {
-      const saveBonusKey = `${abilityId}SaveBonus`;
-      parts.push(`@${saveBonusKey}`);
-      data[saveBonusKey] = Roll.replaceFormulaData(abl.bonuses.save, data);
-    }
-
-    // Include a global actor ability save bonus
-    if ( globalBonuses.save ) {
-      parts.push("@saveBonus");
-      data.saveBonus = Roll.replaceFormulaData(globalBonuses.save, data);
-    }
-
-    // Roll and return
-    const flavor = game.i18n.format("DND5E.SavePromptTitle", {ability: label});
-    const rollData = foundry.utils.mergeObject({
-      data,
-      title: `${flavor}: ${this.name}`,
-      flavor,
-      halflingLucky: this.getFlag("dnd5e", "halflingLucky"),
-      messageData: {
-        speaker: options.speaker || ChatMessage.getSpeaker({actor: this}),
-        "flags.dnd5e.roll": {type: "save", abilityId }
-      }
-    }, options);
-    rollData.parts = parts.concat(options.parts ?? []);
-
-    /**
-     * A hook event that fires before an ability save is rolled for an Actor.
-     * @function dnd5e.preRollAbilitySave
-     * @memberof hookEvents
-     * @param {Actor5e} actor                Actor for which the ability save is being rolled.
-     * @param {D20RollConfiguration} config  Configuration data for the pending roll.
-     * @param {string} abilityId             ID of the ability being rolled as defined in `DND5E.abilities`.
-     * @returns {boolean}                    Explicitly return `false` to prevent ability save from being rolled.
-     */
-    if ( Hooks.call("dnd5e.preRollAbilitySave", this, rollData, abilityId) === false ) return;
-
-    const roll = await d20Roll(rollData);
-
-    /**
-     * A hook event that fires after an ability save has been rolled for an Actor.
-     * @function dnd5e.rollAbilitySave
-     * @memberof hookEvents
-     * @param {Actor5e} actor     Actor for which the ability save has been rolled.
-     * @param {D20Roll} roll      The resulting roll.
-     * @param {string} abilityId  ID of the ability that was rolled as defined in `DND5E.abilities`.
-     */
-    if ( roll ) Hooks.callAll("dnd5e.rollAbilitySave", this, roll, abilityId);
-
-    return roll;
-  }
-
-  /* -------------------------------------------- */
-
-  /**
-   * Perform a death saving throw, rolling a d20 plus any global save bonuses
-   * @param {object} options          Additional options which modify the roll
-   * @returns {Promise<D20Roll|null>} A Promise which resolves to the Roll instance
-   */
-  async rollDeathSave(options={}) {
-    const death = this.system.attributes.death;
-
-    // Display a warning if we are not at zero HP or if we already have reached 3
-    if ( (this.system.attributes.hp.value > 0) || (death.failure >= 3) || (death.success >= 3) ) {
-      ui.notifications.warn(game.i18n.localize("DND5E.DeathSaveUnnecessary"));
-      return null;
-    }
-
-    // Evaluate a global saving throw bonus
-    const speaker = options.speaker || ChatMessage.getSpeaker({actor: this});
-    const globalBonuses = this.system.bonuses?.abilities ?? {};
-    const parts = [];
-    const data = this.getRollData();
-
-    // Diamond Soul adds proficiency
-    if ( this.getFlag("dnd5e", "diamondSoul") ) {
-      parts.push("@prof");
-      data.prof = new Proficiency(this.system.attributes.prof, 1).term;
-    }
-
-    // Include a global actor ability save bonus
-    if ( globalBonuses.save ) {
-      parts.push("@saveBonus");
-      data.saveBonus = Roll.replaceFormulaData(globalBonuses.save, data);
-    }
-
-    // Evaluate the roll
-    const flavor = game.i18n.localize("DND5E.DeathSavingThrow");
-    const rollData = foundry.utils.mergeObject({
-      data,
-      title: `${flavor}: ${this.name}`,
-      flavor,
-      halflingLucky: this.getFlag("dnd5e", "halflingLucky"),
-      targetValue: 10,
-      messageData: {
-        speaker: speaker,
-        "flags.dnd5e.roll": {type: "death"}
-      }
-    }, options);
-    rollData.parts = parts.concat(options.parts ?? []);
-
-    /**
-     * A hook event that fires before a death saving throw is rolled for an Actor.
-     * @function dnd5e.preRollDeathSave
-     * @memberof hookEvents
-     * @param {Actor5e} actor                Actor for which the death saving throw is being rolled.
-     * @param {D20RollConfiguration} config  Configuration data for the pending roll.
-     * @returns {boolean}                    Explicitly return `false` to prevent death saving throw from being rolled.
-     */
-    if ( Hooks.call("dnd5e.preRollDeathSave", this, rollData) === false ) return;
-
-    const roll = await d20Roll(rollData);
-    if ( !roll ) return null;
-
-    // Take action depending on the result
-    const details = {};
-
-    // Save success
-    if ( roll.total >= (roll.options.targetValue ?? 10) ) {
-      let successes = (death.success || 0) + 1;
-
-      // Critical Success = revive with 1hp
-      if ( roll.isCritical ) {
-        details.updates = {
-          "system.attributes.death.success": 0,
-          "system.attributes.death.failure": 0,
-          "system.attributes.hp.value": 1
-        };
-        details.chatString = "DND5E.DeathSaveCriticalSuccess";
-      }
-
-      // 3 Successes = survive and reset checks
-      else if ( successes === 3 ) {
-        details.updates = {
-          "system.attributes.death.success": 0,
-          "system.attributes.death.failure": 0
-        };
-        details.chatString = "DND5E.DeathSaveSuccess";
-      }
-
-      // Increment successes
-      else details.updates = {"system.attributes.death.success": Math.clamped(successes, 0, 3)};
-    }
-
-    // Save failure
-    else {
-      let failures = (death.failure || 0) + (roll.isFumble ? 2 : 1);
-      details.updates = {"system.attributes.death.failure": Math.clamped(failures, 0, 3)};
-      if ( failures >= 3 ) {  // 3 Failures = death
-        details.chatString = "DND5E.DeathSaveFailure";
-      }
-    }
-
-    /**
-     * A hook event that fires after a death saving throw has been rolled for an Actor, but before
-     * updates have been performed.
-     * @function dnd5e.rollDeathSave
-     * @memberof hookEvents
-     * @param {Actor5e} actor              Actor for which the death saving throw has been rolled.
-     * @param {D20Roll} roll               The resulting roll.
-     * @param {object} details
-     * @param {object} details.updates     Updates that will be applied to the actor as a result of this save.
-     * @param {string} details.chatString  Localizable string displayed in the create chat message. If not set, then
-     *                                     no chat message will be displayed.
-     * @returns {boolean}                  Explicitly return `false` to prevent updates from being performed.
-     */
-    if ( Hooks.call("dnd5e.rollDeathSave", this, roll, details) === false ) return roll;
-
-    if ( !foundry.utils.isEmpty(details.updates) ) await this.update(details.updates);
-
-    // Display success/failure chat message
-    if ( details.chatString ) {
-      let chatData = { content: game.i18n.format(details.chatString, {name: this.name}), speaker };
-      ChatMessage.applyRollMode(chatData, roll.options.rollMode);
-      await ChatMessage.create(chatData);
-    }
-
-    // Return the rolled result
-    return roll;
-  }
-
-  /* -------------------------------------------- */
-
-  /**
-   * Get an un-evaluated D20Roll instance used to roll initiative for this Actor.
-   * @param {object} [options]                        Options which modify the roll
-   * @param {D20Roll.ADV_MODE} [options.advantageMode]    A specific advantage mode to apply
-   * @param {string} [options.flavor]                     Special flavor text to apply
-   * @returns {D20Roll}                               The constructed but unevaluated D20Roll
-   */
-  getInitiativeRoll(options={}) {
-
-    // Use a temporarily cached initiative roll
-    if ( this._cachedInitiativeRoll ) return this._cachedInitiativeRoll.clone();
-
-    // Obtain required data
-    const init = this.system.attributes?.init;
-    const abilityId = init?.ability || CONFIG.DND5E.initiativeAbility;
-    const data = this.getRollData();
-    const flags = this.flags.dnd5e || {};
-    if ( flags.initiativeAdv ) options.advantageMode ??= dnd5e.dice.D20Roll.ADV_MODE.ADVANTAGE;
-
-    // Standard initiative formula
-    const parts = ["1d20"];
-
-    // Special initiative bonuses
-    if ( init ) {
-      parts.push(init.mod);
-      if ( init.prof.term !== "0" ) {
-        parts.push("@prof");
-        data.prof = init.prof.term;
-      }
-      if ( init.bonus !== 0 ) {
-        parts.push("@bonus");
-        data.bonus = init.bonus;
-      }
-    }
-
-    // Ability check bonuses
-    if ( "abilities" in this.system ) {
-      const abilityBonus = this.system.abilities[abilityId]?.bonuses?.check;
-      if ( abilityBonus ) {
-        parts.push("@abilityBonus");
-        data.abilityBonus = abilityBonus;
-      }
-    }
-
-    // Global check bonus
-    if ( "bonuses" in this.system ) {
-      const globalCheckBonus = this.system.bonuses.abilities?.check;
-      if ( globalCheckBonus ) {
-        parts.push("@globalBonus");
-        data.globalBonus = globalCheckBonus;
-      }
-    }
-
-    // Alert feat
-    if ( flags.initiativeAlert ) {
-      parts.push("@alertBonus");
-      data.alertBonus = 5;
-    }
-
-    // Ability score tiebreaker
-    const tiebreaker = game.settings.get("dnd5e", "initiativeDexTiebreaker");
-    if ( tiebreaker && ("abilities" in this.system) ) {
-      const abilityValue = this.system.abilities[abilityId]?.value;
-      if ( Number.isNumeric(abilityValue) ) parts.push(String(abilityValue / 100));
-    }
-
-    options = foundry.utils.mergeObject({
-      flavor: options.flavor ?? game.i18n.localize("DND5E.Initiative"),
-      halflingLucky: flags.halflingLucky ?? false,
-      critical: null,
-      fumble: null
-    }, options);
-
-    // Create the d20 roll
-    const formula = parts.join(" + ");
-    return new CONFIG.Dice.D20Roll(formula, data, options);
-  }
-
-  /* -------------------------------------------- */
-
-  /**
-   * Roll initiative for this Actor with a dialog that provides an opportunity to elect advantage or other bonuses.
-   * @param {object} [rollOptions]      Options forwarded to the Actor#getInitiativeRoll method
-   * @returns {Promise<void>}           A promise which resolves once initiative has been rolled for the Actor
-   */
-  async rollInitiativeDialog(rollOptions={}) {
-    // Create and configure the Initiative roll
-    const roll = this.getInitiativeRoll(rollOptions);
-    const choice = await roll.configureDialog({
-      defaultRollMode: game.settings.get("core", "rollMode"),
-      title: `${game.i18n.localize("DND5E.InitiativeRoll")}: ${this.name}`,
-      chooseModifier: false,
-      defaultAction: rollOptions.advantageMode ?? dnd5e.dice.D20Roll.ADV_MODE.NORMAL
-    });
-    if ( choice === null ) return; // Closed dialog
-
-    // Temporarily cache the configured roll and use it to roll initiative for the Actor
-    this._cachedInitiativeRoll = roll;
-    await this.rollInitiative({createCombatants: true});
-    delete this._cachedInitiativeRoll;
-  }
-
-  /* -------------------------------------------- */
-
-  /** @inheritdoc */
-  async rollInitiative(options={}) {
-    /**
-     * A hook event that fires before initiative is rolled for an Actor.
-     * @function dnd5e.preRollInitiative
-     * @memberof hookEvents
-     * @param {Actor5e} actor  The Actor that is rolling initiative.
-     * @param {D20Roll} roll   The initiative roll.
-     */
-    if ( Hooks.call("dnd5e.preRollInitiative", this, this._cachedInitiativeRoll) === false ) return;
-
-    const combat = await super.rollInitiative(options);
-    const combatants = this.isToken ? this.getActiveTokens(false, true).reduce((arr, t) => {
-      const combatant = game.combat.getCombatantByToken(t.id);
-      if ( combatant ) arr.push(combatant);
-      return arr;
-    }, []) : [game.combat.getCombatantByActor(this.id)];
-
-    /**
-     * A hook event that fires after an Actor has rolled for initiative.
-     * @function dnd5e.rollInitiative
-     * @memberof hookEvents
-     * @param {Actor5e} actor           The Actor that rolled initiative.
-     * @param {Combatant[]} combatants  The associated Combatants in the Combat.
-     */
-    Hooks.callAll("dnd5e.rollInitiative", this, combatants);
-    return combat;
-  }
-
-  /* -------------------------------------------- */
-
-  /**
-   * Roll a hit die of the appropriate type, gaining hit points equal to the die roll plus your CON modifier.
-   * @param {string} [denomination]  The hit denomination of hit die to roll. Example "d8".
-   *                                 If no denomination is provided, the first available HD will be used
-   * @param {object} options         Additional options which modify the roll.
-   * @returns {Promise<Roll|null>}   The created Roll instance, or null if no hit die was rolled
-   */
-  async rollHitDie(denomination, options={}) {
-    // If no denomination was provided, choose the first available
-    let cls = null;
-    if ( !denomination ) {
-      cls = this.itemTypes.class.find(c => c.system.hitDiceUsed < c.system.levels);
-      if ( !cls ) return null;
-      denomination = cls.system.hitDice;
-    }
-
-    // Otherwise, locate a class (if any) which has an available hit die of the requested denomination
-    else cls = this.items.find(i => {
-      return (i.system.hitDice === denomination) && ((i.system.hitDiceUsed || 0) < (i.system.levels || 1));
-    });
-
-    // If no class is available, display an error notification
-    if ( !cls ) {
-      ui.notifications.error(game.i18n.format("DND5E.HitDiceWarn", {name: this.name, formula: denomination}));
-      return null;
-    }
-
-    // Prepare roll data
-    const flavor = game.i18n.localize("DND5E.HitDiceRoll");
-    const rollConfig = foundry.utils.mergeObject({
-      formula: `max(0, 1${denomination} + @abilities.con.mod)`,
-      data: this.getRollData(),
-      chatMessage: true,
-      messageData: {
-        speaker: ChatMessage.getSpeaker({actor: this}),
-        flavor,
-        title: `${flavor}: ${this.name}`,
-        rollMode: game.settings.get("core", "rollMode"),
-        "flags.dnd5e.roll": {type: "hitDie"}
-      }
-    }, options);
-
-    /**
-     * A hook event that fires before a hit die is rolled for an Actor.
-     * @function dnd5e.preRollHitDie
-     * @memberof hookEvents
-     * @param {Actor5e} actor               Actor for which the hit die is to be rolled.
-     * @param {object} config               Configuration data for the pending roll.
-     * @param {string} config.formula       Formula that will be rolled.
-     * @param {object} config.data          Data used when evaluating the roll.
-     * @param {boolean} config.chatMessage  Should a chat message be created for this roll?
-     * @param {object} config.messageData   Data used to create the chat message.
-     * @param {string} denomination         Size of hit die to be rolled.
-     * @returns {boolean}                   Explicitly return `false` to prevent hit die from being rolled.
-     */
-    if ( Hooks.call("dnd5e.preRollHitDie", this, rollConfig, denomination) === false ) return;
-
-    const roll = await new Roll(rollConfig.formula, rollConfig.data).roll({async: true});
-    if ( rollConfig.chatMessage ) roll.toMessage(rollConfig.messageData);
-
-    const hp = this.system.attributes.hp;
-    const dhp = Math.min(hp.max + (hp.tempmax ?? 0) - hp.value, roll.total);
-    const updates = {
-      actor: {"system.attributes.hp.value": hp.value + dhp},
-      class: {"system.hitDiceUsed": cls.system.hitDiceUsed + 1}
-    };
-
-    /**
-     * A hook event that fires after a hit die has been rolled for an Actor, but before updates have been performed.
-     * @function dnd5e.rollHitDie
-     * @memberof hookEvents
-     * @param {Actor5e} actor         Actor for which the hit die has been rolled.
-     * @param {Roll} roll             The resulting roll.
-     * @param {object} updates
-     * @param {object} updates.actor  Updates that will be applied to the actor.
-     * @param {object} updates.class  Updates that will be applied to the class.
-     * @returns {boolean}             Explicitly return `false` to prevent updates from being performed.
-     */
-    if ( Hooks.call("dnd5e.rollHitDie", this, roll, updates) === false ) return roll;
-
-    // Re-evaluate dhp in the event that it was changed in the previous hook
-    const updateOptions = { dhp: (updates.actor?.["system.attributes.hp.value"] ?? hp.value) - hp.value };
-
-    // Perform updates
-    if ( !foundry.utils.isEmpty(updates.actor) ) await this.update(updates.actor, updateOptions);
-    if ( !foundry.utils.isEmpty(updates.class) ) await cls.update(updates.class);
-
-    return roll;
-  }
-
-  /* -------------------------------------------- */
-
-  /**
-   * Roll hit points for a specific class as part of a level-up workflow.
-   * @param {Item5e} item                         The class item whose hit dice to roll.
-   * @param {object} options
-   * @param {boolean} [options.chatMessage=true]  Display the chat message for this roll.
-   * @returns {Promise<Roll>}                     The completed roll.
-   * @see {@link dnd5e.preRollClassHitPoints}
-   */
-  async rollClassHitPoints(item, { chatMessage=true }={}) {
-    if ( item.type !== "class" ) throw new Error("Hit points can only be rolled for a class item.");
-    const rollData = {
-      formula: `1${item.system.hitDice}`,
-      data: item.getRollData(),
-      chatMessage
-    };
-    const flavor = game.i18n.format("DND5E.AdvancementHitPointsRollMessage", { class: item.name });
-    const messageData = {
-      title: `${flavor}: ${this.name}`,
-      flavor,
-      speaker: ChatMessage.getSpeaker({ actor: this }),
-      "flags.dnd5e.roll": { type: "hitPoints" }
-    };
-
-    /**
-     * A hook event that fires before hit points are rolled for a character's class.
-     * @function dnd5e.preRollClassHitPoints
-     * @memberof hookEvents
-     * @param {Actor5e} actor            Actor for which the hit points are being rolled.
-     * @param {Item5e} item              The class item whose hit dice will be rolled.
-     * @param {object} rollData
-     * @param {string} rollData.formula  The string formula to parse.
-     * @param {object} rollData.data     The data object against which to parse attributes within the formula.
-     * @param {object} messageData       The data object to use when creating the message.
-     */
-    Hooks.callAll("dnd5e.preRollClassHitPoints", this, item, rollData, messageData);
-
-    const roll = new Roll(rollData.formula, rollData.data);
-    await roll.evaluate({async: true});
-
-    /**
-     * A hook event that fires after hit points haven been rolled for a character's class.
-     * @function dnd5e.rollClassHitPoints
-     * @memberof hookEvents
-     * @param {Actor5e} actor  Actor for which the hit points have been rolled.
-     * @param {Roll} roll      The resulting roll.
-     */
-    Hooks.callAll("dnd5e.rollClassHitPoints", this, roll);
-
-    if ( rollData.chatMessage ) await roll.toMessage(messageData);
-    return roll;
-  }
-
-  /* -------------------------------------------- */
-
-  /**
-   * Roll hit points for an NPC based on the HP formula.
-   * @param {object} options
-   * @param {boolean} [options.chatMessage=true]  Display the chat message for this roll.
-   * @returns {Promise<Roll>}                     The completed roll.
-   * @see {@link dnd5e.preRollNPCHitPoints}
-   */
-  async rollNPCHitPoints({ chatMessage=true }={}) {
-    if ( this.type !== "npc" ) throw new Error("NPC hit points can only be rolled for NPCs");
-    const rollData = {
-      formula: this.system.attributes.hp.formula,
-      data: this.getRollData(),
-      chatMessage
-    };
-    const flavor = game.i18n.format("DND5E.HPFormulaRollMessage");
-    const messageData = {
-      title: `${flavor}: ${this.name}`,
-      flavor,
-      speaker: ChatMessage.getSpeaker({ actor: this }),
-      "flags.dnd5e.roll": { type: "hitPoints" }
-    };
-
-    /**
-     * A hook event that fires before hit points are rolled for an NPC.
-     * @function dnd5e.preRollNPCHitPoints
-     * @memberof hookEvents
-     * @param {Actor5e} actor            Actor for which the hit points are being rolled.
-     * @param {object} rollData
-     * @param {string} rollData.formula  The string formula to parse.
-     * @param {object} rollData.data     The data object against which to parse attributes within the formula.
-     * @param {object} messageData       The data object to use when creating the message.
-     */
-    Hooks.callAll("dnd5e.preRollNPCHitPoints", this, rollData, messageData);
-
-    const roll = new Roll(rollData.formula, rollData.data);
-    await roll.evaluate({async: true});
-
-    /**
-     * A hook event that fires after hit points are rolled for an NPC.
-     * @function dnd5e.rollNPCHitPoints
-     * @memberof hookEvents
-     * @param {Actor5e} actor  Actor for which the hit points have been rolled.
-     * @param {Roll} roll      The resulting roll.
-     */
-    Hooks.callAll("dnd5e.rollNPCHitPoints", this, roll);
-
-    if ( rollData.chatMessage ) await roll.toMessage(messageData);
-    return roll;
-  }
-
-  /* -------------------------------------------- */
-  /*  Resting                                     */
-  /* -------------------------------------------- */
-
-  /**
-   * Configuration options for a rest.
-   *
-   * @typedef {object} RestConfiguration
-   * @property {boolean} dialog            Present a dialog window which allows for rolling hit dice as part of the
-   *                                       Short Rest and selecting whether a new day has occurred.
-   * @property {boolean} chat              Should a chat message be created to summarize the results of the rest?
-   * @property {boolean} newDay            Does this rest carry over to a new day?
-   * @property {boolean} [autoHD]          Should hit dice be spent automatically during a short rest?
-   * @property {number} [autoHDThreshold]  How many hit points should be missing before hit dice are
-   *                                       automatically spent during a short rest.
-   */
-
-  /**
-   * Results from a rest operation.
-   *
-   * @typedef {object} RestResult
-   * @property {number} dhp            Hit points recovered during the rest.
-   * @property {number} dhd            Hit dice recovered or spent during the rest.
-   * @property {object} updateData     Updates applied to the actor.
-   * @property {object[]} updateItems  Updates applied to actor's items.
-   * @property {boolean} longRest      Whether the rest type was a long rest.
-   * @property {boolean} newDay        Whether a new day occurred during the rest.
-   * @property {Roll[]} rolls          Any rolls that occurred during the rest process, not including hit dice.
-   */
-
-  /* -------------------------------------------- */
-
-  /**
-   * Take a short rest, possibly spending hit dice and recovering resources, item uses, and pact slots.
-   * @param {RestConfiguration} [config]  Configuration options for a short rest.
-   * @returns {Promise<RestResult>}       A Promise which resolves once the short rest workflow has completed.
-   */
-  async shortRest(config={}) {
-    config = foundry.utils.mergeObject({
-      dialog: true, chat: true, newDay: false, autoHD: false, autoHDThreshold: 3
-    }, config);
-
-    /**
-     * A hook event that fires before a short rest is started.
-     * @function dnd5e.preShortRest
-     * @memberof hookEvents
-     * @param {Actor5e} actor             The actor that is being rested.
-     * @param {RestConfiguration} config  Configuration options for the rest.
-     * @returns {boolean}                 Explicitly return `false` to prevent the rest from being started.
-     */
-    if ( Hooks.call("dnd5e.preShortRest", this, config) === false ) return;
-
-    // Take note of the initial hit points and number of hit dice the Actor has
-    const hd0 = this.system.attributes.hd;
-    const hp0 = this.system.attributes.hp.value;
-
-    // Display a Dialog for rolling hit dice
-    if ( config.dialog ) {
-      try { config.newDay = await ShortRestDialog.shortRestDialog({actor: this, canRoll: hd0 > 0});
-      } catch(err) { return; }
-    }
-
-    // Automatically spend hit dice
-    else if ( config.autoHD ) await this.autoSpendHitDice({ threshold: config.autoHDThreshold });
-
-    // Return the rest result
-    const dhd = this.system.attributes.hd - hd0;
-    const dhp = this.system.attributes.hp.value - hp0;
-    return this._rest(config.chat, config.newDay, false, dhd, dhp);
-  }
-
-  /* -------------------------------------------- */
-
-  /**
-   * Take a long rest, recovering hit points, hit dice, resources, item uses, and spell slots.
-   * @param {RestConfiguration} [config]  Configuration options for a long rest.
-   * @returns {Promise<RestResult>}       A Promise which resolves once the long rest workflow has completed.
-   */
-  async longRest(config={}) {
-    config = foundry.utils.mergeObject({
-      dialog: true, chat: true, newDay: true
-    }, config);
-
-    /**
-     * A hook event that fires before a long rest is started.
-     * @function dnd5e.preLongRest
-     * @memberof hookEvents
-     * @param {Actor5e} actor             The actor that is being rested.
-     * @param {RestConfiguration} config  Configuration options for the rest.
-     * @returns {boolean}                 Explicitly return `false` to prevent the rest from being started.
-     */
-    if ( Hooks.call("dnd5e.preLongRest", this, config) === false ) return;
-
-    if ( config.dialog ) {
-      try { config.newDay = await LongRestDialog.longRestDialog({actor: this}); }
-      catch(err) { return; }
-    }
-
-    return this._rest(config.chat, config.newDay, true);
-  }
-
-  /* -------------------------------------------- */
-
-  /**
-   * Perform all of the changes needed for a short or long rest.
-   *
-   * @param {boolean} chat           Summarize the results of the rest workflow as a chat message.
-   * @param {boolean} newDay         Has a new day occurred during this rest?
-   * @param {boolean} longRest       Is this a long rest?
-   * @param {number} [dhd=0]         Number of hit dice spent during so far during the rest.
-   * @param {number} [dhp=0]         Number of hit points recovered so far during the rest.
-   * @returns {Promise<RestResult>}  Consolidated results of the rest workflow.
-   * @private
-   */
-  async _rest(chat, newDay, longRest, dhd=0, dhp=0) {
-    let hitPointsRecovered = 0;
-    let hitPointUpdates = {};
-    let hitDiceRecovered = 0;
-    let hitDiceUpdates = [];
-    const rolls = [];
-
-    // Recover hit points & hit dice on long rest
-    if ( longRest ) {
-      ({ updates: hitPointUpdates, hitPointsRecovered } = this._getRestHitPointRecovery());
-      ({ updates: hitDiceUpdates, hitDiceRecovered } = this._getRestHitDiceRecovery());
-    }
-
-    // Figure out the rest of the changes
-    const result = {
-      dhd: dhd + hitDiceRecovered,
-      dhp: dhp + hitPointsRecovered,
-      updateData: {
-        ...hitPointUpdates,
-        ...this._getRestResourceRecovery({ recoverShortRestResources: !longRest, recoverLongRestResources: longRest }),
-        ...this._getRestSpellRecovery({ recoverSpells: longRest })
-      },
-      updateItems: [
-        ...hitDiceUpdates,
-        ...(await this._getRestItemUsesRecovery({ recoverLongRestUses: longRest, recoverDailyUses: newDay, rolls }))
-      ],
-      longRest,
-      newDay
-    };
-    result.rolls = rolls;
-
-    /**
-     * A hook event that fires after rest result is calculated, but before any updates are performed.
-     * @function dnd5e.preRestCompleted
-     * @memberof hookEvents
-     * @param {Actor5e} actor      The actor that is being rested.
-     * @param {RestResult} result  Details on the rest to be completed.
-     * @returns {boolean}          Explicitly return `false` to prevent the rest updates from being performed.
-     */
-    if ( Hooks.call("dnd5e.preRestCompleted", this, result) === false ) return result;
-
-    // Perform updates
-    await this.update(result.updateData);
-    await this.updateEmbeddedDocuments("Item", result.updateItems);
-
-    // Display a Chat Message summarizing the rest effects
-    if ( chat ) await this._displayRestResultMessage(result, longRest);
-
-    /**
-     * A hook event that fires when the rest process is completed for an actor.
-     * @function dnd5e.restCompleted
-     * @memberof hookEvents
-     * @param {Actor5e} actor      The actor that just completed resting.
-     * @param {RestResult} result  Details on the rest completed.
-     */
-    Hooks.callAll("dnd5e.restCompleted", this, result);
-
-    // Return data summarizing the rest effects
-    return result;
-  }
-
-  /* -------------------------------------------- */
-
-  /**
-   * Display a chat message with the result of a rest.
-   *
-   * @param {RestResult} result         Result of the rest operation.
-   * @param {boolean} [longRest=false]  Is this a long rest?
-   * @returns {Promise<ChatMessage>}    Chat message that was created.
-   * @protected
-   */
-  async _displayRestResultMessage(result, longRest=false) {
-    const { dhd, dhp, newDay } = result;
-    const diceRestored = dhd !== 0;
-    const healthRestored = dhp !== 0;
-    const length = longRest ? "Long" : "Short";
-
-    // Summarize the rest duration
-    let restFlavor;
-    switch (game.settings.get("dnd5e", "restVariant")) {
-      case "normal":
-        restFlavor = (longRest && newDay) ? "DND5E.LongRestOvernight" : `DND5E.${length}RestNormal`;
-        break;
-      case "gritty":
-        restFlavor = (!longRest && newDay) ? "DND5E.ShortRestOvernight" : `DND5E.${length}RestGritty`;
-        break;
-      case "epic":
-        restFlavor = `DND5E.${length}RestEpic`;
-        break;
-    }
-
-    // Determine the chat message to display
-    let message;
-    if ( diceRestored && healthRestored ) message = `DND5E.${length}RestResult`;
-    else if ( longRest && !diceRestored && healthRestored ) message = "DND5E.LongRestResultHitPoints";
-    else if ( longRest && diceRestored && !healthRestored ) message = "DND5E.LongRestResultHitDice";
-    else message = `DND5E.${length}RestResultShort`;
-
-    // Create a chat message
-    let chatData = {
-      user: game.user.id,
-      speaker: {actor: this, alias: this.name},
-      flavor: game.i18n.localize(restFlavor),
-      rolls: result.rolls,
-      content: game.i18n.format(message, {
-        name: this.name,
-        dice: longRest ? dhd : -dhd,
-        health: dhp
-      })
-    };
-    ChatMessage.applyRollMode(chatData, game.settings.get("core", "rollMode"));
-    return ChatMessage.create(chatData);
-  }
-
-  /* -------------------------------------------- */
-
-  /**
-   * Automatically spend hit dice to recover hit points up to a certain threshold.
-   * @param {object} [options]
-   * @param {number} [options.threshold=3]  A number of missing hit points which would trigger an automatic HD roll.
-   * @returns {Promise<number>}             Number of hit dice spent.
-   */
-  async autoSpendHitDice({ threshold=3 }={}) {
-    const hp = this.system.attributes.hp;
-    const max = hp.max + hp.tempmax;
-    let diceRolled = 0;
-    while ( (this.system.attributes.hp.value + threshold) <= max ) {
-      const r = await this.rollHitDie();
-      if ( r === null ) break;
-      diceRolled += 1;
-    }
-    return diceRolled;
-  }
-
-  /* -------------------------------------------- */
-
-  /**
-   * Recovers actor hit points and eliminates any temp HP.
-   * @param {object} [options]
-   * @param {boolean} [options.recoverTemp=true]     Reset temp HP to zero.
-   * @param {boolean} [options.recoverTempMax=true]  Reset temp max HP to zero.
-   * @returns {object}                               Updates to the actor and change in hit points.
-   * @protected
-   */
-  _getRestHitPointRecovery({recoverTemp=true, recoverTempMax=true}={}) {
-    const hp = this.system.attributes.hp;
-    let max = hp.max;
-    let updates = {};
-    if ( recoverTempMax ) updates["system.attributes.hp.tempmax"] = 0;
-    else max += hp.tempmax;
-    updates["system.attributes.hp.value"] = max;
-    if ( recoverTemp ) updates["system.attributes.hp.temp"] = 0;
-    return { updates, hitPointsRecovered: max - hp.value };
-  }
-
-  /* -------------------------------------------- */
-
-  /**
-   * Recovers actor resources.
-   * @param {object} [options]
-   * @param {boolean} [options.recoverShortRestResources=true]  Recover resources that recharge on a short rest.
-   * @param {boolean} [options.recoverLongRestResources=true]   Recover resources that recharge on a long rest.
-   * @returns {object}                                          Updates to the actor.
-   * @protected
-   */
-  _getRestResourceRecovery({recoverShortRestResources=true, recoverLongRestResources=true}={}) {
-    let updates = {};
-    for ( let [k, r] of Object.entries(this.system.resources) ) {
-      if ( Number.isNumeric(r.max) && ((recoverShortRestResources && r.sr) || (recoverLongRestResources && r.lr)) ) {
-        updates[`system.resources.${k}.value`] = Number(r.max);
-      }
-    }
-    return updates;
-  }
-
-  /* -------------------------------------------- */
-
-  /**
-   * Recovers spell slots and pact slots.
-   * @param {object} [options]
-   * @param {boolean} [options.recoverPact=true]     Recover all expended pact slots.
-   * @param {boolean} [options.recoverSpells=true]   Recover all expended spell slots.
-   * @returns {object}                               Updates to the actor.
-   * @protected
-   */
-  _getRestSpellRecovery({recoverPact=true, recoverSpells=true}={}) {
-    const spells = this.system.spells;
-    let updates = {};
-    if ( recoverPact ) {
-      const pact = spells.pact;
-      updates["system.spells.pact.value"] = pact.override || pact.max;
-    }
-    if ( recoverSpells ) {
-      for ( let [k, v] of Object.entries(spells) ) {
-        updates[`system.spells.${k}.value`] = Number.isNumeric(v.override) ? v.override : (v.max ?? 0);
-      }
-    }
-    return updates;
-  }
-
-  /* -------------------------------------------- */
-
-  /**
-   * Recovers class hit dice during a long rest.
-   *
-   * @param {object} [options]
-   * @param {number} [options.maxHitDice]  Maximum number of hit dice to recover.
-   * @returns {object}                     Array of item updates and number of hit dice recovered.
-   * @protected
-   */
-  _getRestHitDiceRecovery({maxHitDice}={}) {
-    // Determine the number of hit dice which may be recovered
-    if ( maxHitDice === undefined ) maxHitDice = Math.max(Math.floor(this.system.details.level / 2), 1);
-
-    // Sort classes which can recover HD, assuming players prefer recovering larger HD first.
-    const sortedClasses = Object.values(this.classes).sort((a, b) => {
-      return (parseInt(b.system.hitDice.slice(1)) || 0) - (parseInt(a.system.hitDice.slice(1)) || 0);
-    });
-
-    // Update hit dice usage
-    let updates = [];
-    let hitDiceRecovered = 0;
-    for ( let item of sortedClasses ) {
-      const hitDiceUsed = item.system.hitDiceUsed;
-      if ( (hitDiceRecovered < maxHitDice) && (hitDiceUsed > 0) ) {
-        let delta = Math.min(hitDiceUsed || 0, maxHitDice - hitDiceRecovered);
-        hitDiceRecovered += delta;
-        updates.push({_id: item.id, "system.hitDiceUsed": hitDiceUsed - delta});
-      }
-    }
-    return { updates, hitDiceRecovered };
-  }
-
-  /* -------------------------------------------- */
-
-  /**
-   * Recovers item uses during short or long rests.
-   * @param {object} [options]
-   * @param {boolean} [options.recoverShortRestUses=true]  Recover uses for items that recharge after a short rest.
-   * @param {boolean} [options.recoverLongRestUses=true]   Recover uses for items that recharge after a long rest.
-   * @param {boolean} [options.recoverDailyUses=true]      Recover uses for items that recharge on a new day.
-   * @param {Roll[]} [options.rolls]                       Rolls that have been performed as part of this rest.
-   * @returns {Promise<object[]>}                          Array of item updates.
-   * @protected
-   */
-  async _getRestItemUsesRecovery({recoverShortRestUses=true, recoverLongRestUses=true,
-    recoverDailyUses=true, rolls}={}) {
-    let recovery = [];
-    if ( recoverShortRestUses ) recovery.push("sr");
-    if ( recoverLongRestUses ) recovery.push("lr");
-    if ( recoverDailyUses ) recovery.push("day");
-    let updates = [];
-    for ( let item of this.items ) {
-      const uses = item.system.uses;
-      if ( recovery.includes(uses?.per) ) {
-        updates.push({_id: item.id, "system.uses.value": uses.max});
-      }
-      if ( recoverLongRestUses && item.system.recharge?.value ) {
-        updates.push({_id: item.id, "system.recharge.charged": true});
-      }
-
-      // Items that roll to gain charges on a new day
-      if ( recoverDailyUses && uses?.recovery && (uses?.per === "charges") ) {
-        const roll = new Roll(uses.recovery, this.getRollData());
-        if ( recoverLongRestUses && (game.settings.get("dnd5e", "restVariant") === "gritty") ) {
-          roll.alter(7, 0, {multiplyNumeric: true});
-        }
-
-        let total = 0;
-        try {
-          total = (await roll.evaluate({async: true})).total;
-        } catch(err) {
-          ui.notifications.warn(game.i18n.format("DND5E.ItemRecoveryFormulaWarning", {
-            name: item.name,
-            formula: uses.recovery
-          }));
-        }
-
-        const newValue = Math.clamped(uses.value + total, 0, uses.max);
-        if ( newValue !== uses.value ) {
-          const diff = newValue - uses.value;
-          const isMax = newValue === uses.max;
-          const locKey = `DND5E.Item${diff < 0 ? "Loss" : "Recovery"}Roll${isMax ? "Max" : ""}`;
-          updates.push({_id: item.id, "system.uses.value": newValue});
-          rolls.push(roll);
-          await roll.toMessage({
-            user: game.user.id,
-            speaker: {actor: this, alias: this.name},
-            flavor: game.i18n.format(locKey, {name: item.name, count: Math.abs(diff)})
-          });
-        }
-      }
-    }
-    return updates;
-  }
-
-  /* -------------------------------------------- */
-  /*  Conversion & Transformation                 */
-  /* -------------------------------------------- */
-
-  /**
-   * Convert all carried currency to the highest possible denomination using configured conversion rates.
-   * See CONFIG.DND5E.currencies for configuration.
-   * @returns {Promise<Actor5e>}
-   */
-  convertCurrency() {
-    const currency = foundry.utils.deepClone(this.system.currency);
-    const currencies = Object.entries(CONFIG.DND5E.currencies);
-    currencies.sort((a, b) => a[1].conversion - b[1].conversion);
-
-    // Count total converted units of the base currency
-    let basis = currencies.reduce((change, [denomination, config]) => {
-      if ( !config.conversion ) return change;
-      return change + (currency[denomination] / config.conversion);
-    }, 0);
-
-    // Convert base units into the highest denomination possible
-    for ( const [denomination, config] of currencies) {
-      if ( !config.conversion ) continue;
-      const amount = Math.floor(basis * config.conversion);
-      currency[denomination] = amount;
-      basis -= (amount / config.conversion);
-    }
-
-    // Save the updated currency object
-    return this.update({"system.currency": currency});
-  }
-
-  /* -------------------------------------------- */
-
-  /**
-   * Options that determine what properties of the original actor are kept and which are replaced with
-   * the target actor.
-   *
-   * @typedef {object} TransformationOptions
-   * @property {boolean} [keepPhysical=false]       Keep physical abilities (str, dex, con)
-   * @property {boolean} [keepMental=false]         Keep mental abilities (int, wis, cha)
-   * @property {boolean} [keepSaves=false]          Keep saving throw proficiencies
-   * @property {boolean} [keepSkills=false]         Keep skill proficiencies
-   * @property {boolean} [mergeSaves=false]         Take the maximum of the save proficiencies
-   * @property {boolean} [mergeSkills=false]        Take the maximum of the skill proficiencies
-   * @property {boolean} [keepClass=false]          Keep proficiency bonus
-   * @property {boolean} [keepFeats=false]          Keep features
-   * @property {boolean} [keepSpells=false]         Keep spells
-   * @property {boolean} [keepItems=false]          Keep items
-   * @property {boolean} [keepBio=false]            Keep biography
-   * @property {boolean} [keepVision=false]         Keep vision
-   * @property {boolean} [keepSelf=false]           Keep self
-   * @property {boolean} [keepAE=false]             Keep all effects
-   * @property {boolean} [keepOriginAE=true]        Keep effects which originate on this actor
-   * @property {boolean} [keepOtherOriginAE=true]   Keep effects which originate on another actor
-   * @property {boolean} [keepSpellAE=true]         Keep effects which originate from actors spells
-   * @property {boolean} [keepFeatAE=true]          Keep effects which originate from actors features
-   * @property {boolean} [keepEquipmentAE=true]     Keep effects which originate on actors equipment
-   * @property {boolean} [keepClassAE=true]         Keep effects which originate from actors class/subclass
-   * @property {boolean} [keepBackgroundAE=true]    Keep effects which originate from actors background
-   * @property {boolean} [transformTokens=true]     Transform linked tokens too
-   */
-
-  /**
-   * Transform this Actor into another one.
-   *
-   * @param {Actor5e} target                      The target Actor.
-   * @param {TransformationOptions} [options={}]  Options that determine how the transformation is performed.
-   * @param {boolean} [options.renderSheet=true]  Render the sheet of the transformed actor after the polymorph
-   * @returns {Promise<Array<Token>>|null}        Updated token if the transformation was performed.
-   */
-  async transformInto(target, { keepPhysical=false, keepMental=false, keepSaves=false, keepSkills=false,
-    mergeSaves=false, mergeSkills=false, keepClass=false, keepFeats=false, keepSpells=false, keepItems=false,
-    keepBio=false, keepVision=false, keepSelf=false, keepAE=false, keepOriginAE=true, keepOtherOriginAE=true,
-    keepSpellAE=true, keepEquipmentAE=true, keepFeatAE=true, keepClassAE=true, keepBackgroundAE=true,
-    transformTokens=true}={}, {renderSheet=true}={}) {
-
-    // Ensure the player is allowed to polymorph
-    const allowed = game.settings.get("dnd5e", "allowPolymorphing");
-    if ( !allowed && !game.user.isGM ) {
-      return ui.notifications.warn(game.i18n.localize("DND5E.PolymorphWarn"));
-    }
-
-    // Get the original Actor data and the new source data
-    const o = this.toObject();
-    o.flags.dnd5e = o.flags.dnd5e || {};
-    o.flags.dnd5e.transformOptions = {mergeSkills, mergeSaves};
-    const source = target.toObject();
-
-    if ( keepSelf ) {
-      o.img = source.img;
-      o.name = `${o.name} (${game.i18n.localize("DND5E.PolymorphSelf")})`;
-    }
-
-    // Prepare new data to merge from the source
-    const d = foundry.utils.mergeObject({
-      type: o.type, // Remain the same actor type
-      name: `${o.name} (${source.name})`, // Append the new shape to your old name
-      system: source.system, // Get the systemdata model of your new form
-      items: source.items, // Get the items of your new form
-      effects: o.effects.concat(source.effects), // Combine active effects from both forms
-      img: source.img, // New appearance
-      ownership: o.ownership, // Use the original actor permissions
-      folder: o.folder, // Be displayed in the same sidebar folder
-      flags: o.flags, // Use the original actor flags
-      prototypeToken: { name: `${o.name} (${source.name})`, texture: {}, sight: {}, detectionModes: [] } // Set a new empty token
-    }, keepSelf ? o : {}); // Keeps most of original actor
-
-    // Specifically delete some data attributes
-    delete d.system.resources; // Don't change your resource pools
-    delete d.system.currency; // Don't lose currency
-    delete d.system.bonuses; // Don't lose global bonuses
-
-    // Specific additional adjustments
-    d.system.details.alignment = o.system.details.alignment; // Don't change alignment
-    d.system.attributes.exhaustion = o.system.attributes.exhaustion; // Keep your prior exhaustion level
-    d.system.attributes.inspiration = o.system.attributes.inspiration; // Keep inspiration
-    d.system.spells = o.system.spells; // Keep spell slots
-    d.system.attributes.ac.flat = target.system.attributes.ac.value; // Override AC
-
-    // Token appearance updates
-    for ( const k of ["width", "height", "alpha", "lockRotation"] ) {
-      d.prototypeToken[k] = source.prototypeToken[k];
-    }
-    for ( const k of ["offsetX", "offsetY", "scaleX", "scaleY", "src", "tint"] ) {
-      d.prototypeToken.texture[k] = source.prototypeToken.texture[k];
-    }
-    for ( const k of ["bar1", "bar2", "displayBars", "displayName", "disposition", "rotation", "elevation"] ) {
-      d.prototypeToken[k] = o.prototypeToken[k];
-    }
-
-    if ( !keepSelf ) {
-      const sightSource = keepVision ? o.prototypeToken : source.prototypeToken;
-      for ( const k of ["range", "angle", "visionMode", "color", "attenuation", "brightness", "saturation", "contrast", "enabled"] ) {
-        d.prototypeToken.sight[k] = sightSource.sight[k];
-      }
-      d.prototypeToken.detectionModes = sightSource.detectionModes;
-
-      // Transfer ability scores
-      const abilities = d.system.abilities;
-      for ( let k of Object.keys(abilities) ) {
-        const oa = o.system.abilities[k];
-        const prof = abilities[k].proficient;
-        if ( keepPhysical && ["str", "dex", "con"].includes(k) ) abilities[k] = oa;
-        else if ( keepMental && ["int", "wis", "cha"].includes(k) ) abilities[k] = oa;
-        if ( keepSaves ) abilities[k].proficient = oa.proficient;
-        else if ( mergeSaves ) abilities[k].proficient = Math.max(prof, oa.proficient);
-      }
-
-      // Transfer skills
-      if ( keepSkills ) d.system.skills = o.system.skills;
-      else if ( mergeSkills ) {
-        for ( let [k, s] of Object.entries(d.system.skills) ) {
-          s.value = Math.max(s.value, o.system.skills[k].value);
-        }
-      }
-
-      // Keep specific items from the original data
-      d.items = d.items.concat(o.items.filter(i => {
-        if ( ["class", "subclass"].includes(i.type) ) return keepClass;
-        else if ( i.type === "feat" ) return keepFeats;
-        else if ( i.type === "spell" ) return keepSpells;
-        else return keepItems;
-      }));
-
-      // Transfer classes for NPCs
-      if ( !keepClass && d.system.details.cr ) {
-        const cls = new dnd5e.dataModels.item.ClassData({levels: d.system.details.cr});
-        d.items.push({
-          type: "class",
-          name: game.i18n.localize("DND5E.PolymorphTmpClass"),
-          system: cls.toObject()
-        });
-      }
-
-      // Keep biography
-      if ( keepBio ) d.system.details.biography = o.system.details.biography;
-
-      // Keep senses
-      if ( keepVision ) d.system.traits.senses = o.system.traits.senses;
-
-      // Remove active effects
-      const oEffects = foundry.utils.deepClone(d.effects);
-      const originEffectIds = new Set(oEffects.filter(effect => {
-        return !effect.origin || effect.origin === this.uuid;
-      }).map(e => e._id));
-      d.effects = d.effects.filter(e => {
-        if ( keepAE ) return true;
-        const origin = e.origin?.startsWith("Actor") || e.origin?.startsWith("Item") ? fromUuidSync(e.origin) : {};
-        const originIsSelf = origin?.parent?.uuid === this.uuid;
-        const isOriginEffect = originEffectIds.has(e._id);
-        if ( isOriginEffect ) return keepOriginAE;
-        if ( !isOriginEffect && !originIsSelf ) return keepOtherOriginAE;
-        if ( origin.type === "spell" ) return keepSpellAE;
-        if ( origin.type === "feat" ) return keepFeatAE;
-        if ( origin.type === "background" ) return keepBackgroundAE;
-        if ( ["subclass", "feat"].includes(origin.type) ) return keepClassAE;
-        if ( ["equipment", "weapon", "tool", "loot", "backpack"].includes(origin.type) ) return keepEquipmentAE;
-        return true;
-      });
-    }
-
-    // Set a random image if source is configured that way
-    if ( source.prototypeToken.randomImg ) {
-      const images = await target.getTokenImages();
-      d.prototypeToken.texture.src = images[Math.floor(Math.random() * images.length)];
-    }
-
-    // Set new data flags
-    if ( !this.isPolymorphed || !d.flags.dnd5e.originalActor ) d.flags.dnd5e.originalActor = this.id;
-    d.flags.dnd5e.isPolymorphed = true;
-
-    // Gather previous actor data
-    const previousActorIds = this.getFlag("dnd5e", "previousActorIds") || [];
-    previousActorIds.push(this._id);
-    foundry.utils.setProperty(d.flags, "dnd5e.previousActorIds", previousActorIds);
-
-    // Update unlinked Tokens, and grab a copy of any actorData adjustments to re-apply
-    if ( this.isToken ) {
-      const tokenData = d.prototypeToken;
-      delete d.prototypeToken;
-      tokenData.actorData = d;
-      setProperty(tokenData, "flags.dnd5e.previousActorData", this.token.toObject().actorData);
-      await this.sheet?.close();
-      const update = await this.token.update(tokenData);
-      if ( renderSheet ) this.sheet?.render(true);
-      return update;
-    }
-
-    // Close sheet for non-transformed Actor
-    await this.sheet?.close();
-
-    /**
-     * A hook event that fires just before the actor is transformed.
-     * @function dnd5e.transformActor
-     * @memberof hookEvents
-     * @param {Actor5e} actor                  The original actor before transformation.
-     * @param {Actor5e} target                 The target actor into which to transform.
-     * @param {object} data                    The data that will be used to create the new transformed actor.
-     * @param {TransformationOptions} options  Options that determine how the transformation is performed.
-     * @param {object} [options]
-     */
-    Hooks.callAll("dnd5e.transformActor", this, target, d, {
-      keepPhysical, keepMental, keepSaves, keepSkills, mergeSaves, mergeSkills, keepClass, keepFeats, keepSpells,
-      keepItems, keepBio, keepVision, keepSelf, keepAE, keepOriginAE, keepOtherOriginAE, keepSpellAE,
-      keepEquipmentAE, keepFeatAE, keepClassAE, keepBackgroundAE, transformTokens
-    }, {renderSheet});
-
-    // Create new Actor with transformed data
-    const newActor = await this.constructor.create(d, {renderSheet});
-
-    // Update placed Token instances
-    if ( !transformTokens ) return;
-    const tokens = this.getActiveTokens(true);
-    const updates = tokens.map(t => {
-      const newTokenData = foundry.utils.deepClone(d.prototypeToken);
-      newTokenData._id = t.id;
-      newTokenData.actorId = newActor.id;
-      newTokenData.actorLink = true;
-
-      const dOriginalActor = foundry.utils.getProperty(d, "flags.dnd5e.originalActor");
-      foundry.utils.setProperty(newTokenData, "flags.dnd5e.originalActor", dOriginalActor);
-      foundry.utils.setProperty(newTokenData, "flags.dnd5e.isPolymorphed", true);
-      return newTokenData;
-    });
-    return canvas.scene?.updateEmbeddedDocuments("Token", updates);
-  }
-
-  /* -------------------------------------------- */
-
-  /**
-   * If this actor was transformed with transformTokens enabled, then its
-   * active tokens need to be returned to their original state. If not, then
-   * we can safely just delete this actor.
-   * @param {object} [options]
-   * @param {boolean} [options.renderSheet=true]  Render Sheet after revert the transformation.
-   * @returns {Promise<Actor>|null}  Original actor if it was reverted.
-   */
-  async revertOriginalForm({renderSheet=true}={}) {
-    if ( !this.isPolymorphed ) return;
-    if ( !this.isOwner ) return ui.notifications.warn(game.i18n.localize("DND5E.PolymorphRevertWarn"));
-
-    /**
-     * A hook event that fires just before the actor is reverted to original form.
-     * @function dnd5e.revertOriginalForm
-     * @memberof hookEvents
-     * @param {Actor} this                 The original actor before transformation.
-     * @param {object} [options]
-     */
-    Hooks.callAll("dnd5e.revertOriginalForm", this, {renderSheet});
-    const previousActorIds = this.getFlag("dnd5e", "previousActorIds") ?? [];
-    const isOriginalActor = !previousActorIds.length;
-    const isRendered = this.sheet.rendered;
-
-    // Obtain a reference to the original actor
-    const original = game.actors.get(this.getFlag("dnd5e", "originalActor"));
-
-    // If we are reverting an unlinked token, grab the previous actorData, and create a new token
-    if ( this.isToken ) {
-      const baseActor = original ? original : game.actors.get(this.token.actorId);
-      if ( !baseActor ) {
-        ui.notifications.warn(game.i18n.format("DND5E.PolymorphRevertNoOriginalActorWarn", {
-          reference: this.getFlag("dnd5e", "originalActor")
-        }));
-        return;
-      }
-      const prototypeTokenData = await baseActor.getTokenDocument();
-      const actorData = this.token.getFlag("dnd5e", "previousActorData");
-      const tokenUpdate = this.token.toObject();
-      tokenUpdate.actorData = actorData ? actorData : {};
-
-      for ( const k of ["width", "height", "alpha", "lockRotation", "name"] ) {
-        tokenUpdate[k] = prototypeTokenData[k];
-      }
-      for ( const k of ["offsetX", "offsetY", "scaleX", "scaleY", "src", "tint"] ) {
-        tokenUpdate.texture[k] = prototypeTokenData.texture[k];
-      }
-      tokenUpdate.sight = prototypeTokenData.sight;
-      tokenUpdate.detectionModes = prototypeTokenData.detectionModes;
-
-      await this.sheet.close();
-      await canvas.scene?.deleteEmbeddedDocuments("Token", [this.token._id]);
-      const token = await TokenDocument.implementation.create(tokenUpdate, {
-        parent: canvas.scene, keepId: true, render: true
-      });
-      if ( isOriginalActor ) {
-        await this.unsetFlag("dnd5e", "isPolymorphed");
-        await this.unsetFlag("dnd5e", "previousActorIds");
-        await this.token.unsetFlag("dnd5e", "previousActorData");
-      }
-      if ( isRendered && renderSheet ) token.actor?.sheet?.render(true);
-      return token;
-    }
-
-    if ( !original ) {
-      ui.notifications.warn(game.i18n.format("DND5E.PolymorphRevertNoOriginalActorWarn", {
-        reference: this.getFlag("dnd5e", "originalActor")
-      }));
-      return;
-    }
-
-    // Get the Tokens which represent this actor
-    if ( canvas.ready ) {
-      const tokens = this.getActiveTokens(true);
-      const tokenData = await original.getTokenDocument();
-      const tokenUpdates = tokens.map(t => {
-        const update = duplicate(tokenData);
-        update._id = t.id;
-        delete update.x;
-        delete update.y;
-        return update;
-      });
-      await canvas.scene.updateEmbeddedDocuments("Token", tokenUpdates);
-    }
-    if ( isOriginalActor ) {
-      await this.unsetFlag("dnd5e", "isPolymorphed");
-      await this.unsetFlag("dnd5e", "previousActorIds");
-    }
-
-    // Delete the polymorphed version(s) of the actor, if possible
-    if ( game.user.isGM ) {
-      const idsToDelete = previousActorIds.filter(id =>
-        id !== original.id // Is not original Actor Id
-        && game.actors?.get(id) // Actor still exists
-      ).concat([this.id]); // Add this id
-
-      await Actor.implementation.deleteDocuments(idsToDelete);
-    } else if ( isRendered ) {
-      this.sheet?.close();
-    }
-    if ( isRendered && renderSheet ) original.sheet?.render(isRendered);
-    return original;
-  }
-
-  /* -------------------------------------------- */
-
-  /**
-   * Add additional system-specific sidebar directory context menu options for Actor documents
-   * @param {jQuery} html         The sidebar HTML
-   * @param {Array} entryOptions  The default array of context menu options
-   */
-  static addDirectoryContextOptions(html, entryOptions) {
-    entryOptions.push({
-      name: "DND5E.PolymorphRestoreTransformation",
-      icon: '<i class="fas fa-backward"></i>',
-      callback: li => {
-        const actor = game.actors.get(li.data("documentId"));
-        return actor.revertOriginalForm();
-      },
-      condition: li => {
-        const allowed = game.settings.get("dnd5e", "allowPolymorphing");
-        if ( !allowed && !game.user.isGM ) return false;
-        const actor = game.actors.get(li.data("documentId"));
-        return actor && actor.isPolymorphed;
-      }
-    });
-  }
-
-  /* -------------------------------------------- */
-
-  /**
-   * Format a type object into a string.
-   * @param {object} typeData          The type data to convert to a string.
-   * @returns {string}
-   */
-  static formatCreatureType(typeData) {
-    if ( typeof typeData === "string" ) return typeData; // Backwards compatibility
-    let localizedType;
-    if ( typeData.value === "custom" ) {
-      localizedType = typeData.custom;
-    } else {
-      let code = CONFIG.DND5E.creatureTypes[typeData.value];
-      localizedType = game.i18n.localize(typeData.swarm ? `${code}Pl` : code);
-    }
-    let type = localizedType;
-    if ( typeData.swarm ) {
-      type = game.i18n.format("DND5E.CreatureSwarmPhrase", {
-        size: game.i18n.localize(CONFIG.DND5E.actorSizes[typeData.swarm]),
-        type: localizedType
-      });
-    }
-    if (typeData.subtype) type = `${type} (${typeData.subtype})`;
-    return type;
-  }
-
-  /* -------------------------------------------- */
-  /*  Event Listeners and Handlers                */
-  /* -------------------------------------------- */
-
-  /** @inheritdoc */
-  _onUpdate(data, options, userId) {
-    super._onUpdate(data, options, userId);
-    this._displayScrollingDamage(options.dhp);
-  }
-
-  /* -------------------------------------------- */
-
-  /**
-   * Display changes to health as scrolling combat text.
-   * Adapt the font size relative to the Actor's HP total to emphasize more significant blows.
-   * @param {number} dhp      The change in hit points that was applied
-   * @private
-   */
-  _displayScrollingDamage(dhp) {
-    if ( !dhp ) return;
-    dhp = Number(dhp);
-    const tokens = this.isToken ? [this.token?.object] : this.getActiveTokens(true);
-    for ( const t of tokens ) {
-      const pct = Math.clamped(Math.abs(dhp) / this.system.attributes.hp.max, 0, 1);
-      canvas.interface.createScrollingText(t.center, dhp.signedString(), {
-        anchor: CONST.TEXT_ANCHOR_POINTS.TOP,
-        fontSize: 16 + (32 * pct), // Range between [16, 48]
-        fill: CONFIG.DND5E.tokenHPColors[dhp < 0 ? "damage" : "healing"],
-        stroke: 0x000000,
-        strokeThickness: 4,
-        jitter: 0.25
-      });
-    }
-  }
-
-  /* -------------------------------------------- */
-  /*  DEPRECATED METHODS                          */
-  /* -------------------------------------------- */
-
-  /**
-   * Determine a character's AC value from their equipped armor and shield.
-   * @returns {object}
-   * @private
-   * @deprecated since dnd5e 2.0, targeted for removal in 2.2
-   */
-  _computeArmorClass() {
-    foundry.utils.logCompatibilityWarning(
-      "Actor5e#_computeArmorClass has been renamed Actor5e#_prepareArmorClass.",
-      { since: "DnD5e 2.0", until: "DnD5e 2.2" }
-    );
-    this._prepareArmorClass();
-    return this.system.attributes.ac;
-  }
-
-  /* -------------------------------------------- */
-
-  /**
-   * Compute the level and percentage of encumbrance for an Actor.
-   * @returns {object}  An object describing the character's encumbrance level
-   * @private
-   * @deprecated since dnd5e 2.0, targeted for removal in 2.2
-   */
-  _computeEncumbrance() {
-    foundry.utils.logCompatibilityWarning(
-      "Actor5e#_computeEncumbrance has been renamed Actor5e#_prepareEncumbrance.",
-      { since: "DnD5e 2.0", until: "DnD5e 2.2" }
-    );
-    this._prepareEncumbrance();
-    return this.system.attributes.encumbrance;
-  }
-
-  /* -------------------------------------------- */
-
-  /**
-   * Calculate the initiative bonus to display on a character sheet.
-   * @private
-   * @deprecated since dnd5e 2.0, targeted for removal in 2.2
-   */
-  _computeInitiativeModifier() {
-    foundry.utils.logCompatibilityWarning(
-      "Actor5e#_computeInitiativeModifier has been renamed Actor5e#_prepareInitiative.",
-      { since: "DnD5e 2.0", until: "DnD5e 2.2" }
-    );
-    this._prepareInitiative();
-  }
-
-  /* -------------------------------------------- */
-
-  /**
-   * Prepare data related to the spell-casting capabilities of the Actor.
-   * Mutates the value of the system.spells object.
-   * @private
-   * @deprecated since dnd5e 2.0, targeted for removal in 2.2
-   */
-  _computeSpellcastingProgression() {
-    foundry.utils.logCompatibilityWarning(
-      "Actor5e#_computeSpellcastingProgression has been renamed Actor5e#_prepareSpellcasting.",
-      { since: "DnD5e 2.0", until: "DnD5e 2.2" }
-    );
-    this._prepareSpellcasting();
-  }
-
-  /* -------------------------------------------- */
-
-  /**
-   * Convert a bonus value to a simple integer for displaying on the sheet.
-   * @param {number|string|null} bonus  Actor's bonus value.
-   * @param {object} data               Actor data to use for replacing @ strings.
-   * @returns {number}                  Simplified bonus as an integer.
-   * @protected
-   * @deprecated since dnd5e 2.0, targeted for removal in 2.2
-   */
-  _simplifyBonus(bonus, data) {
-    foundry.utils.logCompatibilityWarning(
-      "Actor#_simplifyBonus has been made a utility function and can be accessed at dnd5e.utils.simplifyBonus.",
-      { since: "DnD5e 2.0", until: "DnD5e 2.2" }
-    );
-    return simplifyBonus(bonus, data);
-  }
-}
-
-/**
  * A specialized form used to select from a checklist of attributes, traits, or properties
  */
-class ActorTypeConfig extends FormApplication {
+class ActorTypeConfig extends DocumentSheet {
 
-  /** @inheritDoc */
+  /** @inheritdoc */
   static get defaultOptions() {
     return foundry.utils.mergeObject(super.defaultOptions, {
       classes: ["dnd5e", "actor-type", "trait-selector"],
@@ -11753,31 +15395,43 @@ class ActorTypeConfig extends FormApplication {
       choices: {},
       allowCustom: true,
       minimum: 0,
-      maximum: null
+      maximum: null,
+      sheetConfig: false,
+      keyPath: "system.details.type"
     });
   }
 
   /* -------------------------------------------- */
 
-  /** @inheritDoc */
+  /** @inheritdoc */
   get title() {
     return `${game.i18n.localize("DND5E.CreatureTypeTitle")}: ${this.object.name}`;
   }
 
   /* -------------------------------------------- */
 
-  /** @override */
+  /** @inheritdoc */
   get id() {
     return `actor-type-${this.object.id}`;
   }
 
   /* -------------------------------------------- */
 
-  /** @override */
-  getData(options={}) {
+  /**
+   * Return a reference to the Actor. Either the NPCs themselves if they are being edited, otherwise the parent Actor
+   * if a race Item is being edited.
+   * @returns {Actor5e}
+   */
+  get actor() {
+    return this.object.actor ?? this.object;
+  }
 
+  /* -------------------------------------------- */
+
+  /** @inheritdoc */
+  getData(options={}) {
     // Get current value or new default
-    let attr = foundry.utils.getProperty(this.object.system, "details.type");
+    let attr = foundry.utils.getProperty(this.object, this.options.keyPath);
     if ( foundry.utils.getType(attr) !== "Object" ) attr = {
       value: (attr in CONFIG.DND5E.creatureTypes) ? attr : "humanoid",
       subtype: "",
@@ -11802,6 +15456,8 @@ class ActorTypeConfig extends FormApplication {
         label: game.i18n.localize("DND5E.CreatureTypeSelectorCustom"),
         chosen: attr.value === "custom"
       },
+      showCustom: Object.hasOwn(attr, "custom"),
+      showSwarm: Object.hasOwn(attr, "swarm"),
       subtype: attr.subtype,
       swarm: attr.swarm,
       sizes: Array.from(Object.entries(CONFIG.DND5E.actorSizes)).reverse().reduce((obj, e) => {
@@ -11817,7 +15473,7 @@ class ActorTypeConfig extends FormApplication {
   /** @override */
   async _updateObject(event, formData) {
     const typeObject = foundry.utils.expandObject(formData);
-    return this.object.update({"system.details.type": typeObject});
+    return this.object.update({[this.options.keyPath]: typeObject});
   }
 
   /* -------------------------------------------- */
@@ -11828,6 +15484,15 @@ class ActorTypeConfig extends FormApplication {
   activateListeners(html) {
     super.activateListeners(html);
     html.find("input[name='custom']").focusin(this._onCustomFieldFocused.bind(this));
+
+    const overrides = Object.keys(foundry.utils.flattenObject(this.actor.overrides || {}));
+    if ( overrides.some(k => k.startsWith("system.details.type.")) ) {
+      // Disable editing any type field if one of them is overridden by an Active Effect.
+      html.find("input, select").each((i, el) => {
+        el.disabled = true;
+        el.dataset.tooltip = "DND5E.ActiveEffectOverrideWarning";
+      });
+    }
   }
 
   /* -------------------------------------------- */
@@ -11849,6 +15514,55 @@ class ActorTypeConfig extends FormApplication {
   _onCustomFieldFocused(event) {
     this.form.querySelector("input[name='value'][value='custom']").checked = true;
     this._onChangeInput(event);
+  }
+}
+
+/**
+ * Application for configuring the source data on actors and items.
+ */
+class SourceConfig extends DocumentSheet {
+
+  /** @inheritdoc */
+  static get defaultOptions() {
+    return foundry.utils.mergeObject(super.defaultOptions, {
+      classes: ["dnd5e", "source-config", "dialog"],
+      template: "systems/dnd5e/templates/apps/source-config.hbs",
+      width: 400,
+      height: "auto",
+      sheetConfig: false,
+      keyPath: "system.details.source"
+    });
+  }
+
+  /* -------------------------------------------- */
+
+  /** @override */
+  get title() {
+    return `${game.i18n.localize("DND5E.SourceConfig")}: ${this.document.name}`;
+  }
+
+  /* -------------------------------------------- */
+  /*  Rendering                                   */
+  /* -------------------------------------------- */
+
+  /** @inheritdoc */
+  getData(options) {
+    const context = super.getData(options);
+    context.appId = this.id;
+    context.CONFIG = CONFIG.DND5E;
+    context.source = foundry.utils.getProperty(this.document, this.options.keyPath);
+    context.sourceUuid = foundry.utils.getProperty(this.document, "flags.core.sourceId");
+    return context;
+  }
+
+  /* -------------------------------------------- */
+  /*  Event Handlers                              */
+  /* -------------------------------------------- */
+
+  /** @override */
+  async _updateObject(event, formData) {
+    const source = foundry.utils.expandObject(formData).source;
+    return this.document.update({[this.options.keyPath]: source});
   }
 }
 
@@ -12406,6 +16120,7 @@ class AdvancementManager extends Application {
 
     // Render the step
     this.step.flow._element = null;
+    this.step.flow.options.manager ??= this;
     await this.step.flow._render(force, options);
     this.setPosition();
   }
@@ -12477,14 +16192,15 @@ class AdvancementManager extends Application {
     try {
       do {
         const flow = this.step.flow;
+        const type = this.step.type;
 
         // Apply changes based on step type
-        if ( (this.step.type === "delete") && this.step.item ) this.clone.items.delete(this.step.item.id);
-        else if ( (this.step.type === "delete") && this.step.advancement ) {
+        if ( (type === "delete") && this.step.item ) this.clone.items.delete(this.step.item.id);
+        else if ( (type === "delete") && this.step.advancement ) {
           this.step.advancement.item.deleteAdvancement(this.step.advancement.id, { source: true });
         }
-        else if ( this.step.type === "restore" ) await flow.advancement.restore(flow.level, flow.retainedData);
-        else if ( this.step.type === "reverse" ) flow.retainedData = await flow.advancement.reverse(flow.level);
+        else if ( type === "restore" ) await flow.advancement.restore(flow.level, flow.retainedData);
+        else if ( type === "reverse" ) await flow.retainData(await flow.advancement.reverse(flow.level));
         else if ( flow ) await flow._updateObject(event, flow._getSubmitData());
 
         this._stepIndex++;
@@ -12498,7 +16214,7 @@ class AdvancementManager extends Application {
         this.clone.reset();
       } while ( this.step?.automatic );
     } catch(error) {
-      if ( !(error instanceof Advancement$1.ERROR) ) throw error;
+      if ( !(error instanceof Advancement.ERROR) ) throw error;
       ui.notifications.error(error.message);
       this.step.automatic = false;
       if ( this.step.type === "restore" ) this.step.type = "forward";
@@ -12528,18 +16244,19 @@ class AdvancementManager extends Application {
         this._stepIndex--;
         if ( !this.step ) break;
         const flow = this.step.flow;
+        const type = this.step.type;
 
         // Reverse step based on step type
-        if ( (this.step.type === "delete") && this.step.item ) this.clone.updateSource({items: [this.step.item]});
-        else if ( (this.step.type === "delete") && this.step.advancement ) this.advancement.item.createAdvancement(
+        if ( (type === "delete") && this.step.item ) this.clone.updateSource({items: [this.step.item]});
+        else if ( (type === "delete") && this.step.advancement ) this.advancement.item.createAdvancement(
           this.advancement.typeName, this.advancement._source, { source: true }
         );
-        else if ( this.step.type === "reverse" ) await flow.advancement.restore(flow.level, flow.retainedData);
-        else if ( flow ) flow.retainedData = await flow.advancement.reverse(flow.level);
+        else if ( type === "reverse" ) await flow.advancement.restore(flow.level, flow.retainedData);
+        else if ( flow ) await flow.retainData(await flow.advancement.reverse(flow.level));
         this.clone.reset();
       } while ( this.step?.automatic );
     } catch(error) {
-      if ( !(error instanceof Advancement$1.ERROR) ) throw error;
+      if ( !(error instanceof Advancement.ERROR) ) throw error;
       ui.notifications.error(error.message);
       this.step.automatic = false;
     } finally {
@@ -12718,9 +16435,9 @@ class PropertyAttribution extends Application {
   getPropertyLabel(property) {
     const parts = property.split(".");
     if ( parts[0] === "abilities" && parts[1] ) {
-      return CONFIG.DND5E.abilities[parts[1]] ?? property;
+      return CONFIG.DND5E.abilities[parts[1]]?.label ?? property;
     } else if ( (property === "attributes.ac.dex") && CONFIG.DND5E.abilities.dex ) {
-      return CONFIG.DND5E.abilities.dex;
+      return CONFIG.DND5E.abilities.dex.label;
     } else if ( (parts[0] === "prof") || (property === "attributes.prof") ) {
       return game.i18n.localize("DND5E.Proficiency");
     }
@@ -12736,8 +16453,8 @@ class PropertyAttribution extends Application {
  * @param {object} [options={}]
  * @param {boolean} [options.allowCustom=true]  Support user custom trait entries.
  */
-let TraitSelector$1 = class TraitSelector extends BaseConfigSheet {
-  constructor(actor, trait, options) {
+class TraitSelector extends BaseConfigSheet {
+  constructor(actor, trait, options={}) {
     if ( !CONFIG.DND5E.traits[trait] ) throw new Error(
       `Cannot instantiate TraitSelector with a trait not defined in CONFIG.DND5E.traits: ${trait}.`
     );
@@ -12788,12 +16505,13 @@ let TraitSelector$1 = class TraitSelector extends BaseConfigSheet {
 
   /** @inheritdoc */
   async getData() {
-    const path = `system.${actorKeyPath(this.trait)}`;
+    const path = actorKeyPath(this.trait);
     const data = foundry.utils.getProperty(this.document, path);
+    if ( !data ) return super.getData();
 
     return {
       ...super.getData(),
-      choices: await choices(this.trait, data.value),
+      choices: await choices(this.trait, { chosen: data.value }),
       custom: data.custom,
       customPath: "custom" in data ? `${path}.custom` : null,
       bypasses: "bypasses" in data ? Object.entries(CONFIG.DND5E.physicalWeaponProperties).reduce((obj, [k, v]) => {
@@ -12820,7 +16538,7 @@ let TraitSelector$1 = class TraitSelector extends BaseConfigSheet {
   /** @inheritdoc */
   _getActorOverrides() {
     const overrides = super._getActorOverrides();
-    const path = `system.${actorKeyPath(this.trait)}.value`;
+    const path = changeKeyPath(this.trait);
     const src = new Set(foundry.utils.getProperty(this.document._source, path));
     const current = foundry.utils.getProperty(this.document, path);
     const delta = current.difference(src);
@@ -12877,7 +16595,7 @@ let TraitSelector$1 = class TraitSelector extends BaseConfigSheet {
 
   /** @override */
   async _updateObject(event, formData) {
-    const path = `system.${actorKeyPath(this.trait)}`;
+    const path = actorKeyPath(this.trait);
     const data = foundry.utils.getProperty(this.document, path);
 
     this._prepareChoices("choices", `${path}.value`, formData);
@@ -12885,13 +16603,343 @@ let TraitSelector$1 = class TraitSelector extends BaseConfigSheet {
 
     return this.object.update(formData);
   }
+}
+
+/**
+ * @typedef {FormApplicationOptions} ProficiencyConfigOptions
+ * @property {string} key       The ID of the skill or tool being configured.
+ * @property {string} property  The property on the actor being configured, either 'skills', or 'tools'.
+ */
+
+/**
+ * An application responsible for configuring proficiencies and bonuses in tools and skills.
+ *
+ * @param {Actor5e} actor                     The Actor being configured.
+ * @param {ProficiencyConfigOptions} options  Additional configuration options.
+ */
+class ProficiencyConfig extends BaseConfigSheet {
+
+  /** @inheritdoc */
+  static get defaultOptions() {
+    return foundry.utils.mergeObject(super.defaultOptions, {
+      classes: ["dnd5e"],
+      template: "systems/dnd5e/templates/apps/proficiency-config.hbs",
+      width: 500,
+      height: "auto"
+    });
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * Are we configuring a tool?
+   * @returns {boolean}
+   */
+  get isTool() {
+    return this.options.property === "tools";
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * Are we configuring a skill?
+   * @returns {boolean}
+   */
+  get isSkill() {
+    return this.options.property === "skills";
+  }
+
+  /* -------------------------------------------- */
+
+  /** @inheritdoc */
+  get title() {
+    const label = this.isSkill ? CONFIG.DND5E.skills[this.options.key].label
+      : keyLabel(this.options.key, { trait: "tool" });
+    return `${game.i18n.format("DND5E.ProficiencyConfigureTitle", {label})}: ${this.document.name}`;
+  }
+
+  /* -------------------------------------------- */
+
+  /** @inheritdoc */
+  get id() {
+    return `ProficiencyConfig-${this.document.documentName}-${this.document.id}-${this.options.key}`;
+  }
+
+  /* -------------------------------------------- */
+
+  /** @inheritdoc */
+  getData(options={}) {
+    return {
+      abilities: CONFIG.DND5E.abilities,
+      proficiencyLevels: CONFIG.DND5E.proficiencyLevels,
+      entry: this.document.system[this.options.property]?.[this.options.key],
+      isTool: this.isTool,
+      isSkill: this.isSkill,
+      key: this.options.key,
+      property: this.options.property
+    };
+  }
+
+  /* -------------------------------------------- */
+
+  /** @inheritdoc */
+  async _updateObject(event, formData) {
+    if ( this.isTool ) return super._updateObject(event, formData);
+    const passive = formData[`system.skills.${this.options.key}.bonuses.passive`];
+    const passiveRoll = new Roll(passive);
+    if ( !passiveRoll.isDeterministic ) {
+      const message = game.i18n.format("DND5E.FormulaCannotContainDiceError", {
+        name: game.i18n.localize("DND5E.SkillBonusPassive")
+      });
+      ui.notifications.error(message);
+      throw new Error(message);
+    }
+    return super._updateObject(event, formData);
+  }
+}
+
+/**
+ * A specialized version of the TraitSelector used for selecting tool and vehicle proficiencies.
+ * @extends {TraitSelector}
+ */
+class ToolSelector extends TraitSelector {
+  /** @inheritdoc */
+  async getData() {
+    return {
+      ...super.getData(),
+      choices: await choices(this.trait, { chosen: new Set(Object.keys(this.document.system.tools)) })
+    };
+  }
+
+  /* -------------------------------------------- */
+
+  /** @inheritdoc */
+  _getActorOverrides() {
+    return Object.keys(foundry.utils.flattenObject(this.document.overrides));
+  }
+
+  /* -------------------------------------------- */
+
+  /** @inheritdoc */
+  async _updateObject(event, formData) {
+    return this.document.update(Object.entries(formData).reduce((obj, [k, v]) => {
+      const [, key] = k.split(".");
+      const tool = this.document.system.tools[key];
+      if ( tool && !v ) obj[`system.tools.-=${key}`] = null;
+      else if ( !tool && v ) obj[`system.tools.${key}`] = {value: 1};
+      return obj;
+    }, {}));
+  }
+}
+
+/**
+ * Mixin method for common uses between all actor sheets.
+ * @mixin
+ */
+const ActorSheetMixin = Base => class extends Base {
+  /**
+   * Handle input changes to numeric form fields, allowing them to accept delta-typed inputs.
+   * @param {Event} event  Triggering event.
+   * @protected
+   */
+  _onChangeInputDelta(event) {
+    const input = event.target;
+    const value = input.value;
+    if ( ["+", "-"].includes(value[0]) ) {
+      const delta = parseFloat(value);
+      const item = this.actor.items.get(input.closest("[data-item-id]")?.dataset.itemId);
+      if ( item ) input.value = Number(foundry.utils.getProperty(item, input.dataset.name)) + delta;
+      else input.value = Number(foundry.utils.getProperty(this.actor, input.name)) + delta;
+    } else if ( value[0] === "=" ) input.value = value.slice(1);
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * Prepare an array of context menu options which are available for owned ActiveEffect documents.
+   * @param {ActiveEffect5e} effect         The ActiveEffect for which the context menu is activated
+   * @returns {ContextMenuEntry[]}          An array of context menu options offered for the ActiveEffect
+   * @protected
+   */
+  _getActiveEffectContextOptions(effect) {
+    return [
+      {
+        name: "DND5E.ContextMenuActionEdit",
+        icon: "<i class='fas fa-edit fa-fw'></i>",
+        condition: () => effect.isOwner,
+        callback: () => effect.sheet.render(true)
+      },
+      {
+        name: "DND5E.ContextMenuActionDuplicate",
+        icon: "<i class='fas fa-copy fa-fw'></i>",
+        condition: () => effect.isOwner,
+        callback: () => effect.clone({label: game.i18n.format("DOCUMENT.CopyOf", {name: effect.label})}, {save: true})
+      },
+      {
+        name: "DND5E.ContextMenuActionDelete",
+        icon: "<i class='fas fa-trash fa-fw'></i>",
+        condition: () => effect.isOwner,
+        callback: () => effect.deleteDialog()
+      },
+      {
+        name: effect.disabled ? "DND5E.ContextMenuActionEnable" : "DND5E.ContextMenuActionDisable",
+        icon: effect.disabled ? "<i class='fas fa-check fa-fw'></i>" : "<i class='fas fa-times fa-fw'></i>",
+        condition: () => effect.isOwner,
+        callback: () => effect.update({disabled: !effect.disabled})
+      }
+    ];
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * Prepare an array of context menu options which are available for owned Item documents.
+   * @param {Item5e} item                   The Item for which the context menu is activated
+   * @returns {ContextMenuEntry[]}          An array of context menu options offered for the Item
+   * @protected
+   */
+  _getItemContextOptions(item) {
+
+    // Standard Options
+    const options = [
+      {
+        name: "DND5E.ContextMenuActionEdit",
+        icon: "<i class='fas fa-edit fa-fw'></i>",
+        condition: () => item.isOwner,
+        callback: () => item.sheet.render(true)
+      },
+      {
+        name: "DND5E.ContextMenuActionDuplicate",
+        icon: "<i class='fas fa-copy fa-fw'></i>",
+        condition: () => !["race", "background", "class", "subclass"].includes(item.type) && item.actor.isOwner,
+        callback: () => item.clone({name: game.i18n.format("DOCUMENT.CopyOf", {name: item.name})}, {save: true})
+      },
+      {
+        name: "DND5E.ContextMenuActionDelete",
+        icon: "<i class='fas fa-trash fa-fw'></i>",
+        condition: () => item.isOwner,
+        callback: () => item.deleteDialog()
+      }
+    ];
+
+    // Toggle Attunement State
+    if ( ("attunement" in item.system) && (item.system.attunement !== CONFIG.DND5E.attunementTypes.NONE) ) {
+      const isAttuned = item.system.attunement === CONFIG.DND5E.attunementTypes.ATTUNED;
+      options.push({
+        name: isAttuned ? "DND5E.ContextMenuActionUnattune" : "DND5E.ContextMenuActionAttune",
+        icon: "<i class='fas fa-sun fa-fw'></i>",
+        condition: () => item.isOwner,
+        callback: () => item.update({
+          "system.attunement": CONFIG.DND5E.attunementTypes[isAttuned ? "REQUIRED" : "ATTUNED"]
+        })
+      });
+    }
+
+    // Toggle Equipped State
+    if ( "equipped" in item.system ) options.push({
+      name: item.system.equipped ? "DND5E.ContextMenuActionUnequip" : "DND5E.ContextMenuActionEquip",
+      icon: "<i class='fas fa-shield-alt fa-fw'></i>",
+      condition: () => item.isOwner,
+      callback: () => item.update({"system.equipped": !item.system.equipped})
+    });
+
+    // Toggle Prepared State
+    if ( ("preparation" in item.system) && (item.system.preparation?.mode === "prepared") ) options.push({
+      name: item.system?.preparation?.prepared ? "DND5E.ContextMenuActionUnprepare" : "DND5E.ContextMenuActionPrepare",
+      icon: "<i class='fas fa-sun fa-fw'></i>",
+      condition: () => item.isOwner,
+      callback: () => item.update({"system.preparation.prepared": !item.system.preparation?.prepared})
+    });
+    return options;
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * Handle toggling and items expanded description.
+   * @param {Event} event   Triggering event.
+   * @private
+   */
+  async _onItemSummary(event) {
+    event.preventDefault();
+    const li = $(event.currentTarget).parents(".item");
+    const item = this.actor.items.get(li.data("item-id"));
+    const chatData = await item.getChatData({secrets: this.actor.isOwner});
+
+    // Toggle summary
+    if ( li.hasClass("expanded") ) {
+      const summary = li.children(".item-summary");
+      summary.slideUp(200, () => summary.remove());
+      this._expanded.delete(item.id);
+    } else {
+      const summary = $(await renderTemplate("systems/dnd5e/templates/items/parts/item-summary.hbs", chatData));
+      li.append(summary.hide());
+      summary.slideDown(200);
+      this._expanded.add(item.id);
+    }
+    li.toggleClass("expanded");
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * Change the uses amount of an Owned Item within the Actor.
+   * @param {Event} event        The triggering click event.
+   * @returns {Promise<Item5e>}  Updated item.
+   * @protected
+   */
+  async _onUsesChange(event) {
+    event.preventDefault();
+    const itemId = event.currentTarget.closest(".item").dataset.itemId;
+    const item = this.actor.items.get(itemId);
+    const uses = Math.clamped(0, parseInt(event.target.value || 0), item.system.uses.max);
+    event.target.value = uses;
+    return item.update({"system.uses.value": uses});
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * Change the quantity of an Owned Item within the actor.
+   * @param {Event} event        The triggering click event.
+   * @returns {Promise<Item5e>}  Updated item.
+   * @protected
+   */
+  async _onQuantityChange(event) {
+    event.preventDefault();
+    const itemId = event.currentTarget.closest(".item").dataset.itemId;
+    const item = this.actor.items.get(itemId);
+    const quantity = Math.max(0, parseInt(event.target.value || 0));
+    event.target.value = quantity;
+    return item.update({"system.quantity": quantity});
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * Stack identical consumables when a new one is dropped rather than creating a duplicate item.
+   * @param {object} itemData         The item data requested for creation.
+   * @returns {Promise<Item5e>|null}  If a duplicate was found, returns the adjusted item stack.
+   */
+  _onDropStackConsumables(itemData) {
+    const droppedSourceId = itemData.flags.core?.sourceId;
+    if ( itemData.type !== "consumable" || !droppedSourceId ) return null;
+    const similarItem = this.actor.items.find(i => {
+      const sourceId = i.getFlag("core", "sourceId");
+      return sourceId && (sourceId === droppedSourceId) && (i.type === "consumable") && (i.name === itemData.name);
+    });
+    if ( !similarItem ) return null;
+    return similarItem.update({
+      "system.quantity": similarItem.system.quantity + Math.max(itemData.system.quantity, 1)
+    });
+  }
 };
 
 /**
  * Extend the basic ActorSheet class to suppose system-specific logic and functionality.
  * @abstract
  */
-class ActorSheet5e extends ActorSheet {
+class ActorSheet5e extends ActorSheetMixin(ActorSheet) {
 
   /**
    * Track the set of item filters which are applied
@@ -12904,6 +16952,15 @@ class ActorSheet5e extends ActorSheet {
     features: new Set(),
     effects: new Set()
   };
+
+  /* -------------------------------------------- */
+
+  /**
+   * Track the most recent drag event.
+   * @type {DragEvent}
+   * @protected
+   */
+  _event = null;
 
   /* -------------------------------------------- */
 
@@ -12923,7 +16980,8 @@ class ActorSheet5e extends ActorSheet {
         ".inventory .inventory-list",
         ".features .inventory-list",
         ".spellbook .inventory-list",
-        ".effects .inventory-list"
+        ".effects .inventory-list",
+        ".center-pane"
       ],
       tabs: [{navSelector: ".tabs", contentSelector: ".sheet-body", initial: "description"}],
       width: 720,
@@ -12969,6 +17027,7 @@ class ActorSheet5e extends ActorSheet {
       itemContext: {},
       abilities: foundry.utils.deepClone(this.actor.system.abilities),
       skills: foundry.utils.deepClone(this.actor.system.skills ?? {}),
+      tools: foundry.utils.deepClone(this.actor.system.tools ?? {}),
       labels: this._getLabels(),
       movement: this._getMovementSpeed(this.actor.system),
       senses: this._getSenses(this.actor.system),
@@ -12985,18 +17044,11 @@ class ActorSheet5e extends ActorSheet {
       isVehicle: this.actor.type === "vehicle",
       config: CONFIG.DND5E,
       rollableClass: this.isEditable ? "rollable" : "",
-      rollData: this.actor.getRollData()
-    };
-
-    /** @deprecated */
-    Object.defineProperty(context, "data", {
-      get() {
-        const msg = `You are accessing the "data" attribute within the rendering context provided by the ActorSheet5e 
-        class. This attribute has been deprecated in favor of "system" and will be removed in a future release`;
-        foundry.utils.logCompatibilityWarning(msg, { since: "DnD5e 2.0", until: "DnD5e 2.2" });
-        return context.system;
+      rollData: this.actor.getRollData(),
+      overrides: {
+        attunement: foundry.utils.hasProperty(this.actor.overrides, "system.attributes.attunement.max")
       }
-    });
+    };
 
     // Sort Owned Items
     context.items.sort((a, b) => (a.sort || 0) - (b.sort || 0));
@@ -13011,18 +17063,20 @@ class ActorSheet5e extends ActorSheet {
     for ( const [a, abl] of Object.entries(context.abilities) ) {
       abl.icon = this._getProficiencyIcon(abl.proficient);
       abl.hover = CONFIG.DND5E.proficiencyLevels[abl.proficient];
-      abl.label = CONFIG.DND5E.abilities[a];
+      abl.label = CONFIG.DND5E.abilities[a]?.label;
       abl.baseProf = source.system.abilities[a]?.proficient ?? 0;
     }
 
-    // Skills
-    for ( const [s, skl] of Object.entries(context.skills) ) {
-      skl.abbreviation = CONFIG.DND5E.abilityAbbreviations[skl.ability];
-      skl.icon = this._getProficiencyIcon(skl.value);
-      skl.hover = CONFIG.DND5E.proficiencyLevels[skl.value];
-      skl.label = CONFIG.DND5E.skills[s]?.label;
-      skl.baseValue = source.system.skills[s]?.value ?? 0;
-    }
+    // Skills & tools.
+    ["skills", "tools"].forEach(prop => {
+      for ( const [key, entry] of Object.entries(context[prop]) ) {
+        entry.abbreviation = CONFIG.DND5E.abilities[entry.ability]?.abbreviation;
+        entry.icon = this._getProficiencyIcon(entry.value);
+        entry.hover = CONFIG.DND5E.proficiencyLevels[entry.value];
+        entry.label = prop === "skills" ? CONFIG.DND5E.skills[key]?.label : keyLabel(key, {trait: "tool"});
+        entry.baseValue = source.system[prop]?.[key]?.value ?? 0;
+      }
+    });
 
     // Update traits
     context.traits = this._prepareTraits(context.system);
@@ -13100,7 +17154,7 @@ class ActorSheet5e extends ActorSheet {
     if ( largestPrimary ) {
       let primary = speeds.shift();
       return {
-        primary: `${primary ? primary[1] : "0"} ${movement.units}`,
+        primary: `${primary ? primary[1] : "0"} ${movement.units || Object.keys(CONFIG.DND5E.movementUnits)[0]}`,
         special: speeds.map(s => s[1]).join(", ")
       };
     }
@@ -13108,7 +17162,7 @@ class ActorSheet5e extends ActorSheet {
     // Case 2: Walk as primary
     else {
       return {
-        primary: `${movement.walk || 0} ${movement.units}`,
+        primary: `${movement.walk || 0} ${movement.units || Object.keys(CONFIG.DND5E.movementUnits)[0]}`,
         special: speeds.length ? speeds.map(s => s[1]).join(", ") : ""
       };
     }
@@ -13130,7 +17184,7 @@ class ActorSheet5e extends ActorSheet {
       if ( v === 0 ) continue;
       tags[k] = `${game.i18n.localize(label)} ${v} ${senses.units}`;
     }
-    if ( senses.special ) tags.special = senses.special;
+    if ( senses.special ) senses.special.split(";").forEach((c, i) => tags[`custom${i+1}`] = c.trim());
     return tags;
   }
 
@@ -13153,14 +17207,15 @@ class ActorSheet5e extends ActorSheet {
    * @protected
    */
   _prepareActiveEffectAttributions(target) {
+    const rollData = this.actor.getRollData({deterministic: true});
     return this.actor.effects.reduce((arr, e) => {
       let source = e.sourceName;
-      if ( e.origin === this.actor.uuid ) source = e.label;
+      if ( e.origin === this.actor.uuid ) source = e.name;
       if ( !source || e.disabled || e.isSuppressed ) return arr;
       const value = e.changes.reduce((n, change) => {
-        if ( (change.key !== target) || !Number.isNumeric(change.value) ) return n;
+        if ( change.key !== target ) return n;
         if ( change.mode !== CONST.ACTIVE_EFFECT_MODES.ADD ) return n;
-        return n + Number(change.value);
+        return n + simplifyBonus(change.value, rollData);
       }, 0);
       if ( !value ) return arr;
       arr.push({value, label: source, mode: CONST.ACTIVE_EFFECT_MODES.ADD});
@@ -13256,9 +17311,8 @@ class ActorSheet5e extends ActorSheet {
   _prepareTraits(systemData) {
     const traits = {};
     for ( const [trait$1, traitConfig] of Object.entries(CONFIG.DND5E.traits) ) {
-      const key = traitConfig.actorKeyPath ?? `traits.${trait$1}`;
-      let data = foundry.utils.getProperty(systemData, key);
-      const choices = CONFIG.DND5E[traitConfig.configKey];
+      const key = traitConfig.actorKeyPath?.replace("system.", "") ?? `traits.${trait$1}`;
+      const data = foundry.utils.deepClone(foundry.utils.getProperty(systemData, key));
       if ( !data ) continue;
 
       foundry.utils.setProperty(traits, key, data);
@@ -13278,7 +17332,7 @@ class ActorSheet5e extends ActorSheet {
       }
 
       data.selected = values.reduce((obj, key) => {
-        obj[key] = keyLabel(trait$1, key) ?? key;
+        obj[key] = keyLabel(key, { trait: trait$1 }) ?? key;
         return obj;
       }, {});
 
@@ -13287,7 +17341,7 @@ class ActorSheet5e extends ActorSheet {
         const damageTypesFormatter = new Intl.ListFormat(game.i18n.lang, { style: "long", type: "conjunction" });
         const bypassFormatter = new Intl.ListFormat(game.i18n.lang, { style: "long", type: "disjunction" });
         data.selected.physical = game.i18n.format("DND5E.DamagePhysicalBypasses", {
-          damageTypes: damageTypesFormatter.format(physical.map(t => choices[t])),
+          damageTypes: damageTypesFormatter.format(physical.map(t => keyLabel(t, { trait: trait$1 }))),
           bypassTypes: bypassFormatter.format(data.bypasses.map(t => CONFIG.DND5E.physicalWeaponProperties[t]))
         });
       }
@@ -13346,10 +17400,9 @@ class ActorSheet5e extends ActorSheet {
     };
 
     // Determine the maximum spell level which has a slot
-    const maxLevel = Array.fromRange(10).reduce((max, i) => {
-      if ( i === 0 ) return max;
+    const maxLevel = Array.fromRange(Object.keys(CONFIG.DND5E.spellLevels).length - 1, 1).reduce((max, i) => {
       const level = levels[`spell${i}`];
-      if ( (level.max || level.override ) && ( i > max ) ) max = i;
+      if ( level && (level.max || level.override ) && ( i > max ) ) max = i;
       return max;
     }, 0);
 
@@ -13498,7 +17551,10 @@ class ActorSheet5e extends ActorSheet {
       html.find(".ability-proficiency").click(this._onToggleAbilityProficiency.bind(this));
 
       // Toggle Skill Proficiency
-      html.find(".skill-proficiency").on("click contextmenu", this._onCycleSkillProficiency.bind(this));
+      html.find(".skill-proficiency").on("click contextmenu", event => this._onCycleProficiency(event, "skill"));
+
+      // Toggle Tool Proficiency
+      html.find(".tool-proficiency").on("click contextmenu", event => this._onCycleProficiency(event, "tool"));
 
       // Trait Selector
       html.find(".trait-selector").click(this._onTraitSelector.bind(this));
@@ -13510,15 +17566,17 @@ class ActorSheet5e extends ActorSheet {
       html.find(".item-create").click(this._onItemCreate.bind(this));
       html.find(".item-delete").click(this._onItemDelete.bind(this));
       html.find(".item-uses input").click(ev => ev.target.select()).change(this._onUsesChange.bind(this));
+      html.find(".item-quantity input").click(ev => ev.target.select()).change(this._onQuantityChange.bind(this));
       html.find(".slot-max-override").click(this._onSpellSlotOverride.bind(this));
+      html.find(".attunement-max-override").click(this._onAttunementOverride.bind(this));
 
       // Active Effect management
       html.find(".effect-control").click(ev => ActiveEffect5e.onManageActiveEffect(ev, this.actor));
       this._disableOverriddenFields(html);
     }
 
-    // Owner Only Listeners
-    if ( this.actor.isOwner ) {
+    // Owner Only Listeners, for non-compendium actors.
+    if ( this.actor.isOwner && !this.actor.compendium ) {
 
       // Ability Checks
       html.find(".ability-name").click(this._onRollAbilityTest.bind(this));
@@ -13526,18 +17584,21 @@ class ActorSheet5e extends ActorSheet {
       // Roll Skill Checks
       html.find(".skill-name").click(this._onRollSkillCheck.bind(this));
 
+      // Roll Tool Checks.
+      html.find(".tool-name").on("click", this._onRollToolCheck.bind(this));
+
       // Item Rolling
       html.find(".rollable .item-image").click(event => this._onItemUse(event));
       html.find(".item .item-recharge").click(event => this._onItemRecharge(event));
-
-      // Item Context Menu
-      new ContextMenu(html, ".item-list .item", [], {onOpen: this._onItemContext.bind(this)});
     }
 
     // Otherwise, remove rollable classes
     else {
       html.find(".rollable").each((i, el) => el.classList.remove("rollable"));
     }
+
+    // Item Context Menu
+    new ContextMenu(html, ".item-list .item", [], {onOpen: this._onItemContext.bind(this)});
 
     // Handle default listeners last so system listeners are triggered first
     super.activateListeners(html);
@@ -13551,24 +17612,25 @@ class ActorSheet5e extends ActorSheet {
    * @protected
    */
   _disableOverriddenFields(html) {
+    const proficiencyToggles = {
+      ability: /system\.abilities\.([^.]+)\.proficient/,
+      skill: /system\.skills\.([^.]+)\.value/,
+      tool: /system\.tools\.([^.]+)\.value/
+    };
+
     for ( const override of Object.keys(foundry.utils.flattenObject(this.actor.overrides)) ) {
       html.find(`input[name="${override}"],select[name="${override}"]`).each((i, el) => {
         el.disabled = true;
         el.dataset.tooltip = "DND5E.ActiveEffectOverrideWarning";
       });
 
-      const [, ability] = override.match(/system\.abilities\.([^.]+)\.proficient/) || [];
-      if ( ability ) {
-        const toggle = html.find(`li[data-ability="${ability}"] .proficiency-toggle`);
-        toggle.addClass("disabled");
-        toggle.attr("data-tooltip", "DND5E.ActiveEffectOverrideWarning");
-      }
-
-      const [, skill] = override.match(/system\.skills\.([^.]+)\.value/) || [];
-      if ( skill ) {
-        const toggle = html.find(`li[data-skill="${skill}"] .proficiency-toggle`);
-        toggle.addClass("disabled");
-        toggle.attr("data-tooltip", "DND5E.ActiveEffectOverrideWarning");
+      for ( const [key, regex] of Object.entries(proficiencyToggles) ) {
+        const [, match] = override.match(regex) || [];
+        if ( match ) {
+          const toggle = html.find(`li[data-${key}="${match}"] .proficiency-toggle`);
+          toggle.addClass("disabled");
+          toggle.attr("data-tooltip", "DND5E.ActiveEffectOverrideWarning");
+        }
       }
 
       const [, spell] = override.match(/system\.spells\.(spell\d)\.override/) || [];
@@ -13608,97 +17670,6 @@ class ActorSheet5e extends ActorSheet {
   /* -------------------------------------------- */
 
   /**
-   * Prepare an array of context menu options which are available for owned ActiveEffect documents.
-   * @param {ActiveEffect5e} effect         The ActiveEffect for which the context menu is activated
-   * @returns {ContextMenuEntry[]}          An array of context menu options offered for the ActiveEffect
-   * @protected
-   */
-  _getActiveEffectContextOptions(effect) {
-    return [
-      {
-        name: "DND5E.ContextMenuActionEdit",
-        icon: "<i class='fas fa-edit fa-fw'></i>",
-        callback: () => effect.sheet.render(true)
-      },
-      {
-        name: "DND5E.ContextMenuActionDuplicate",
-        icon: "<i class='fas fa-copy fa-fw'></i>",
-        callback: () => effect.clone({label: game.i18n.format("DOCUMENT.CopyOf", {name: effect.label})}, {save: true})
-      },
-      {
-        name: "DND5E.ContextMenuActionDelete",
-        icon: "<i class='fas fa-trash fa-fw'></i>",
-        callback: () => effect.deleteDialog()
-      },
-      {
-        name: effect.disabled ? "DND5E.ContextMenuActionEnable" : "DND5E.ContextMenuActionDisable",
-        icon: effect.disabled ? "<i class='fas fa-check fa-fw'></i>" : "<i class='fas fa-times fa-fw'></i>",
-        callback: () => effect.update({disabled: !effect.disabled})
-      }
-    ];
-  }
-
-  /* -------------------------------------------- */
-
-  /**
-   * Prepare an array of context menu options which are available for owned Item documents.
-   * @param {Item5e} item                   The Item for which the context menu is activated
-   * @returns {ContextMenuEntry[]}          An array of context menu options offered for the Item
-   * @protected
-   */
-  _getItemContextOptions(item) {
-
-    // Standard Options
-    const options = [
-      {
-        name: "DND5E.ContextMenuActionEdit",
-        icon: "<i class='fas fa-edit fa-fw'></i>",
-        callback: () => item.sheet.render(true)
-      },
-      {
-        name: "DND5E.ContextMenuActionDuplicate",
-        icon: "<i class='fas fa-copy fa-fw'></i>",
-        condition: () => !["race", "background", "class", "subclass"].includes(item.type),
-        callback: () => item.clone({name: game.i18n.format("DOCUMENT.CopyOf", {name: item.name})}, {save: true})
-      },
-      {
-        name: "DND5E.ContextMenuActionDelete",
-        icon: "<i class='fas fa-trash fa-fw'></i>",
-        callback: () => item.deleteDialog()
-      }
-    ];
-
-    // Toggle Attunement State
-    if ( ("attunement" in item.system) && (item.system.attunement !== CONFIG.DND5E.attunementTypes.NONE) ) {
-      const isAttuned = item.system.attunement === CONFIG.DND5E.attunementTypes.ATTUNED;
-      options.push({
-        name: isAttuned ? "DND5E.ContextMenuActionUnattune" : "DND5E.ContextMenuActionAttune",
-        icon: "<i class='fas fa-sun fa-fw'></i>",
-        callback: () => item.update({
-          "system.attunement": CONFIG.DND5E.attunementTypes[isAttuned ? "REQUIRED" : "ATTUNED"]
-        })
-      });
-    }
-
-    // Toggle Equipped State
-    if ( "equipped" in item.system ) options.push({
-      name: item.system.equipped ? "DND5E.ContextMenuActionUnequip" : "DND5E.ContextMenuActionEquip",
-      icon: "<i class='fas fa-shield-alt fa-fw'></i>",
-      callback: () => item.update({"system.equipped": !item.system.equipped})
-    });
-
-    // Toggle Prepared State
-    if ( ("preparation" in item.system) && (item.system.preparation?.mode === "prepared") ) options.push({
-      name: item.system?.preparation?.prepared ? "DND5E.ContextMenuActionUnprepare" : "DND5E.ContextMenuActionPrepare",
-      icon: "<i class='fas fa-sun fa-fw'></i>",
-      callback: () => item.update({"system.preparation.prepared": !item.system.preparation?.prepared})
-    });
-    return options;
-  }
-
-  /* -------------------------------------------- */
-
-  /**
    * Initialize Item list filters by activating the set of filters which are currently applied
    * @param {number} i  Index of the filter in the list.
    * @param {HTML} ul   HTML object for the list item surrounding the filter.
@@ -13714,22 +17685,6 @@ class ActorSheet5e extends ActorSheet {
 
   /* -------------------------------------------- */
   /*  Event Listeners and Handlers                */
-  /* -------------------------------------------- */
-
-  /**
-   * Handle input changes to numeric form fields, allowing them to accept delta-typed inputs.
-   * @param {Event} event  Triggering event.
-   * @protected
-   */
-  _onChangeInputDelta(event) {
-    const input = event.target;
-    const value = input.value;
-    if ( ["+", "-"].includes(value[0]) ) {
-      const delta = parseFloat(value);
-      input.value = Number(foundry.utils.getProperty(this.actor, input.name)) + delta;
-    } else if ( value[0] === "=" ) input.value = value.slice(1);
-  }
-
   /* -------------------------------------------- */
 
   /**
@@ -13764,19 +17719,24 @@ class ActorSheet5e extends ActorSheet {
       case "senses":
         app = new ActorSensesConfig(this.actor);
         break;
+      case "source":
+        app = new SourceConfig(this.actor);
+        break;
       case "type":
         app = new ActorTypeConfig(this.actor);
         break;
-      case "ability": {
+      case "ability":
         const ability = event.currentTarget.closest("[data-ability]").dataset.ability;
         app = new ActorAbilityConfig(this.actor, null, ability);
         break;
-      }
-      case "skill": {
-        const skill = event.currentTarget.closest("[data-skill]").dataset.skill;
-        app = new ActorSkillConfig(this.actor, null, skill);
+      case "skill":
+        const skill = event.currentTarget.closest("[data-key]").dataset.key;
+        app = new ProficiencyConfig(this.actor, {property: "skills", key: skill});
         break;
-      }
+      case "tool":
+        const tool = event.currentTarget.closest("[data-key]").dataset.key;
+        app = new ProficiencyConfig(this.actor, {property: "tools", key: tool});
+        break;
     }
     app?.render(true);
   }
@@ -13784,25 +17744,26 @@ class ActorSheet5e extends ActorSheet {
   /* -------------------------------------------- */
 
   /**
-   * Handle cycling proficiency in a Skill.
-   * @param {Event} event   A click or contextmenu event which triggered the handler.
-   * @returns {Promise}     Updated data for this actor after changes are applied.
-   * @private
+   * Handle cycling proficiency in a skill or tool.
+   * @param {Event} event     A click or contextmenu event which triggered this action.
+   * @returns {Promise|void}  Updated data for this actor after changes are applied.
+   * @protected
    */
-  _onCycleSkillProficiency(event) {
+  _onCycleProficiency(event) {
     if ( event.currentTarget.classList.contains("disabled") ) return;
     event.preventDefault();
-    const parent = event.currentTarget.closest(".skill");
+    const parent = event.currentTarget.closest(".proficiency-row");
     const field = parent.querySelector('[name$=".value"]');
-    const value = this.actor._source.system.skills[parent.dataset.skill]?.value ?? 0;
+    const {property, key} = parent.dataset;
+    const value = this.actor._source.system[property]?.[key]?.value ?? 0;
 
-    // Cycle to the next or previous skill level
-    const levels = [0, 1, 0.5, 2];
-    let idx = levels.indexOf(value);
-    const next = idx + (event.type === "click" ? 1 : 3);
-    field.value = levels[next % 4];
+    // Cycle to the next or previous skill level.
+    const levels = [0, 1, .5, 2];
+    const idx = levels.indexOf(value);
+    const next = idx + (event.type === "contextmenu" ? 3 : 1);
+    field.value = levels[next % levels.length];
 
-    // Update the field value and save the form
+    // Update the field value and save the form.
     return this._onSubmit(event);
   }
 
@@ -13884,6 +17845,14 @@ class ActorSheet5e extends ActorSheet {
   /* -------------------------------------------- */
 
   /** @override */
+  async _onDrop(event) {
+    this._event = event;
+    return super._onDrop(event);
+  }
+
+  /* -------------------------------------------- */
+
+  /** @override */
   async _onDropItemCreate(itemData) {
     let items = itemData instanceof Array ? itemData : [itemData];
     const itemsWithoutAdvancement = items.filter(i => !i.system.advancement?.length);
@@ -13913,7 +17882,6 @@ class ActorSheet5e extends ActorSheet {
    * @protected
    */
   async _onDropSingleItem(itemData) {
-
     // Check to make sure items of this type are allowed on this actor
     if ( this.constructor.unsupportedItemTypes.has(itemData.type) ) {
       ui.notifications.warn(game.i18n.format("DND5E.ActorWarningInvalidItem", {
@@ -13945,6 +17913,10 @@ class ActorSheet5e extends ActorSheet {
         return false;
       }
     }
+
+    // Adjust the preparation mode of a leveled spell depending on the section on which it is dropped.
+    if ( itemData.type === "spell" ) this._onDropSpell(itemData);
+
     return itemData;
   }
 
@@ -13965,21 +17937,52 @@ class ActorSheet5e extends ActorSheet {
   /* -------------------------------------------- */
 
   /**
-   * Stack identical consumables when a new one is dropped rather than creating a duplicate item.
-   * @param {object} itemData         The item data requested for creation.
-   * @returns {Promise<Item5e>|null}  If a duplicate was found, returns the adjusted item stack.
+   * Adjust the preparation mode of a dropped spell depending on the drop location on the sheet.
+   * @param {object} itemData    The item data requested for creation. **Will be mutated.**
    */
-  _onDropStackConsumables(itemData) {
-    const droppedSourceId = itemData.flags.core?.sourceId;
-    if ( itemData.type !== "consumable" || !droppedSourceId ) return null;
-    const similarItem = this.actor.items.find(i => {
-      const sourceId = i.getFlag("core", "sourceId");
-      return sourceId && (sourceId === droppedSourceId) && (i.type === "consumable") && (i.name === itemData.name);
-    });
-    if ( !similarItem ) return null;
-    return similarItem.update({
-      "system.quantity": similarItem.system.quantity + Math.max(itemData.system.quantity, 1)
-    });
+  _onDropSpell(itemData) {
+    if ( !["npc", "character"].includes(this.document.type) ) return;
+
+    // Determine the section it is dropped on, if any.
+    let header = this._event.target.closest(".items-header"); // Dropped directly on the header.
+    if ( !header ) {
+      const list = this._event.target.closest(".item-list"); // Dropped inside an existing list.
+      header = list?.previousElementSibling;
+    }
+    const mode = header?.dataset ?? {};
+
+    // Determine the actor's spell slot progressions, if any.
+    const progs = Object.values(this.document.classes).reduce((acc, cls) => {
+      if ( cls.spellcasting?.type === "pact" ) acc.pact = true;
+      else if ( cls.spellcasting?.type === "leveled" ) acc.leveled = true;
+      return acc;
+    }, {pact: false, leveled: false});
+
+    // Case 1: Drop a cantrip.
+    if ( itemData.system.level === 0 ) {
+      if ( ["pact", "prepared"].includes(mode["preparation.mode"]) ) {
+        itemData.system.preparation.mode = "prepared";
+      } else if ( !mode["preparation.mode"] ) {
+        const isCaster = this.document.system.details.spellLevel || progs.pact || progs.leveled;
+        itemData.system.preparation.mode = isCaster ? "prepared" : "innate";
+      } else {
+        itemData.system.preparation.mode = mode["preparation.mode"];
+      }
+    }
+
+    // Case 2: Drop a leveled spell in a section without a mode.
+    else if ( (mode.level === 0) || !mode["preparation.mode"] ) {
+      if ( this.document.type === "npc" ) {
+        itemData.system.preparation.mode = this.document.system.details.spellLevel ? "prepared" : "innate";
+      } else {
+        itemData.system.preparation.mode = progs.leveled ? "prepared" : progs.pact ? "pact" : "innate";
+      }
+    }
+
+    // Case 3: Drop a leveled spell in a specific section.
+    else {
+      itemData.system.preparation.mode = mode["preparation.mode"];
+    }
   }
 
   /* -------------------------------------------- */
@@ -13987,7 +17990,7 @@ class ActorSheet5e extends ActorSheet {
   /**
    * Handle enabling editing for a spell slot override value.
    * @param {MouseEvent} event    The originating click event.
-   * @private
+   * @protected
    */
   async _onSpellSlotOverride(event) {
     const span = event.currentTarget.parentElement;
@@ -13999,6 +18002,7 @@ class ActorSheet5e extends ActorSheet {
     input.value = override;
     input.placeholder = span.dataset.slots;
     input.dataset.dtype = "Number";
+    input.addEventListener("focus", event => event.currentTarget.select());
 
     // Replace the HTML
     const parent = span.parentElement;
@@ -14009,18 +18013,24 @@ class ActorSheet5e extends ActorSheet {
   /* -------------------------------------------- */
 
   /**
-   * Change the uses amount of an Owned Item within the Actor.
-   * @param {Event} event        The triggering click event.
-   * @returns {Promise<Item5e>}  Updated item.
+   * Handle enabling editing for attunement maximum.
+   * @param {MouseEvent} event    The originating click event.
    * @private
    */
-  async _onUsesChange(event) {
-    event.preventDefault();
-    const itemId = event.currentTarget.closest(".item").dataset.itemId;
-    const item = this.actor.items.get(itemId);
-    const uses = Math.clamped(0, parseInt(event.target.value), item.system.uses.max);
-    event.target.value = uses;
-    return item.update({"system.uses.value": uses});
+  async _onAttunementOverride(event) {
+    const span = event.currentTarget.parentElement;
+    const input = document.createElement("INPUT");
+    input.type = "text";
+    input.name = "system.attributes.attunement.max";
+    input.value = this.actor.system.attributes.attunement.max;
+    input.placeholder = 3;
+    input.dataset.dtype = "Number";
+    input.addEventListener("focus", event => event.currentTarget.select());
+
+    // Replace the HTML
+    const parent = span.parentElement;
+    parent.removeChild(span);
+    parent.appendChild(input);
   }
 
   /* -------------------------------------------- */
@@ -14056,33 +18066,6 @@ class ActorSheet5e extends ActorSheet {
   /* -------------------------------------------- */
 
   /**
-   * Handle toggling and items expanded description.
-   * @param {Event} event   Triggering event.
-   * @private
-   */
-  async _onItemSummary(event) {
-    event.preventDefault();
-    const li = $(event.currentTarget).parents(".item");
-    const item = this.actor.items.get(li.data("item-id"));
-    const chatData = await item.getChatData({secrets: this.actor.isOwner});
-
-    // Toggle summary
-    if ( li.hasClass("expanded") ) {
-      const summary = li.children(".item-summary");
-      summary.slideUp(200, () => summary.remove());
-      this._expanded.delete(item.id);
-    } else {
-      const summary = $(await renderTemplate("systems/dnd5e/templates/items/parts/item-summary.hbs", chatData));
-      li.append(summary.hide());
-      summary.slideDown(200);
-      this._expanded.add(item.id);
-    }
-    li.toggleClass("expanded");
-  }
-
-  /* -------------------------------------------- */
-
-  /**
    * Handle creating a new Owned Item for the actor using initial data defined in the HTML dataset.
    * @param {Event} event          The originating click event.
    * @returns {Promise<Item5e[]>}  The newly created item.
@@ -14090,19 +18073,20 @@ class ActorSheet5e extends ActorSheet {
    */
   _onItemCreate(event) {
     event.preventDefault();
-    const header = event.currentTarget;
-    const type = header.dataset.type;
+    const dataset = (event.currentTarget.closest(".spellbook-header") ?? event.currentTarget).dataset;
+    const type = dataset.type;
 
     // Check to make sure the newly created class doesn't take player over level cap
     if ( type === "class" && (this.actor.system.details.level + 1 > CONFIG.DND5E.maxLevel) ) {
       const err = game.i18n.format("DND5E.MaxCharacterLevelExceededWarn", {max: CONFIG.DND5E.maxLevel});
-      return ui.notifications.error(err);
+      ui.notifications.error(err);
+      return null;
     }
 
     const itemData = {
-      name: game.i18n.format("DND5E.ItemNew", {type: game.i18n.localize(`ITEM.Type${type.capitalize()}`)}),
+      name: game.i18n.format("DND5E.ItemNew", {type: game.i18n.localize(CONFIG.Item.typeLabels[type])}),
       type: type,
-      system: foundry.utils.expandObject({ ...header.dataset })
+      system: foundry.utils.expandObject({ ...dataset })
     };
     delete itemData.system.type;
     return this.actor.createEmbeddedDocuments("Item", [itemData]);
@@ -14142,15 +18126,12 @@ class ActorSheet5e extends ActorSheet {
     if ( !game.settings.get("dnd5e", "disableAdvancements") ) {
       const manager = AdvancementManager.forDeletedItem(this.actor, item.id);
       if ( manager.steps.length ) {
-        if ( ["class", "subclass"].includes(item.type) ) {
-          try {
-            const shouldRemoveAdvancements = await AdvancementConfirmationDialog.forDelete(item);
-            if ( shouldRemoveAdvancements ) return manager.render(true);
-          } catch(err) {
-            return;
-          }
-        } else {
-          return manager.render(true);
+        try {
+          const shouldRemoveAdvancements = await AdvancementConfirmationDialog.forDelete(item);
+          if ( shouldRemoveAdvancements ) return manager.render(true);
+          return item.delete({ shouldRemoveAdvancements });
+        } catch(err) {
+          return;
         }
       }
     }
@@ -14168,15 +18149,7 @@ class ActorSheet5e extends ActorSheet {
   async _onPropertyAttribution(event) {
     const element = event.target;
     let property = element.dataset.attribution;
-    if ( !property ) {
-      property = element.dataset.property;
-      if ( !property ) return;
-      foundry.utils.logCompatibilityWarning(
-        "Defining attributable properties on sheets with the `.attributable` class and `data-property` value"
-        + " has been deprecated in favor of a single `data-attribution` value.",
-        { since: "DnD5e 2.1.3", until: "DnD5e 2.4" }
-      );
-    }
+    if ( !property ) return;
 
     const rollData = this.actor.getRollData({ deterministic: true });
     const title = game.i18n.localize(element.dataset.attributionCaption);
@@ -14212,16 +18185,24 @@ class ActorSheet5e extends ActorSheet {
    */
   _onRollSkillCheck(event) {
     event.preventDefault();
-    const skill = event.currentTarget.closest("[data-skill]").dataset.skill;
+    const skill = event.currentTarget.closest("[data-key]").dataset.key;
     return this.actor.rollSkill(skill, {event: event});
+  }
+
+  /* -------------------------------------------- */
+
+  _onRollToolCheck(event) {
+    event.preventDefault();
+    const tool = event.currentTarget.closest("[data-key]").dataset.key;
+    return this.actor.rollToolCheck(tool, {event});
   }
 
   /* -------------------------------------------- */
 
   /**
    * Handle toggling Ability score proficiency level.
-   * @param {Event} event         The originating click event.
-   * @returns {Promise<Actor5e>}  Updated actor instance.
+   * @param {Event} event              The originating click event.
+   * @returns {Promise<Actor5e>|void}  Updated actor instance.
    * @private
    */
   _onToggleAbilityProficiency(event) {
@@ -14259,7 +18240,9 @@ class ActorSheet5e extends ActorSheet {
    */
   _onTraitSelector(event) {
     event.preventDefault();
-    return new TraitSelector$1(this.actor, event.currentTarget.dataset.trait).render(true);
+    const trait = event.currentTarget.dataset.trait;
+    if ( trait === "tool" ) return new ToolSelector(this.actor, trait).render(true);
+    return new TraitSelector(this.actor, trait).render(true);
   }
 
   /* -------------------------------------------- */
@@ -14322,11 +18305,12 @@ class ActorSheet5eCharacter extends ActorSheet5e {
 
     // Resources
     context.resources = ["primary", "secondary", "tertiary"].reduce((arr, r) => {
-      const res = context.actor.system.resources[r] || {};
-      res.name = r;
-      res.placeholder = game.i18n.localize(`DND5E.Resource${r.titleCase()}`);
-      if (res && res.value === 0) delete res.value;
-      if (res && res.max === 0) delete res.max;
+      const res = foundry.utils.mergeObject(context.actor.system.resources[r] || {}, {
+        name: r,
+        placeholder: game.i18n.localize(`DND5E.Resource${r.titleCase()}`)
+      }, {inplace: false});
+      if ( res.value === 0 ) delete res.value;
+      if ( res.max === 0 ) delete res.max;
       return arr.concat([res]);
     }, []);
 
@@ -14334,9 +18318,12 @@ class ActorSheet5eCharacter extends ActorSheet5e {
     return foundry.utils.mergeObject(context, {
       disableExperience: game.settings.get("dnd5e", "disableExperienceTracking"),
       classLabels: classes.map(c => c.name).join(", "),
+      labels: {
+        type: context.system.details.type.label
+      },
       multiclassLabels: classes.map(c => [c.subclass?.name ?? "", c.name, c.system.levels].filterJoin(" ")).join(", "),
       weightUnit: game.i18n.localize(`DND5E.Abbreviation${
-        game.settings.get("dnd5e", "metricWeightUnits") ? "Kgs" : "Lbs"}`),
+        game.settings.get("dnd5e", "metricWeightUnits") ? "Kg" : "Lbs"}`),
       encumbrance: context.system.attributes.encumbrance
     });
   }
@@ -14347,18 +18334,14 @@ class ActorSheet5eCharacter extends ActorSheet5e {
   _prepareItems(context) {
 
     // Categorize items as inventory, spellbook, features, and classes
-    const inventory = {
-      weapon: { label: "ITEM.TypeWeaponPl", items: [], dataset: {type: "weapon"} },
-      equipment: { label: "ITEM.TypeEquipmentPl", items: [], dataset: {type: "equipment"} },
-      consumable: { label: "ITEM.TypeConsumablePl", items: [], dataset: {type: "consumable"} },
-      tool: { label: "ITEM.TypeToolPl", items: [], dataset: {type: "tool"} },
-      backpack: { label: "ITEM.TypeContainerPl", items: [], dataset: {type: "backpack"} },
-      loot: { label: "ITEM.TypeLootPl", items: [], dataset: {type: "loot"} }
-    };
+    const inventory = {};
+    for ( const type of ["weapon", "equipment", "consumable", "tool", "backpack", "loot"] ) {
+      inventory[type] = {label: `${CONFIG.Item.typeLabels[type]}Pl`, items: [], dataset: {type}};
+    }
 
     // Partition items by category
-    let {items, spells, feats, backgrounds, classes, subclasses} = context.items.reduce((obj, item) => {
-      const {quantity, uses, recharge, target} = item.system;
+    let {items, spells, feats, races, backgrounds, classes, subclasses} = context.items.reduce((obj, item) => {
+      const {quantity, uses, recharge} = item.system;
 
       // Item details
       const ctx = context.itemContext[item.id] ??= {};
@@ -14380,10 +18363,10 @@ class ActorSheet5eCharacter extends ActorSheet5e {
       ctx.isExpanded = this._expanded.has(item.id);
 
       // Item usage
-      ctx.hasUses = uses && (uses.max > 0);
+      ctx.hasUses = item.hasLimitedUses;
       ctx.isOnCooldown = recharge && !!recharge.value && (recharge.charged === false);
-      ctx.isDepleted = ctx.isOnCooldown && (uses.per && (uses.value > 0));
-      ctx.hasTarget = !!target && !(["none", ""].includes(target.type));
+      ctx.isDepleted = ctx.isOnCooldown && ctx.hasUses && (uses.value > 0);
+      ctx.hasTarget = item.hasAreaTarget || item.hasIndividualTarget;
 
       // Item toggle state
       this._prepareItemToggleState(item, ctx);
@@ -14391,12 +18374,13 @@ class ActorSheet5eCharacter extends ActorSheet5e {
       // Classify items into types
       if ( item.type === "spell" ) obj.spells.push(item);
       else if ( item.type === "feat" ) obj.feats.push(item);
+      else if ( item.type === "race" ) obj.races.push(item);
       else if ( item.type === "background" ) obj.backgrounds.push(item);
       else if ( item.type === "class" ) obj.classes.push(item);
       else if ( item.type === "subclass" ) obj.subclasses.push(item);
       else if ( Object.keys(inventory).includes(item.type) ) obj.items.push(item);
       return obj;
-    }, { items: [], spells: [], feats: [], backgrounds: [], classes: [], subclasses: [] });
+    }, { items: [], spells: [], feats: [], races: [], backgrounds: [], classes: [], subclasses: [] });
 
     // Apply active item filters
     items = this._filterItems(items, this._filters.inventory);
@@ -14442,11 +18426,14 @@ class ActorSheet5eCharacter extends ActorSheet5e {
 
     // Organize Features
     const features = {
+      race: {
+        label: CONFIG.Item.typeLabels.race, items: races,
+        hasActions: false, dataset: {type: "race"} },
       background: {
-        label: "ITEM.TypeBackground", items: backgrounds,
+        label: CONFIG.Item.typeLabels.background, items: backgrounds,
         hasActions: false, dataset: {type: "background"} },
       classes: {
-        label: "ITEM.TypeClassPl", items: classes,
+        label: `${CONFIG.Item.typeLabels.class}Pl`, items: classes,
         hasActions: false, dataset: {type: "class"}, isClass: true },
       active: {
         label: "DND5E.FeatureActive", items: [],
@@ -14466,7 +18453,6 @@ class ActorSheet5eCharacter extends ActorSheet5e {
     context.spellbook = spellbook;
     context.preparedSpells = nPrepared;
     context.features = Object.values(features);
-    context.labels.background = backgrounds[0]?.name;
   }
 
   /* -------------------------------------------- */
@@ -14509,6 +18495,19 @@ class ActorSheet5eCharacter extends ActorSheet5e {
     html.find(".short-rest").click(this._onShortRest.bind(this));
     html.find(".long-rest").click(this._onLongRest.bind(this));
     html.find(".rollable[data-action]").click(this._onSheetAction.bind(this));
+  }
+
+  /* -------------------------------------------- */
+
+  /** @inheritdoc */
+  _onConfigMenu(event) {
+    event.preventDefault();
+    event.stopPropagation();
+    if ( (event.currentTarget.dataset.action === "type") && (this.actor.system.details.race?.id) ) {
+      new ActorTypeConfig(this.actor.system.details.race, { keyPath: "system.type" }).render(true);
+    } else if ( event.currentTarget.dataset.action !== "type" ) {
+      return super._onConfigMenu(event);
+    }
   }
 
   /* -------------------------------------------- */
@@ -14675,7 +18674,7 @@ class ActorSheet5eNPC extends ActorSheet5e {
   /* -------------------------------------------- */
 
   /** @override */
-  static unsupportedItemTypes = new Set(["background", "class", "subclass"]);
+  static unsupportedItemTypes = new Set(["background", "class", "race", "subclass"]);
 
   /* -------------------------------------------- */
   /*  Context Preparation                         */
@@ -14692,7 +18691,7 @@ class ActorSheet5eNPC extends ActorSheet5e {
     return foundry.utils.mergeObject(context, {
       labels: {
         cr: cr >= 1 ? String(cr) : crLabels[cr] ?? 1,
-        type: this.actor.constructor.formatCreatureType(context.system.details.type),
+        type: context.system.details.type.label,
         armorType: this.getArmorLabel()
       }
     });
@@ -14801,7 +18800,7 @@ class ActorSheet5eVehicle extends ActorSheet5e {
   /* -------------------------------------------- */
 
   /** @override */
-  static unsupportedItemTypes = new Set(["background", "class", "subclass"]);
+  static unsupportedItemTypes = new Set(["background", "class", "race", "subclass"]);
 
   /* -------------------------------------------- */
 
@@ -14926,7 +18925,7 @@ class ActorSheet5eVehicle extends ActorSheet5e {
         }]
       },
       equipment: {
-        label: game.i18n.localize("ITEM.TypeEquipment"),
+        label: game.i18n.localize(CONFIG.Item.typeLabels.equipment),
         items: [],
         crewable: true,
         dataset: {type: "equipment", "armor.type": "vehicle"},
@@ -14943,7 +18942,7 @@ class ActorSheet5eVehicle extends ActorSheet5e {
         dataset: {type: "feat", "activation.type": "reaction"}
       },
       weapons: {
-        label: game.i18n.localize("ITEM.TypeWeaponPl"),
+        label: game.i18n.localize(`${CONFIG.Item.typeLabels.weapon}Pl`),
         items: [],
         crewable: true,
         dataset: {type: "weapon", "weapon-type": "siege"},
@@ -15180,8 +19179,8 @@ class ActorSheet5eVehicle extends ActorSheet5e {
     event.preventDefault();
     const itemID = event.currentTarget.closest(".item").dataset.itemId;
     const item = this.actor.items.get(itemID);
-    const hp = Math.clamped(0, parseInt(event.currentTarget.value), item.system.hp.max);
-    event.currentTarget.value = hp;
+    let hp = Math.clamped(0, parseInt(event.currentTarget.value), item.system.hp.max);
+    if ( Number.isNaN(hp) ) hp = 0;
     return item.update({"system.hp.value": hp});
   }
 
@@ -15197,8 +19196,8 @@ class ActorSheet5eVehicle extends ActorSheet5e {
     event.preventDefault();
     const itemID = event.currentTarget.closest(".item").dataset.itemId;
     const item = this.actor.items.get(itemID);
-    const qty = parseInt(event.currentTarget.value);
-    event.currentTarget.value = qty;
+    let qty = parseInt(event.currentTarget.value);
+    if ( Number.isNaN(qty) ) qty = 0;
     return item.update({"system.quantity": qty});
   }
 
@@ -15223,7 +19222,7 @@ class ActorSheet5eVehicle extends ActorSheet5e {
  * The functionality of this sheet is sufficiently different from other Actor types that we extend the base
  * Foundry VTT ActorSheet instead of the ActorSheet5e abstraction used for character, npc, and vehicle types.
  */
-class GroupActorSheet extends ActorSheet {
+class GroupActorSheet extends ActorSheetMixin(ActorSheet) {
 
   /**
    * IDs for items on the sheet that have been expanded.
@@ -15316,6 +19315,7 @@ class GroupActorSheet extends ActorSheet {
     const members = [];
     if ( stats.nMembers ) members.push(`${stats.nMembers} ${game.i18n.localize("DND5E.GroupMembers")}`);
     if ( stats.nVehicles ) members.push(`${stats.nVehicles} ${game.i18n.localize("DND5E.GroupVehicles")}`);
+    if ( !members.length ) return game.i18n.localize("DND5E.GroupSummaryEmpty");
     return game.i18n.format("DND5E.GroupSummary", {members: formatter.format(members)});
   }
 
@@ -15333,9 +19333,9 @@ class GroupActorSheet extends ActorSheet {
       nVehicles: 0
     };
     const sections = {
-      character: {label: "ACTOR.TypeCharacterPl", members: []},
-      npc: {label: "ACTOR.TypeNpcPl", members: []},
-      vehicle: {label: "ACTOR.TypeVehiclePl", members: []}
+      character: {label: `${CONFIG.Actor.typeLabels.character}Pl`, members: []},
+      npc: {label: `${CONFIG.Actor.typeLabels.npc}Pl`, members: []},
+      vehicle: {label: `${CONFIG.Actor.typeLabels.vehicle}Pl`, members: []}
     };
     for ( const member of this.object.system.members ) {
       const m = {
@@ -15350,7 +19350,7 @@ class GroupActorSheet extends ActorSheet {
       // HP bar
       const hp = member.system.attributes.hp;
       m.hp.current = hp.value + (hp.temp || 0);
-      m.hp.max = hp.max + (hp.tempmax || 0);
+      m.hp.max = Math.max(0, hp.max + (hp.tempmax || 0));
       m.hp.pct = Math.clamped((m.hp.current / m.hp.max) * 100, 0, 100).toFixed(2);
       m.hp.color = dnd5e.documents.Actor5e.getHPColor(m.hp.current, m.hp.max).css;
       stats.currentHP += m.hp.current;
@@ -15397,13 +19397,10 @@ class GroupActorSheet extends ActorSheet {
   #prepareInventory(context) {
 
     // Categorize as weapons, equipment, containers, and loot
-    const sections = {
-      weapon: {label: "ITEM.TypeWeaponPl", items: [], hasActions: false, dataset: {type: "weapon"}},
-      equipment: {label: "ITEM.TypeEquipmentPl", items: [], hasActions: false, dataset: {type: "equipment"}},
-      consumable: {label: "ITEM.TypeConsumablePl", items: [], hasActions: false, dataset: {type: "consumable"}},
-      backpack: {label: "ITEM.TypeContainerPl", items: [], hasActions: false, dataset: {type: "backpack"}},
-      loot: {label: "ITEM.TypeLootPl", items: [], hasActions: false, dataset: {type: "loot"}}
-    };
+    const sections = {};
+    for ( const type of ["weapon", "equipment", "consumable", "backpack", "loot"] ) {
+      sections[type] = {label: `${CONFIG.Item.typeLabels[type]}Pl`, items: [], hasActions: false, dataset: {type}};
+    }
 
     // Classify items
     for ( const item of context.items ) {
@@ -15412,6 +19409,7 @@ class GroupActorSheet extends ActorSheet {
       ctx.isStack = Number.isNumeric(quantity) && (quantity > 1);
       ctx.canToggle = false;
       ctx.isExpanded = this._expanded.has(item.id);
+      ctx.hasUses = item.hasLimitedUses;
       if ( (item.type in sections) && (item.type !== "loot") ) sections[item.type].items.push(item);
       else sections.loot.items.push(item);
     }
@@ -15449,9 +19447,15 @@ class GroupActorSheet extends ActorSheet {
     super.activateListeners(html);
     html.find(".group-member .name").click(this._onClickMemberName.bind(this));
     if ( this.isEditable ) {
+      // Input focus and update
+      const inputs = html.find("input");
+      inputs.focus(ev => ev.currentTarget.select());
+      inputs.addBack().find('[type="text"][data-dtype="Number"]').change(this._onChangeInputDelta.bind(this));
       html.find(".action-button").click(this._onClickActionButton.bind(this));
       html.find(".item-control").click(this._onClickItemControl.bind(this));
-      html.find(".item .rollable h4").click(event => this._onClickItemName(event));
+      html.find(".item .rollable h4").click(event => this._onItemSummary(event));
+      html.find(".item-uses input").change(this._onUsesChange.bind(this));
+      html.find(".item-quantity input").change(this._onQuantityChange.bind(this));
       new ContextMenu(html, ".item-list .item", [], {onOpen: this._onItemContext.bind(this)});
     }
   }
@@ -15524,7 +19528,7 @@ class GroupActorSheet extends ActorSheet {
     const type = button.dataset.type;
     const system = {...button.dataset};
     delete system.type;
-    const name = game.i18n.format("DND5E.ItemNew", {type: game.i18n.localize(`ITEM.Type${type.capitalize()}`)});
+    const name = game.i18n.format("DND5E.ItemNew", {type: game.i18n.localize(CONFIG.Item.typeLabels[type])});
     const itemData = {name, type, system};
     return this.actor.createEmbeddedDocuments("Item", [itemData]);
   }
@@ -15541,7 +19545,7 @@ class GroupActorSheet extends ActorSheet {
   _onItemContext(element) {
     const item = this.actor.items.get(element.dataset.itemId);
     if ( !item ) return;
-    ui.context.menuItems = ActorSheet5e.prototype._getItemContextOptions.call(this, item);
+    ui.context.menuItems = this._getItemContextOptions(item);
     Hooks.call("dnd5e.getItemContextOptions", item, ui.context.menuItems);
   }
 
@@ -15557,17 +19561,6 @@ class GroupActorSheet extends ActorSheet {
     const member = event.currentTarget.closest("li.group-member");
     const actor = game.actors.get(member.dataset.actorId);
     if ( actor ) actor.sheet.render(true, {focus: true});
-  }
-
-  /* -------------------------------------------- */
-
-  /**
-   * Handle clicks on an item name to expand its description
-   * @param {PointerEvent} event      The initiating click event
-   * @protected
-   */
-  _onClickItemName(event) {
-    game.system.applications.actor.ActorSheet5e.prototype._onItemSummary.call(this, event);
   }
 
   /* -------------------------------------------- */
@@ -15623,13 +19616,15 @@ class GroupActorSheet extends ActorSheet {
       return scroll.toObject();
     }
 
-    // TODO: Stack identical consumables
+    // Stack identical consumables
+    const stacked = this._onDropStackConsumables(itemData);
+    if ( stacked ) return false;
 
     return itemData;
   }
 }
 
-var _module$9 = /*#__PURE__*/Object.freeze({
+var _module$a = /*#__PURE__*/Object.freeze({
   __proto__: null,
   ActorAbilityConfig: ActorAbilityConfig,
   ActorArmorConfig: ActorArmorConfig,
@@ -15643,13 +19638,14 @@ var _module$9 = /*#__PURE__*/Object.freeze({
   ActorSheet5eNPC: ActorSheet5eNPC,
   ActorSheet5eVehicle: ActorSheet5eVehicle,
   ActorSheetFlags: ActorSheetFlags,
-  ActorSkillConfig: ActorSkillConfig,
   ActorTypeConfig: ActorTypeConfig,
-  BaseConfigSheet: ActorSheet5e,
+  BaseConfigSheet: BaseConfigSheet,
   GroupActorSheet: GroupActorSheet,
   LongRestDialog: LongRestDialog,
+  ProficiencyConfig: ProficiencyConfig,
   ShortRestDialog: ShortRestDialog,
-  TraitSelector: TraitSelector$1
+  ToolSelector: ToolSelector,
+  TraitSelector: TraitSelector
 });
 
 /**
@@ -15752,7 +19748,7 @@ class AdvancementSelection extends Dialog {
   getData() {
     const context = { types: {} };
     for ( const [name, advancement] of Object.entries(CONFIG.DND5E.advancementTypes) ) {
-      if ( !(advancement.prototype instanceof Advancement$1)
+      if ( !(advancement.prototype instanceof Advancement)
         || !advancement.metadata.validItemTypes.has(this.item.type) ) continue;
       context.types[name] = {
         label: advancement.metadata.title,
@@ -15816,8 +19812,10 @@ class AdvancementSelection extends Dialog {
 
 }
 
-var _module$8 = /*#__PURE__*/Object.freeze({
+var _module$9 = /*#__PURE__*/Object.freeze({
   __proto__: null,
+  AbilityScoreImprovementConfig: AbilityScoreImprovementConfig,
+  AbilityScoreImprovementFlow: AbilityScoreImprovementFlow,
   AdvancementConfig: AdvancementConfig,
   AdvancementConfirmationDialog: AdvancementConfirmationDialog,
   AdvancementFlow: AdvancementFlow,
@@ -15826,10 +19824,16 @@ var _module$8 = /*#__PURE__*/Object.freeze({
   AdvancementSelection: AdvancementSelection,
   HitPointsConfig: HitPointsConfig,
   HitPointsFlow: HitPointsFlow,
+  ItemChoiceConfig: ItemChoiceConfig,
+  ItemChoiceFlow: ItemChoiceFlow,
   ItemGrantConfig: ItemGrantConfig,
   ItemGrantFlow: ItemGrantFlow,
   ScaleValueConfig: ScaleValueConfig,
-  ScaleValueFlow: ScaleValueFlow
+  ScaleValueFlow: ScaleValueFlow,
+  SizeConfig: SizeConfig,
+  SizeFlow: SizeFlow,
+  TraitConfig: TraitConfig,
+  TraitFlow: TraitFlow
 });
 
 /**
@@ -15847,127 +19851,217 @@ class CombatTracker5e extends CombatTracker {
   }
 }
 
-var _module$7 = /*#__PURE__*/Object.freeze({
+var _module$8 = /*#__PURE__*/Object.freeze({
   __proto__: null,
   CombatTracker5e: CombatTracker5e
 });
 
 /**
- * A specialized form used to select from a checklist of attributes, traits, or properties.
- * @deprecated since dnd5e 2.1, targeted for removal in 2.3
+ * @typedef {object} AccordionConfiguration
+ * @property {string} headingSelector    The CSS selector that identifies accordion headers in the given markup.
+ * @property {string} contentSelector    The CSS selector that identifies accordion content in the given markup. This
+ *                                       can match content within the heading element, or sibling to the heading
+ *                                       element, with priority given to the former.
+ * @property {boolean} [collapseOthers]  Automatically collapses the other headings in this group when one heading is
+ *                                       clicked.
  */
-class TraitSelector extends DocumentSheet {
-  constructor(...args) {
-    super(...args);
 
-    if ( !this.options.suppressWarning ) foundry.utils.logCompatibilityWarning(
-      `${this.constructor.name} has been deprecated in favor of a more specialized TraitSelector `
-      + "available at 'dnd5e.applications.actor.TraitSelector'. Support for the old application will "
-      + "be removed in a future version.",
-      { since: "DnD5e 2.1", until: "DnD5e 2.3" }
-    );
+/**
+ * A class responsible for augmenting markup with an accordion effect.
+ * @param {AccordionConfiguration} config  Configuration options.
+ */
+class Accordion {
+  constructor(config) {
+    config.contentSelector = `${config.contentSelector}:not(.accordion-content)`;
+    this.#config = config;
   }
+
+  /**
+   * Configuration options.
+   * @type {AccordionConfiguration}
+   */
+  #config;
+
+  /**
+   * A mapping of heading elements to content elements.
+   * @type {Map<HTMLElement, HTMLElement>}
+   */
+  #sections = new Map();
+
+  /**
+   * A mapping of heading elements to any ongoing transition effect functions.
+   * @type {Map<HTMLElement, Function>}
+   */
+  #ongoing = new Map();
+
+  /**
+   * Record the state of collapsed sections.
+   * @type {boolean[]}
+   */
+  #collapsed;
 
   /* -------------------------------------------- */
 
-  /** @inheritDoc */
-  static get defaultOptions() {
-    return foundry.utils.mergeObject(super.defaultOptions, {
-      id: "trait-selector",
-      classes: ["dnd5e", "trait-selector", "subconfig"],
-      title: "Actor Trait Selection",
-      template: "systems/dnd5e/templates/apps/trait-selector.hbs",
-      width: 320,
-      height: "auto",
-      choices: {},
-      allowCustom: true,
-      minimum: 0,
-      maximum: null,
-      labelKey: null,
-      valueKey: "value",
-      customKey: "custom"
-    });
-  }
-
-  /* -------------------------------------------- */
-
-  /** @inheritdoc */
-  get title() {
-    return this.options.title || super.title;
+  /**
+   * Augment the given markup with an accordion effect.
+   * @param {HTMLElement} root  The root HTML node.
+   */
+  async bind(root) {
+    const firstBind = this.#sections.size < 1;
+    if ( firstBind ) this.#collapsed = [];
+    this.#sections = new Map();
+    this.#ongoing = new Map();
+    const { headingSelector, contentSelector } = this.#config;
+    let collapsedIndex = 0;
+    for ( const heading of root.querySelectorAll(headingSelector) ) {
+      const content = heading.querySelector(contentSelector) ?? heading.parentElement.querySelector(contentSelector);
+      if ( !content ) continue;
+      const wrapper = document.createElement("div");
+      wrapper.classList.add("accordion");
+      heading.before(wrapper);
+      wrapper.append(heading, content);
+      this.#sections.set(heading, content);
+      if ( firstBind ) this.#collapsed.push(this.#collapsed.length > 0);
+      else if ( this.#collapsed[collapsedIndex] ) wrapper.classList.add("collapsed");
+      heading.classList.add("accordion-heading");
+      content.classList.add("accordion-content");
+      heading.addEventListener("click", this._onClickHeading.bind(this));
+      collapsedIndex++;
+    }
+    await new Promise(resolve => { setTimeout(resolve, 0); }); // Allow re-paint.
+    this._restoreCollapsedState();
   }
 
   /* -------------------------------------------- */
 
   /**
-   * Return a reference to the target attribute
-   * @type {string}
+   * Handle clicking an accordion heading.
+   * @param {PointerEvent} event  The triggering event.
+   * @protected
    */
-  get attribute() {
-    return this.options.name;
-  }
-
-  /* -------------------------------------------- */
-
-  /** @override */
-  getData() {
-    const attr = foundry.utils.getProperty(this.object, this.attribute);
-    const o = this.options;
-    const value = (o.valueKey) ? foundry.utils.getProperty(attr, o.valueKey) ?? [] : attr;
-    const custom = (o.customKey) ? foundry.utils.getProperty(attr, o.customKey) ?? "" : "";
-
-    // Populate choices
-    const choices = Object.entries(o.choices).reduce((obj, e) => {
-      let [k, v] = e;
-      const label = o.labelKey ? foundry.utils.getProperty(v, o.labelKey) ?? v : v;
-      obj[k] = { label, chosen: attr ? value.includes(k) : false };
-      return obj;
-    }, {});
-
-    // Return data
-    return {
-      choices: choices,
-      custom: custom,
-      customPath: o.allowCustom ? "custom" : null
-    };
+  _onClickHeading(event) {
+    if ( event.target.closest("a") ) return;
+    const heading = event.currentTarget;
+    const content = this.#sections.get(heading);
+    if ( !content ) return;
+    event.preventDefault();
+    const collapsed = heading.parentElement.classList.contains("collapsed");
+    if ( collapsed ) this._onExpandSection(heading, content);
+    else this._onCollapseSection(heading, content);
   }
 
   /* -------------------------------------------- */
 
   /**
-   * Prepare the update data to include choices in the provided object.
-   * @param {object} formData  Form data to search for choices.
-   * @returns {object}         Updates to apply to target.
+   * Handle expanding a section.
+   * @param {HTMLElement} heading             The section heading.
+   * @param {HTMLElement} content             The section content.
+   * @param {object} [options]
+   * @param {boolean} [options.animate=true]  Whether to animate the expand effect.
+   * @protected
    */
-  _prepareUpdateData(formData) {
-    const o = this.options;
-    formData = foundry.utils.expandObject(formData);
+  async _onExpandSection(heading, content, { animate=true }={}) {
+    this.#cancelOngoing(heading);
 
-    // Obtain choices
-    const chosen = Object.entries(formData.choices).filter(([, v]) => v).map(([k]) => k);
-
-    // Object including custom data
-    const updateData = {};
-    if ( o.valueKey ) updateData[`${this.attribute}.${o.valueKey}`] = chosen;
-    else updateData[this.attribute] = chosen;
-    if ( o.allowCustom ) updateData[`${this.attribute}.${o.customKey}`] = formData.custom;
-
-    // Validate the number chosen
-    if ( o.minimum && (chosen.length < o.minimum) ) {
-      return ui.notifications.error(`You must choose at least ${o.minimum} options`);
-    }
-    if ( o.maximum && (chosen.length > o.maximum) ) {
-      return ui.notifications.error(`You may choose no more than ${o.maximum} options`);
+    if ( this.#config.collapseOthers ) {
+      for ( const [otherHeading, otherContent] of this.#sections.entries() ) {
+        if ( (heading !== otherHeading) && !otherHeading.parentElement.classList.contains("collapsed") ) {
+          this._onCollapseSection(otherHeading, otherContent, { animate });
+        }
+      }
     }
 
-    return updateData;
+    heading.parentElement.classList.remove("collapsed");
+    if ( animate ) content.style.height = "0";
+    else {
+      content.style.height = `${content._fullHeight}px`;
+      return;
+    }
+    await new Promise(resolve => { setTimeout(resolve, 0); }); // Allow re-paint.
+    const onEnd = this._onEnd.bind(this, heading, content);
+    this.#ongoing.set(heading, onEnd);
+    content.addEventListener("transitionend", onEnd, { once: true });
+    content.style.height = `${content._fullHeight}px`;
   }
 
   /* -------------------------------------------- */
 
-  /** @override */
-  async _updateObject(event, formData) {
-    const updateData = this._prepareUpdateData(formData);
-    if ( updateData ) this.object.update(updateData);
+  /**
+   * Handle collapsing a section.
+   * @param {HTMLElement} heading             The section heading.
+   * @param {HTMLElement} content             The section content.
+   * @param {object} [options]
+   * @param {boolean} [options.animate=true]  Whether to animate the collapse effect.
+   * @protected
+   */
+  async _onCollapseSection(heading, content, { animate=true }={}) {
+    this.#cancelOngoing(heading);
+    const { height } = content.getBoundingClientRect();
+    heading.parentElement.classList.add("collapsed");
+    content._fullHeight = height;
+    if ( animate ) content.style.height = `${height}px`;
+    else {
+      content.style.height = "0";
+      return;
+    }
+    await new Promise(resolve => { setTimeout(resolve, 0); }); // Allow re-paint.
+    const onEnd = this._onEnd.bind(this, heading, content);
+    this.#ongoing.set(heading, onEnd);
+    content.addEventListener("transitionend", onEnd, { once: true });
+    content.style.height = "0";
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * A function to invoke when the height transition has ended.
+   * @param {HTMLElement} heading  The section heading.
+   * @param {HTMLElement} content  The section content.
+   * @protected
+   */
+  _onEnd(heading, content) {
+    content.style.height = "";
+    this.#ongoing.delete(heading);
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * Cancel an ongoing effect.
+   * @param {HTMLElement} heading  The section heading.
+   */
+  #cancelOngoing(heading) {
+    const ongoing = this.#ongoing.get(heading);
+    const content = this.#sections.get(heading);
+    if ( ongoing && content ) content.removeEventListener("transitionend", ongoing);
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * Save the accordion state.
+   * @protected
+   */
+  _saveCollapsedState() {
+    this.#collapsed = [];
+    for ( const heading of this.#sections.keys() ) {
+      this.#collapsed.push(heading.parentElement.classList.contains("collapsed"));
+    }
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * Restore the accordion state.
+   * @protected
+   */
+  _restoreCollapsedState() {
+    const entries = Array.from(this.#sections.entries());
+    for ( let i = 0; i < entries.length; i++ ) {
+      const collapsed = this.#collapsed[i];
+      const [heading, content] = entries[i];
+      if ( collapsed ) this._onCollapseSection(heading, content, { animate: false });
+    }
   }
 }
 
@@ -15986,6 +20080,8 @@ class ItemSheet5e extends ItemSheet {
     else if ( this.object.type === "subclass" ) {
       this.options.height = this.position.height = 540;
     }
+
+    this._accordions = this._createAccordions();
   }
 
   /* -------------------------------------------- */
@@ -15994,15 +20090,23 @@ class ItemSheet5e extends ItemSheet {
   static get defaultOptions() {
     return foundry.utils.mergeObject(super.defaultOptions, {
       width: 560,
-      height: 400,
+      height: 500,
       classes: ["dnd5e", "sheet", "item"],
       resizable: true,
-      scrollY: [".tab.details"],
+      scrollY: [
+        ".tab[data-tab=details]",
+        ".tab[data-tab=effects] .items-list",
+        ".tab[data-tab=description] .editor-content",
+        ".tab[data-tab=advancement] .items-list"
+      ],
       tabs: [{navSelector: ".tabs", contentSelector: ".sheet-body", initial: "description"}],
       dragDrop: [
         {dragSelector: "[data-effect-id]", dropSelector: ".effects-list"},
         {dragSelector: ".advancement-item", dropSelector: ".advancement"}
-      ]
+      ],
+      accordions: [{
+        headingSelector: ".description-header", contentSelector: ".editor"
+      }]
     });
   }
 
@@ -16016,6 +20120,14 @@ class ItemSheet5e extends ItemSheet {
 
   /* -------------------------------------------- */
 
+  /**
+   * The description currently being edited.
+   * @type {string}
+   */
+  editingDescriptionTarget;
+
+  /* -------------------------------------------- */
+
   /** @inheritdoc */
   get template() {
     return `systems/dnd5e/templates/items/${this.item.type}.hbs`;
@@ -16025,12 +20137,19 @@ class ItemSheet5e extends ItemSheet {
   /*  Context Preparation                         */
   /* -------------------------------------------- */
 
+  /** @inheritDoc */
+  async _render(force, options) {
+    if ( !this.editingDescriptionTarget ) this._accordions.forEach(accordion => accordion._saveCollapsedState());
+    return super._render(force, options);
+  }
+
+  /* -------------------------------------------- */
+
   /** @override */
   async getData(options) {
     const context = await super.getData(options);
     const item = context.item;
     const source = item.toObject();
-    const isMountable = this._isItemMountable(item);
 
     // Game system configuration
     context.config = CONFIG.DND5E;
@@ -16045,25 +20164,23 @@ class ItemSheet5e extends ItemSheet {
       rollData: this.item.getRollData(),
 
       // Item Type, Status, and Details
-      itemType: game.i18n.localize(`ITEM.Type${this.item.type.titleCase()}`),
+      itemType: game.i18n.localize(CONFIG.Item.typeLabels[this.item.type]),
       itemStatus: this._getItemStatus(),
       itemProperties: this._getItemProperties(),
       baseItems: await this._getItemBaseTypes(),
       isPhysical: item.system.hasOwnProperty("quantity"),
 
       // Action Details
-      hasAttackRoll: item.hasAttack,
       isHealing: item.system.actionType === "heal",
       isFlatDC: item.system.save?.scaling === "flat",
       isLine: ["line", "wall"].includes(item.system.target?.type),
+      isFormulaRecharge: item.system.uses?.per in CONFIG.DND5E.limitedUseFormulaPeriods,
+      isCostlessAction: item.system.activation?.type in CONFIG.DND5E.staticAbilityActivationTypes,
 
       // Vehicles
       isCrewed: item.system.activation?.type === "crew",
-      isMountable,
 
       // Armor Class
-      isArmor: item.isArmor,
-      hasAC: item.isArmor || isMountable,
       hasDexModifier: item.isArmor && (item.system.armor?.type !== "shield"),
 
       // Advancement
@@ -16073,16 +20190,6 @@ class ItemSheet5e extends ItemSheet {
       effects: ActiveEffect5e.prepareActiveEffectCategories(item.effects)
     });
     context.abilityConsumptionTargets = this._getItemConsumptionTargets();
-
-    /** @deprecated */
-    Object.defineProperty(context, "data", {
-      get() {
-        const msg = `You are accessing the "data" attribute within the rendering context provided by the ItemSheet5e
-        class. This attribute has been deprecated in favor of "system" and will be removed in a future release`;
-        foundry.utils.logCompatibilityWarning(msg, { since: "DnD5e 2.0", until: "DnD5e 2.2" });
-        return context.system;
-      }
-    });
 
     // Special handling for specific item types
     switch ( item.type ) {
@@ -16096,15 +20203,30 @@ class ItemSheet5e extends ItemSheet {
       case "spell":
         context.spellComponents = {...CONFIG.DND5E.spellComponents, ...CONFIG.DND5E.spellTags};
         break;
+      case "loot":
+        const lootType = CONFIG.DND5E.lootTypes[item.system.type?.value];
+        if ( lootType ) {
+          context.itemType = lootType.label;
+          context.lootSubtypes = lootType.subtypes;
+        }
+        break;
     }
 
     // Enrich HTML description
-    context.descriptionHTML = await TextEditor.enrichHTML(item.system.description.value, {
-      secrets: item.isOwner,
-      async: true,
-      relativeTo: this.item,
-      rollData: context.rollData
-    });
+    const enrichmentOptions = {
+      secrets: item.isOwner, async: true, relativeTo: this.item, rollData: context.rollData
+    };
+    context.enriched = {
+      description: await TextEditor.enrichHTML(item.system.description.value, enrichmentOptions),
+      unidentified: await TextEditor.enrichHTML(item.system.description.unidentified, enrichmentOptions),
+      chat: await TextEditor.enrichHTML(item.system.description.chat, enrichmentOptions)
+    };
+    if ( this.editingDescriptionTarget ) {
+      context.editingDescriptionTarget = this.editingDescriptionTarget;
+      context.enriched.editing = await TextEditor.enrichHTML(
+        foundry.utils.getProperty(context, this.editingDescriptionTarget), enrichmentOptions
+      );
+    }
     return context;
   }
 
@@ -16205,11 +20327,9 @@ class ItemSheet5e extends ItemSheet {
 
     // Attributes
     else if ( consume.type === "attribute" ) {
-      const attributes = TokenDocument.implementation.getConsumedAttributes(actor.system);
-      attributes.bar.forEach(a => a.push("value"));
-      return attributes.bar.concat(attributes.value).reduce((obj, a) => {
-        let k = a.join(".");
-        obj[k] = k;
+      const attrData = game.dnd5e.isV10 ? actor.system : actor.type;
+      return TokenDocument.implementation.getConsumedAttributes(attrData).reduce((obj, attr) => {
+        obj[attr] = attr;
         return obj;
       }, {});
     }
@@ -16240,7 +20360,7 @@ class ItemSheet5e extends ItemSheet {
         // Limited-use items
         const uses = i.system.uses || {};
         if ( uses.per && uses.max ) {
-          const label = uses.per === "charges"
+          const label = (uses.per in CONFIG.DND5E.limitedUseFormulaPeriods)
             ? ` (${game.i18n.format("DND5E.AbilityUseChargesLabel", {value: uses.value})})`
             : ` (${game.i18n.format("DND5E.AbilityUseConsumableLabel", {max: uses.max, per: uses.per})})`;
           obj[i.id] = i.name + label;
@@ -16276,7 +20396,7 @@ class ItemSheet5e extends ItemSheet {
       case "spell":
         return CONFIG.DND5E.spellPreparationModes[this.item.system.preparation];
       case "tool":
-        return game.i18n.localize(this.item.system.proficient ? "DND5E.Proficient" : "DND5E.NotProficient");
+        return CONFIG.DND5E.proficiencyLevels[this.item.system.prof?.multiplier || 0];
     }
     return null;
   }
@@ -16292,9 +20412,14 @@ class ItemSheet5e extends ItemSheet {
     const props = [];
     const labels = this.item.labels;
     switch ( this.item.type ) {
+      case "consumable":
+        for ( const [k, v] of Object.entries(this.item.system.properties ?? {}) ) {
+          if ( v === true ) props.push(CONFIG.DND5E.physicalWeaponProperties[k]);
+        }
+        break;
       case "equipment":
         props.push(CONFIG.DND5E.equipmentTypes[this.item.system.armor.type]);
-        if ( this.item.isArmor || this._isItemMountable(this.item) ) props.push(labels.armor);
+        if ( this.item.isArmor || this.item.isMountable ) props.push(labels.armor);
         break;
       case "feat":
         props.push(labels.featType);
@@ -16323,20 +20448,6 @@ class ItemSheet5e extends ItemSheet {
 
   /* -------------------------------------------- */
 
-  /**
-   * Is this item a separate large object like a siege engine or vehicle component that is
-   * usually mounted on fixtures rather than equipped, and has its own AC and HP.
-   * @param {object} item  Copy of item data being prepared for display.
-   * @returns {boolean}    Is item siege weapon or vehicle equipment?
-   * @private
-   */
-  _isItemMountable(item) {
-    return ((item.type === "weapon") && (item.system.weaponType === "siege"))
-      || (item.type === "equipment" && (item.system.armor.type === "vehicle"));
-  }
-
-  /* -------------------------------------------- */
-
   /** @inheritDoc */
   setPosition(position={}) {
     if ( !(this._minimized || position.height) ) {
@@ -16354,7 +20465,10 @@ class ItemSheet5e extends ItemSheet {
       menu: ProseMirror.ProseMirrorMenu.build(ProseMirror.defaultSchema, {
         compact: true,
         destroyOnSave: true,
-        onSave: () => this.saveEditor(name, {remove: true})
+        onSave: () => {
+          this.saveEditor(name, {remove: true});
+          this.editingDescriptionTarget = null;
+        }
       })
     };
     return super.activateEditor(name, options, initialContent);
@@ -16379,9 +20493,10 @@ class ItemSheet5e extends ItemSheet {
       if ( !maxRoll.isDeterministic ) {
         uses.max = this.item._source.system.uses.max;
         this.form.querySelector("input[name='system.uses.max']").value = uses.max;
-        return ui.notifications.error(game.i18n.format("DND5E.FormulaCannotContainDiceError", {
+        ui.notifications.error(game.i18n.format("DND5E.FormulaCannotContainDiceError", {
           name: game.i18n.localize("DND5E.LimitedUses")
         }));
+        return null;
       }
     }
 
@@ -16392,9 +20507,10 @@ class ItemSheet5e extends ItemSheet {
       if ( !durationRoll.isDeterministic ) {
         duration.value = this.item._source.system.duration.value;
         this.form.querySelector("input[name='system.duration.value']").value = duration.value;
-        return ui.notifications.error(game.i18n.format("DND5E.FormulaCannotContainDiceError", {
+        ui.notifications.error(game.i18n.format("DND5E.FormulaCannotContainDiceError", {
           name: game.i18n.localize("DND5E.Duration")
         }));
+        return null;
       }
     }
 
@@ -16402,7 +20518,8 @@ class ItemSheet5e extends ItemSheet {
     if ( formData.system?.identifier && !dnd5e.utils.validators.isValidIdentifier(formData.system.identifier) ) {
       formData.system.identifier = this.item._source.system.identifier;
       this.form.querySelector("input[name='system.identifier']").value = formData.system.identifier;
-      return ui.notifications.error(game.i18n.localize("DND5E.IdentifierError"));
+      ui.notifications.error("DND5E.IdentifierError", {localize: true});
+      return null;
     }
 
     // Return the flattened submission data
@@ -16414,16 +20531,22 @@ class ItemSheet5e extends ItemSheet {
   /** @inheritDoc */
   activateListeners(html) {
     super.activateListeners(html);
+    if ( !this.editingDescriptionTarget ) this._accordions.forEach(accordion => accordion.bind(html[0]));
     if ( this.isEditable ) {
+      html.find(".config-button").click(this._onConfigMenu.bind(this));
       html.find(".damage-control").click(this._onDamageControl.bind(this));
-      html.find(".trait-selector").click(this._onConfigureTraits.bind(this));
       html.find(".effect-control").click(ev => {
-        if ( this.item.isOwned ) return ui.notifications.warn("Managing Active Effects within an Owned Item is not currently supported and will be added in a subsequent update.");
+        const unsupported = game.dnd5e.isV10 && this.item.isOwned;
+        if ( unsupported ) return ui.notifications.warn("Managing Active Effects within an Owned Item is not currently supported and will be added in a subsequent update.");
         ActiveEffect5e.onManageActiveEffect(ev, this.item);
       });
       html.find(".advancement .item-control").click(event => {
         const t = event.currentTarget;
         if ( t.dataset.action ) this._onAdvancementAction(t, t.dataset.action);
+      });
+      html.find(".description-edit").click(event => {
+        this.editingDescriptionTarget = event.currentTarget.dataset.target;
+        this.render();
       });
     }
 
@@ -16476,6 +20599,34 @@ class ItemSheet5e extends ItemSheet {
   }
 
   /* -------------------------------------------- */
+  /**
+   * Handle spawning the configuration applications.
+   * @param {Event} event   The click event which originated the selection.
+   * @protected
+   */
+  _onConfigMenu(event) {
+    event.preventDefault();
+    event.stopPropagation();
+    const button = event.currentTarget;
+    let app;
+    switch ( button.dataset.action ) {
+      case "movement":
+        app = new ActorMovementConfig(this.item, { keyPath: "system.movement" });
+        break;
+      case "senses":
+        app = new ActorSensesConfig(this.item, { keyPath: "system.senses" });
+        break;
+      case "source":
+        app = new SourceConfig(this.item, { keyPath: "system.source" });
+        break;
+      case "type":
+        app = new ActorTypeConfig(this.item, { keyPath: "system.type" });
+        break;
+    }
+    app?.render(true);
+  }
+
+  /* -------------------------------------------- */
 
   /**
    * Add or remove a damage part from the damage formula.
@@ -16503,6 +20654,15 @@ class ItemSheet5e extends ItemSheet {
       return this.item.update({"system.damage.parts": damage.parts});
     }
   }
+
+  /* -------------------------------------------- */
+
+  /** @inheritdoc */
+  _canDragStart(selector) {
+    if ( selector === ".advancement-item" ) return true;
+    return super._canDragStart(selector);
+  }
+
   /* -------------------------------------------- */
 
   /** @inheritdoc */
@@ -16567,7 +20727,7 @@ class ItemSheet5e extends ItemSheet {
   async _onDropActiveEffect(event, data) {
     const effect = await ActiveEffect.implementation.fromDropData(data);
     if ( !this.item.isOwner || !effect ) return false;
-    if ( (this.item.uuid === effect.parent.uuid) || (this.item.uuid === effect.origin) ) return false;
+    if ( (this.item.uuid === effect.parent?.uuid) || (this.item.uuid === effect.origin) ) return false;
     return ActiveEffect.create({
       ...effect.toObject(),
       origin: this.item.uuid
@@ -16580,6 +20740,7 @@ class ItemSheet5e extends ItemSheet {
    * Handle the dropping of an advancement or item with advancements onto the advancements tab.
    * @param {DragEvent} event                  The concluding DragEvent which contains drop data.
    * @param {object} data                      The data transfer extracted from the event.
+   * @returns {Promise}
    */
   async _onDropAdvancement(event, data) {
     let advancements;
@@ -16616,47 +20777,9 @@ class ItemSheet5e extends ItemSheet {
     }
 
     // If no advancements need to be applied, just add them to the item
-    const advancementArray = foundry.utils.deepClone(this.item.system.advancement);
+    const advancementArray = this.item.system.toObject().advancement;
     advancementArray.push(...advancements.map(a => a.toObject()));
     this.item.update({"system.advancement": advancementArray});
-  }
-
-  /* -------------------------------------------- */
-
-  /**
-   * Handle spawning the TraitSelector application for selection various options.
-   * @param {Event} event   The click event which originated the selection.
-   * @private
-   */
-  _onConfigureTraits(event) {
-    event.preventDefault();
-    const a = event.currentTarget;
-    const options = {
-      name: a.dataset.target,
-      title: a.parentElement.innerText,
-      choices: [],
-      allowCustom: false,
-      suppressWarning: true
-    };
-    switch (a.dataset.options) {
-      case "saves":
-        options.choices = CONFIG.DND5E.abilities;
-        options.valueKey = null;
-        break;
-      case "skills.choices":
-        options.choices = CONFIG.DND5E.skills;
-        options.valueKey = null;
-        options.labelKey = "label";
-        break;
-      case "skills":
-        const skills = this.item.system.skills;
-        const choices = skills.choices?.length ? skills.choices : Object.keys(CONFIG.DND5E.skills);
-        options.choices = Object.fromEntries(Object.entries(CONFIG.DND5E.skills).filter(([s]) => choices.includes(s)));
-        options.maximum = skills.number;
-        options.labelKey = "label";
-        break;
-    }
-    new TraitSelector(this.item, options).render(true);
   }
 
   /* -------------------------------------------- */
@@ -16700,9 +20823,20 @@ class ItemSheet5e extends ItemSheet {
     if ( this._tabs[0].active === "details" ) this.position.height = "auto";
     await super._onSubmit(...args);
   }
+
+  /* -------------------------------------------- */
+
+  /**
+   * Instantiate accordion widgets.
+   * @returns {Accordion[]}
+   * @protected
+   */
+  _createAccordions() {
+    return this.options.accordions.map(config => new Accordion(config));
+  }
 }
 
-var _module$6 = /*#__PURE__*/Object.freeze({
+var _module$7 = /*#__PURE__*/Object.freeze({
   __proto__: null,
   AbilityUseDialog: AbilityUseDialog,
   ItemSheet5e: ItemSheet5e
@@ -16722,9 +20856,10 @@ class JournalEditor extends DocumentSheet {
     return foundry.utils.mergeObject(super.defaultOptions, {
       classes: ["journal-editor"],
       template: "systems/dnd5e/templates/journal/journal-editor.hbs",
-      width: 520,
+      width: 550,
       height: 640,
-      textKeyPath: null
+      textKeyPath: null,
+      resizable: true
     });
   }
 
@@ -16827,12 +20962,32 @@ class JournalClassPageSheet extends JournalPageSheet {
   _getAdvancement(item) {
     const advancement = {};
 
-    const hp = item.advancement.byType.HitPoints[0];
+    const hp = item.advancement.byType.HitPoints?.[0];
     if ( hp ) {
       advancement.hp = {
         hitDice: `1${hp.hitDie}`,
         max: hp.hitDieValue,
         average: Math.floor(hp.hitDieValue / 2) + 1
+      };
+    }
+
+    const traits = item.advancement.byType.Trait ?? [];
+    const makeTrait = type => {
+      const advancement = traits.find(a => {
+        const rep = a.representedTraits();
+        if ( (rep.size > 1) || (rep.first() !== type) ) return false;
+        return (a.classRestriction !== "secondary") && (a.level === 1);
+      });
+      if ( !advancement ) return game.i18n.localize("None");
+      return advancement.configuration.hint || localizedList(advancement.configuration);
+    };
+    if ( traits.length ) {
+      advancement.traits = {
+        armor: makeTrait("armor"),
+        weapons: makeTrait("weapon"),
+        tools: makeTrait("tool"),
+        saves: makeTrait("saves"),
+        skills: makeTrait("skills")
       };
     }
 
@@ -16900,10 +21055,13 @@ class JournalClassPageSheet extends JournalPageSheet {
       const features = [];
       for ( const advancement of item.advancement.byLevel[level] ) {
         switch ( advancement.constructor.typeName ) {
+          case "AbilityScoreImprovement":
+            features.push(game.i18n.localize("DND5E.AdvancementAbilityScoreImprovementTitle"));
+            continue;
           case "ItemGrant":
             if ( advancement.configuration.optional ) continue;
             features.push(...await Promise.all(advancement.configuration.items.map(makeLink)));
-            continue;
+            break;
         }
       }
 
@@ -17038,7 +21196,7 @@ class JournalClassPageSheet extends JournalPageSheet {
           case "ItemGrant":
             if ( !advancement.configuration.optional ) continue;
             features.push(...await Promise.all(advancement.configuration.items.map(makeLink)));
-            continue;
+            break;
         }
       }
       if ( !features.length ) continue;
@@ -17179,7 +21337,7 @@ class JournalClassPageSheet extends JournalPageSheet {
    */
   _onLaunchTextEditor(event) {
     event.preventDefault();
-    const textKeyPath = event.target.dataset.target;
+    const textKeyPath = event.currentTarget.dataset.target;
     const label = event.target.closest(".form-group").querySelector("label");
     const editor = new JournalEditor(this.document, { textKeyPath, title: label?.innerText });
     editor.render(true);
@@ -17285,172 +21443,22 @@ class SRDCompendium extends Compendium {
   }
 }
 
-var _module$5 = /*#__PURE__*/Object.freeze({
+var _module$6 = /*#__PURE__*/Object.freeze({
   __proto__: null,
   JournalClassPageSheet: JournalClassPageSheet,
   JournalEditor: JournalEditor,
   SRDCompendium: SRDCompendium
 });
 
-/**
- * @deprecated since dnd5e 2.1, targeted for removal in 2.3
- */
-class DamageTraitSelector extends TraitSelector {
-
-  /** @inheritdoc */
-  static get defaultOptions() {
-    return foundry.utils.mergeObject(super.defaultOptions, {
-      template: "systems/dnd5e/templates/apps/damage-trait-selector.hbs"
-    });
-  }
-
-  /* -------------------------------------------- */
-
-  /** @override */
-  getData() {
-    const data = super.getData();
-    const attr = foundry.utils.getProperty(this.object, this.attribute);
-
-    data.bypasses = Object.entries(this.options.bypasses).reduce((obj, [k, v]) => {
-      obj[k] = { label: v, chosen: attr ? attr.bypasses.includes(k) : false };
-      return obj;
-    }, {});
-
-    return data;
-  }
-
-  /* -------------------------------------------- */
-
-  /** @override */
-  async _updateObject(event, formData) {
-    const data = foundry.utils.expandObject(formData);
-    const updateData = this._prepareUpdateData(data.choices);
-    if ( !updateData ) return;
-    updateData[`${this.attribute}.bypasses`] = Object.entries(data.bypasses).filter(([, v]) => v).map(([k]) => k);
-    this.object.update(updateData);
-  }
-
-}
-
-/**
- * An application for selecting proficiencies with categories that can contain children.
- * @deprecated since dnd5e 2.1, targeted for removal in 2.3
- */
-class ProficiencySelector extends TraitSelector {
-
-  /** @inheritdoc */
-  static get defaultOptions() {
-    return foundry.utils.mergeObject(super.defaultOptions, {
-      title: "Actor Proficiency Selection",
-      type: ""
-    });
-  }
-
-  /* -------------------------------------------- */
-
-  /** @inheritdoc */
-  async getData() {
-    const attr = foundry.utils.getProperty(this.object, this.attribute);
-    const chosen = (this.options.valueKey) ? foundry.utils.getProperty(attr, this.options.valueKey) ?? [] : attr;
-
-    const data = super.getData();
-    data.choices = await choices(this.options.type, chosen);
-    return data;
-  }
-
-  /* -------------------------------------------- */
-
-  /**
-   * A static helper method to get a list of choices for a proficiency type.
-   *
-   * @param {string} type               Proficiency type to select, either `armor`, `tool`, or `weapon`.
-   * @param {string[]} [chosen]         Optional list of items to be marked as chosen.
-   * @returns {Object<string, SelectChoices>}  Object mapping proficiency ids to choice objects.
-   * @deprecated since dnd5e 2.1, targeted for removal in 2.3
-   */
-  static async getChoices(type, chosen=[]) {
-    foundry.utils.logCompatibilityWarning(
-      "ProficiencySelector#getChoices has been deprecated in favor of Trait#choices.",
-      { since: "DnD5e 2.1", until: "DnD5e 2.3" }
-    );
-    return choices(type, chosen);
-  }
-
-  /* -------------------------------------------- */
-
-  /**
-   * Fetch an item for the provided ID. If the provided ID contains a compendium pack name
-   * it will be fetched from that pack, otherwise it will be fetched from the compendium defined
-   * in `DND5E.sourcePacks.ITEMS`.
-   *
-   * @param {string} identifier            Simple ID or compendium name and ID separated by a dot.
-   * @param {object} [options]
-   * @param {boolean} [options.indexOnly]  If set to true, only the index data will be fetched (will never return
-   *                                       Promise).
-   * @param {boolean} [options.fullItem]   If set to true, the full item will be returned as long as `indexOnly` is
-   *                                       false.
-   * @returns {Promise<Item5e>|object}     Promise for a `Document` if `indexOnly` is false & `fullItem` is true,
-   *                                       otherwise else a simple object containing the minimal index data.
-   * @deprecated since dnd5e 2.1, targeted for removal in 2.3
-   */
-  static getBaseItem(identifier, options) {
-    foundry.utils.logCompatibilityWarning(
-      "ProficiencySelector#getBaseItem has been deprecated in favor of Trait#getBaseItem.",
-      { since: "DnD5e 2.1", until: "DnD5e 2.3" }
-    );
-    return getBaseItem(identifier, options);
-  }
-
-  /* -------------------------------------------- */
-
-  /** @inheritdoc */
-  activateListeners(html) {
-    super.activateListeners(html);
-
-    for ( const checkbox of html[0].querySelectorAll("input[type='checkbox']") ) {
-      if ( checkbox.checked ) this._onToggleCategory(checkbox);
-    }
-  }
-
-  /* -------------------------------------------- */
-
-  /** @inheritdoc */
-  async _onChangeInput(event) {
-    super._onChangeInput(event);
-
-    if ( event.target.tagName === "INPUT" ) this._onToggleCategory(event.target);
-  }
-
-  /* -------------------------------------------- */
-
-  /**
-   * Enable/disable all children when a category is checked.
-   *
-   * @param {HTMLElement} checkbox  Checkbox that was changed.
-   * @private
-   */
-  _onToggleCategory(checkbox) {
-    const children = checkbox.closest("li")?.querySelector("ol");
-    if ( !children ) return;
-
-    for ( const child of children.querySelectorAll("input[type='checkbox']") ) {
-      child.checked = child.disabled = checkbox.checked;
-    }
-  }
-
-}
-
 var applications = /*#__PURE__*/Object.freeze({
   __proto__: null,
-  DamageTraitSelector: DamageTraitSelector,
-  ProficiencySelector: ProficiencySelector,
   PropertyAttribution: PropertyAttribution,
-  TraitSelector: TraitSelector,
-  actor: _module$9,
-  advancement: _module$8,
-  combat: _module$7,
-  item: _module$6,
-  journal: _module$5
+  SourceConfig: SourceConfig,
+  actor: _module$a,
+  advancement: _module$9,
+  combat: _module$8,
+  item: _module$7,
+  journal: _module$6
 });
 
 /**
@@ -17485,15 +21493,16 @@ class AbilityTemplate extends MeasuredTemplate {
   /**
    * A factory method to create an AbilityTemplate instance using provided data from an Item5e instance
    * @param {Item5e} item               The Item object for which to construct the template
+   * @param {object} [options={}]       Options to modify the created template.
    * @returns {AbilityTemplate|null}    The template object, or null if the item does not produce a template
    */
-  static fromItem(item) {
+  static fromItem(item, options={}) {
     const target = item.system.target ?? {};
     const templateShape = dnd5e.config.areaTargetTypes[target.type]?.template;
     if ( !templateShape ) return null;
 
     // Prepare template data
-    const templateData = {
+    const templateData = foundry.utils.mergeObject({
       t: templateShape,
       user: game.user.id,
       distance: target.value,
@@ -17501,8 +21510,8 @@ class AbilityTemplate extends MeasuredTemplate {
       x: 0,
       y: 0,
       fillColor: game.user.color,
-      flags: { dnd5e: { origin: item.uuid } }
-    };
+      flags: { dnd5e: { origin: item.uuid, spellLevel: item.system.level } }
+    }, options);
 
     // Additional type-specific data
     switch ( templateShape ) {
@@ -17510,9 +21519,14 @@ class AbilityTemplate extends MeasuredTemplate {
         templateData.angle = CONFIG.MeasuredTemplate.defaults.angle;
         break;
       case "rect": // 5e rectangular AoEs are always cubes
-        templateData.distance = Math.hypot(target.value, target.value);
         templateData.width = target.value;
-        templateData.direction = 45;
+        if ( game.settings.get("dnd5e", "gridAlignedSquareTemplates") ) {
+          templateData.distance = Math.hypot(target.value, target.value);
+          templateData.direction = 45;
+        } else {
+          // Override as 'ray' to make the template able to be rotated without morphing its shape
+          templateData.t = "ray";
+        }
         break;
       case "ray": // 5e rays are most commonly 1 square (5 ft) in width
         templateData.width = target.width ?? canvas.dimensions.distance;
@@ -17654,6 +21668,67 @@ class AbilityTemplate extends MeasuredTemplate {
 }
 
 /**
+ * The detection mode for Blindsight.
+ */
+class DetectionModeBlindsight extends DetectionMode {
+  constructor() {
+    super({
+      id: "blindsight",
+      label: "DND5E.SenseBlindsight",
+      type: DetectionMode.DETECTION_TYPES.OTHER,
+      walls: true,
+      angle: false
+    });
+  }
+
+  /** @override */
+  static getDetectionFilter() {
+    return this._detectionFilter ??= OutlineOverlayFilter.create({
+      outlineColor: [1, 1, 1, 1],
+      knockout: true,
+      wave: true
+    });
+  }
+
+  /** @override */
+  _canDetect(visionSource, target) {
+    // Blindsight can detect anything.
+    return true;
+  }
+
+  /** @override */
+  _testLOS(visionSource, mode, target, test) {
+    const polygonBackend = foundry.utils.isNewerVersion(game.version, 11)
+      ? CONFIG.Canvas.polygonBackends.sight
+      : CONFIG.Canvas.losBackend;
+    return !polygonBackend.testCollision(
+      { x: visionSource.x, y: visionSource.y },
+      test.point,
+      {
+        type: "sight",
+        mode: "any",
+        source: visionSource,
+        // Blindsight is restricted by total cover and therefore cannot see
+        // through windows. So we do not want blindsight to see through
+        // a window as we get close to it. That's why we ignore thresholds.
+        // We make the assumption that all windows are configured as threshold
+        // walls. A move-based visibility check would also be an option to check
+        // for total cover, but this would have the undesirable side effect that
+        // blindsight wouldn't work through fences, portcullises, etc.
+        useThreshold: false
+      }
+    );
+  }
+}
+
+CONFIG.Canvas.detectionModes.blindsight = new DetectionModeBlindsight();
+
+var _module$5 = /*#__PURE__*/Object.freeze({
+  __proto__: null,
+  DetectionModeBlindsight: DetectionModeBlindsight
+});
+
+/**
  * Extend the base Token class to implement additional system-specific logic.
  */
 class Token5e extends Token {
@@ -17744,8 +21819,8 @@ function measureDistances(segments, options={}) {
     let r = s.ray;
 
     // Determine the total distance traveled
-    let nx = Math.abs(Math.ceil(r.dx / d.size));
-    let ny = Math.abs(Math.ceil(r.dy / d.size));
+    let nx = Math.ceil(Math.abs(r.dx / d.size));
+    let ny = Math.ceil(Math.abs(r.dy / d.size));
 
     // Determine the number of straight and diagonal moves
     let nd = Math.min(nx, ny);
@@ -17761,7 +21836,7 @@ function measureDistances(segments, options={}) {
 
     // Euclidean Measurement
     else if (rule === "EUCL") {
-      return Math.round(Math.hypot(nx, ny) * canvas.scene.grid.distance);
+      return Math.hypot(nx, ny) * canvas.scene.grid.distance;
     }
 
     // Standard PHB Movement
@@ -17773,122 +21848,85 @@ var canvas$1 = /*#__PURE__*/Object.freeze({
   __proto__: null,
   AbilityTemplate: AbilityTemplate,
   Token5e: Token5e,
+  detectionModes: _module$5,
   measureDistances: measureDistances
 });
 
 /**
- * Data Model variant with some extra methods to support template mix-ins.
- *
- * **Note**: This uses some advanced Javascript techniques that are not necessary for most data models.
- * Please refer to the [advancement data models]{@link BaseAdvancement} for an example of a more typical usage.
- *
- * In template.json, each Actor or Item type can incorporate several templates which are chunks of data that are
- * common across all the types that use them. One way to represent them in the schema for a given Document type is to
- * duplicate schema definitions for the templates and write them directly into the Data Model for the Document type.
- * This works fine for small templates or systems that do not need many Document types but for more complex systems
- * this boilerplate can become prohibitive.
- *
- * Here we have opted to instead create a separate Data Model for each template available. These define their own
- * schemas which are then mixed-in to the final schema for the Document type's Data Model. A Document type Data Model
- * can define its own schema unique to it, and then add templates in direct correspondence to those in template.json
- * via SystemDataModel.mixin.
+ * Field for storing creature type data.
  */
-class SystemDataModel extends foundry.abstract.DataModel {
-
-  /** @inheritdoc */
-  static _enableV10Validation = true;
-
-  /**
-   * System type that this system data model represents (e.g. "character", "npc", "vehicle").
-   * @type {string}
-   */
-  static _systemType;
-
-  /* -------------------------------------------- */
-
-  /**
-   * Base templates used for construction.
-   * @type {*[]}
-   * @private
-   */
-  static _schemaTemplates = [];
-
-  /* -------------------------------------------- */
-
-  /**
-   * A list of properties that should not be mixed-in to the final type.
-   * @type {Set<string>}
-   * @private
-   */
-  static _immiscible = new Set(["length", "mixed", "name", "prototype", "migrateData", "defineSchema"]);
-
-  /* -------------------------------------------- */
-
-  /** @inheritdoc */
-  static defineSchema() {
-    const schema = {};
-    for ( const template of this._schemaTemplates ) {
-      if ( !template.defineSchema ) {
-        throw new Error(`Invalid dnd5e template mixin ${template} defined on class ${this.constructor}`);
-      }
-      this.mergeSchema(schema, template.defineSchema());
-    }
-    return schema;
-  }
-
-  /* -------------------------------------------- */
-
-  /**
-   * Merge two schema definitions together as well as possible.
-   * @param {DataSchema} a  First schema that forms the basis for the merge. *Will be mutated.*
-   * @param {DataSchema} b  Second schema that will be merged in, overwriting any non-mergeable properties.
-   * @returns {DataSchema}  Fully merged schema.
-   */
-  static mergeSchema(a, b) {
-    Object.assign(a, b);
-    return a;
+class CreatureTypeField extends foundry.data.fields.SchemaField {
+  constructor(fields={}, options={}) {
+    fields = {
+      value: new foundry.data.fields.StringField({blank: true, label: "DND5E.CreatureType"}),
+      subtype: new foundry.data.fields.StringField({label: "DND5E.CreatureTypeSelectorSubtype"}),
+      swarm: new foundry.data.fields.StringField({blank: true, label: "DND5E.CreatureSwarmSize"}),
+      custom: new foundry.data.fields.StringField({label: "DND5E.CreatureTypeSelectorCustom"}),
+      ...fields
+    };
+    Object.entries(fields).forEach(([k, v]) => !v ? delete fields[k] : null);
+    super(fields, { label: "DND5E.CreatureType", ...options });
   }
 
   /* -------------------------------------------- */
 
   /** @inheritdoc */
-  static migrateData(source) {
-    for ( const template of this._schemaTemplates ) {
-      template.migrateData?.(source);
-    }
-    return super.migrateData(source);
-  }
+  initialize(value, model, options={}) {
+    const obj = super.initialize(value, model, options);
 
-  /* -------------------------------------------- */
-
-  /**
-   * Mix multiple templates with the base type.
-   * @param {...*} templates            Template classes to mix.
-   * @returns {typeof SystemDataModel}  Final prepared type.
-   */
-  static mixin(...templates) {
-    const Base = class extends this {};
-    Object.defineProperty(Base, "_schemaTemplates", {
-      value: Object.seal([...this._schemaTemplates, ...templates]),
-      writable: false,
-      configurable: false
+    Object.defineProperty(obj, "label", {
+      get() {
+        return dnd5e.documents.Actor5e.formatCreatureType(this);
+      },
+      enumerable: false
     });
 
-    for ( const template of templates ) {
-      // Take all static methods and fields from template and mix in to base class
-      for ( const [key, descriptor] of Object.entries(Object.getOwnPropertyDescriptors(template)) ) {
-        if ( this._immiscible.has(key) ) continue;
-        Object.defineProperty(Base, key, descriptor);
-      }
+    return obj;
+  }
+}
 
-      // Take all instance methods and fields from template and mix in to base class
-      for ( const [key, descriptor] of Object.entries(Object.getOwnPropertyDescriptors(template.prototype)) ) {
-        if ( ["constructor"].includes(key) ) continue;
-        Object.defineProperty(Base.prototype, key, descriptor);
-      }
-    }
+/**
+ * Field for storing movement data.
+ */
+class MovementField extends foundry.data.fields.SchemaField {
+  constructor(fields={}, options={}) {
+    const numberConfig = { required: true, nullable: true, min: 0, step: 0.1, initial: null };
+    fields = {
+      burrow: new foundry.data.fields.NumberField({ ...numberConfig, label: "DND5E.MovementBurrow" }),
+      climb: new foundry.data.fields.NumberField({ ...numberConfig, label: "DND5E.MovementClimb" }),
+      fly: new foundry.data.fields.NumberField({ ...numberConfig, label: "DND5E.MovementFly" }),
+      swim: new foundry.data.fields.NumberField({ ...numberConfig, label: "DND5E.MovementSwim" }),
+      walk: new foundry.data.fields.NumberField({ ...numberConfig, label: "DND5E.MovementWalk" }),
+      units: new foundry.data.fields.StringField({
+        required: true, nullable: true, blank: false, initial: null, label: "DND5E.MovementUnits"
+      }),
+      hover: new foundry.data.fields.BooleanField({required: true, label: "DND5E.MovementHover"}),
+      ...fields
+    };
+    Object.entries(fields).forEach(([k, v]) => !v ? delete fields[k] : null);
+    super(fields, { label: "DND5E.Movement", ...options });
+  }
+}
 
-    return Base;
+/**
+ * Field for storing senses data.
+ */
+class SensesField extends foundry.data.fields.SchemaField {
+  constructor(fields={}, options={}) {
+    const numberConfig = { required: true, nullable: true, integer: true, min: 0, initial: null };
+    fields = {
+      darkvision: new foundry.data.fields.NumberField({ ...numberConfig, label: "DND5E.SenseDarkvision" }),
+      blindsight: new foundry.data.fields.NumberField({ ...numberConfig, label: "DND5E.SenseBlindsight" }),
+      tremorsense: new foundry.data.fields.NumberField({ ...numberConfig, label: "DND5E.SenseTremorsense" }),
+      truesight: new foundry.data.fields.NumberField({ ...numberConfig, label: "DND5E.SenseTruesight" }),
+      units: new foundry.data.fields.StringField({
+        required: true, nullable: true, blank: false, initial: null, label: "DND5E.SenseUnits"
+      }),
+      special: new foundry.data.fields.StringField({required: true, label: "DND5E.SenseSpecial"}),
+      ...fields
+    };
+    Object.entries(fields).forEach(([k, v]) => !v ? delete fields[k] : null);
+    super(fields, { label: "DND5E.Senses", ...options });
   }
 }
 
@@ -17918,25 +21956,7 @@ class AttributesFields {
         ability: new foundry.data.fields.StringField({label: "DND5E.AbilityModifier"}),
         bonus: new FormulaField({label: "DND5E.InitiativeBonus"})
       }, { label: "DND5E.Initiative" }),
-      movement: new foundry.data.fields.SchemaField({
-        burrow: new foundry.data.fields.NumberField({
-          nullable: false, min: 0, step: 0.1, initial: 0, label: "DND5E.MovementBurrow"
-        }),
-        climb: new foundry.data.fields.NumberField({
-          nullable: false, min: 0, step: 0.1, initial: 0, label: "DND5E.MovementClimb"
-        }),
-        fly: new foundry.data.fields.NumberField({
-          nullable: false, min: 0, step: 0.1, initial: 0, label: "DND5E.MovementFly"
-        }),
-        swim: new foundry.data.fields.NumberField({
-          nullable: false, min: 0, step: 0.1, initial: 0, label: "DND5E.MovementSwim"
-        }),
-        walk: new foundry.data.fields.NumberField({
-          nullable: false, min: 0, step: 0.1, initial: 30, label: "DND5E.MovementWalk"
-        }),
-        units: new foundry.data.fields.StringField({initial: "ft", label: "DND5E.MovementUnits"}),
-        hover: new foundry.data.fields.BooleanField({label: "DND5E.MovementHover"})
-      }, {label: "DND5E.Movement"})
+      movement: new MovementField()
     };
   }
 
@@ -17964,22 +21984,7 @@ class AttributesFields {
           required: true, nullable: false, integer: true, min: 0, initial: 3, label: "DND5E.AttunementMax"
         })
       }, {label: "DND5E.Attunement"}),
-      senses: new foundry.data.fields.SchemaField({
-        darkvision: new foundry.data.fields.NumberField({
-          required: true, nullable: false, integer: true, min: 0, initial: 0, label: "DND5E.SenseDarkvision"
-        }),
-        blindsight: new foundry.data.fields.NumberField({
-          required: true, nullable: false, integer: true, min: 0, initial: 0, label: "DND5E.SenseBlindsight"
-        }),
-        tremorsense: new foundry.data.fields.NumberField({
-          required: true, nullable: false, integer: true, min: 0, initial: 0, label: "DND5E.SenseTremorsense"
-        }),
-        truesight: new foundry.data.fields.NumberField({
-          required: true, nullable: false, integer: true, min: 0, initial: 0, label: "DND5E.SenseTruesight"
-        }),
-        units: new foundry.data.fields.StringField({required: true, initial: "ft", label: "DND5E.SenseUnits"}),
-        special: new foundry.data.fields.StringField({required: true, label: "DND5E.SenseSpecial"})
-      }, {label: "DND5E.Senses"}),
+      senses: new SensesField(),
       spellcasting: new foundry.data.fields.StringField({
         required: true, blank: true, initial: "int", label: "DND5E.SpellAbility"
       })
@@ -17995,7 +22000,7 @@ class AttributesFields {
    */
   static _migrateInitiative(source) {
     const init = source?.init;
-    if ( !init?.value ) return;
+    if ( !init?.value || (typeof init?.bonus === "string") ) return;
     if ( init.bonus ) init.bonus += init.value < 0 ? ` - ${init.value * -1}` : ` + ${init.value}`;
     else init.bonus = `${init.value}`;
   }
@@ -18007,13 +22012,13 @@ class AttributesFields {
  * @property {object} currency  Object containing currencies as numbers.
  * @mixin
  */
-class CurrencyTemplate extends foundry.abstract.DataModel {
+class CurrencyTemplate extends SystemDataModel {
   /** @inheritdoc */
   static defineSchema() {
     return {
       currency: new MappingField(new foundry.data.fields.NumberField({
         required: true, nullable: false, integer: true, min: 0, initial: 0
-      }), {initialKeys: CONFIG.DND5E.currencies, label: "DND5E.Currency"})
+      }), {initialKeys: CONFIG.DND5E.currencies, initialKeysOnly: true, label: "DND5E.Currency"})
     };
   }
 }
@@ -18022,6 +22027,7 @@ class CurrencyTemplate extends foundry.abstract.DataModel {
  * @typedef {object} AbilityData
  * @property {number} value          Ability score.
  * @property {number} proficient     Proficiency value for saves.
+ * @property {number} max            Maximum possible score for the ability.
  * @property {object} bonuses        Bonuses that modify ability checks and saves.
  * @property {string} bonuses.check  Numeric or dice bonus to ability checks.
  * @property {string} bonuses.save   Numeric or dice bonus to ability saving throws.
@@ -18042,20 +22048,50 @@ class CommonTemplate extends SystemDataModel.mixin(CurrencyTemplate) {
         value: new foundry.data.fields.NumberField({
           required: true, nullable: false, integer: true, min: 0, initial: 10, label: "DND5E.AbilityScore"
         }),
-        proficient: new foundry.data.fields.NumberField({required: true, initial: 0, label: "DND5E.ProficiencyLevel"}),
+        proficient: new foundry.data.fields.NumberField({
+          required: true, integer: true, min: 0, max: 1, initial: 0, label: "DND5E.ProficiencyLevel"
+        }),
+        max: new foundry.data.fields.NumberField({
+          required: true, integer: true, nullable: true, min: 0, initial: null, label: "DND5E.AbilityScoreMax"
+        }),
         bonuses: new foundry.data.fields.SchemaField({
           check: new FormulaField({required: true, label: "DND5E.AbilityCheckBonus"}),
           save: new FormulaField({required: true, label: "DND5E.SaveBonus"})
         }, {label: "DND5E.AbilityBonuses"})
-      }), {initialKeys: CONFIG.DND5E.abilities, label: "DND5E.Abilities"})
+      }), {
+        initialKeys: CONFIG.DND5E.abilities, initialValue: this._initialAbilityValue.bind(this),
+        initialKeysOnly: true, label: "DND5E.Abilities"
+      })
     });
   }
 
   /* -------------------------------------------- */
 
+  /**
+   * Populate the proper initial value for abilities.
+   * @param {string} key       Key for which the initial data will be created.
+   * @param {object} initial   The initial skill object created by SkillData.
+   * @param {object} existing  Any existing mapping data.
+   * @returns {object}         Initial ability object.
+   * @private
+   */
+  static _initialAbilityValue(key, initial, existing) {
+    const config = CONFIG.DND5E.abilities[key];
+    if ( config ) {
+      let defaultValue = config.defaults?.[this._systemType] ?? initial.value;
+      if ( typeof defaultValue === "string" ) defaultValue = existing?.[defaultValue]?.value ?? initial.value;
+      initial.value = defaultValue;
+    }
+    return initial;
+  }
+
+  /* -------------------------------------------- */
+  /*  Migrations                                  */
+  /* -------------------------------------------- */
+
   /** @inheritdoc */
-  static migrateData(source) {
-    super.migrateData(source);
+  static _migrateData(source) {
+    super._migrateData(source);
     CommonTemplate.#migrateACData(source);
     CommonTemplate.#migrateMovementData(source);
   }
@@ -18142,16 +22178,30 @@ class CreatureTemplate extends CommonTemplate {
         }, {label: "DND5E.BonusSpell"})
       }, {label: "DND5E.Bonuses"}),
       skills: new MappingField(new foundry.data.fields.SchemaField({
-        value: new foundry.data.fields.NumberField({required: true, initial: 0, label: "DND5E.ProficiencyLevel"}),
+        value: new foundry.data.fields.NumberField({
+          required: true, nullable: false, min: 0, max: 2, step: 0.5, initial: 0, label: "DND5E.ProficiencyLevel"
+        }),
         ability: new foundry.data.fields.StringField({required: true, initial: "dex", label: "DND5E.Ability"}),
         bonuses: new foundry.data.fields.SchemaField({
           check: new FormulaField({required: true, label: "DND5E.SkillBonusCheck"}),
           passive: new FormulaField({required: true, label: "DND5E.SkillBonusPassive"})
         }, {label: "DND5E.SkillBonuses"})
-      }), {initialKeys: CONFIG.DND5E.skills, initialValue: this._initialSkillValue}),
+      }), {
+        initialKeys: CONFIG.DND5E.skills, initialValue: this._initialSkillValue,
+        initialKeysOnly: true, label: "DND5E.Skills"
+      }),
+      tools: new MappingField(new foundry.data.fields.SchemaField({
+        value: new foundry.data.fields.NumberField({
+          required: true, nullable: false, min: 0, max: 2, step: 0.5, initial: 1, label: "DND5E.ProficiencyLevel"
+        }),
+        ability: new foundry.data.fields.StringField({required: true, initial: "int", label: "DND5E.Ability"}),
+        bonuses: new foundry.data.fields.SchemaField({
+          check: new FormulaField({required: true, label: "DND5E.CheckBonus"})
+        }, {label: "DND5E.ToolBonuses"})
+      })),
       spells: new MappingField(new foundry.data.fields.SchemaField({
         value: new foundry.data.fields.NumberField({
-          nullable: false, integer: true, min: 0, initial: 0, label: "DND5E.SpellProfAvailable"
+          nullable: false, integer: true, min: 0, initial: 0, label: "DND5E.SpellProgAvailable"
         }),
         override: new foundry.data.fields.NumberField({
           integer: true, min: 0, label: "DND5E.SpellProgOverride"
@@ -18187,11 +22237,14 @@ class CreatureTemplate extends CommonTemplate {
   }
 
   /* -------------------------------------------- */
+  /*  Migrations                                  */
+  /* -------------------------------------------- */
 
   /** @inheritdoc */
-  static migrateData(source) {
-    super.migrateData(source);
+  static _migrateData(source) {
+    super._migrateData(source);
     CreatureTemplate.#migrateSensesData(source);
+    CreatureTemplate.#migrateToolData(source);
   }
 
   /* -------------------------------------------- */
@@ -18216,7 +22269,7 @@ class CreatureTemplate extends CommonTemplate {
       const match = s.match(pattern);
       if ( !match ) continue;
       const type = match[1].toLowerCase();
-      if ( type in CONFIG.DND5E.senses ) {
+      if ( (type in CONFIG.DND5E.senses) && !(type in source.attributes.senses) ) {
         source.attributes.senses[type] = Number(match[2]).toNearest(0.5);
         wasMatched = true;
       }
@@ -18224,6 +22277,27 @@ class CreatureTemplate extends CommonTemplate {
 
     // If nothing was matched, but there was an old string - put the whole thing in "special"
     if ( !wasMatched && original ) source.attributes.senses.special = original;
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * Migrate traits.toolProf to the tools field.
+   * @param {object} source  The candidate source data from which the model will be constructed.
+   */
+  static #migrateToolData(source) {
+    const original = source.traits?.toolProf;
+    if ( !original || foundry.utils.isEmpty(original.value) ) return;
+    source.tools ??= {};
+    for ( const prof of original.value ) {
+      const validProf = (prof in CONFIG.DND5E.toolProficiencies) || (prof in CONFIG.DND5E.toolIds);
+      if ( !validProf || (prof in source.tools) ) continue;
+      source.tools[prof] = {
+        value: 1,
+        ability: "int",
+        bonuses: {check: ""}
+      };
+    }
   }
 }
 
@@ -18286,13 +22360,15 @@ class DetailsField {
    * Fields shared between characters and NPCs.
    *
    * @type {object}
-   * @property {string} alignment  Creature's alignment.
-   * @property {string} race       Creature's race.
+   * @property {string} alignment    Creature's alignment.
+   * @property {Item5e|string} race  Creature's race item or name.
    */
   static get creature() {
     return {
       alignment: new foundry.data.fields.StringField({required: true, label: "DND5E.Alignment"}),
-      race: new foundry.data.fields.StringField({required: true, label: "DND5E.Race"})
+      race: new LocalDocumentField(foundry.documents.BaseItem, {
+        required: true, fallback: true, label: "DND5E.Race"
+      })
     };
   }
 }
@@ -18416,7 +22492,7 @@ class TraitsField {
  * @property {number} attributes.exhaustion               Number of levels of exhaustion.
  * @property {number} attributes.inspiration              Does this character have inspiration?
  * @property {object} details
- * @property {string} details.background                  Name of character's background.
+ * @property {Item5e|string} details.background           Character's background item or name.
  * @property {string} details.originalClass               ID of first class taken by character.
  * @property {XPData} details.xp                          Experience points gained.
  * @property {number} details.xp.value                    Total experience points earned.
@@ -18428,7 +22504,6 @@ class TraitsField {
  * @property {object} traits
  * @property {SimpleTraitData} traits.weaponProf          Character's weapon proficiencies.
  * @property {SimpleTraitData} traits.armorProf           Character's armor proficiencies.
- * @property {SimpleTraitData} traits.toolProf            Character's tool proficiencies.
  * @property {object} resources
  * @property {CharacterResourceData} resources.primary    Resource number one.
  * @property {CharacterResourceData} resources.secondary  Resource number two.
@@ -18482,7 +22557,9 @@ class CharacterData extends CreatureTemplate {
       details: new foundry.data.fields.SchemaField({
         ...DetailsField.common,
         ...DetailsField.creature,
-        background: new foundry.data.fields.StringField({required: true, label: "DND5E.Background"}),
+        background: new LocalDocumentField(foundry.documents.BaseItem, {
+          required: true, fallback: true, label: "DND5E.Background"
+        }),
         originalClass: new foundry.data.fields.StringField({required: true, label: "DND5E.ClassOriginal"}),
         xp: new foundry.data.fields.SchemaField({
           value: new foundry.data.fields.NumberField({
@@ -18499,8 +22576,7 @@ class CharacterData extends CreatureTemplate {
         ...TraitsField.common,
         ...TraitsField.creature,
         weaponProf: TraitsField.makeSimpleTrait({label: "DND5E.TraitWeaponProf"}),
-        armorProf: TraitsField.makeSimpleTrait({label: "DND5E.TraitArmorProf"}),
-        toolProf: TraitsField.makeSimpleTrait({label: "DND5E.TraitToolProf"})
+        armorProf: TraitsField.makeSimpleTrait({label: "DND5E.TraitArmorProf"})
       }, {label: "DND5E.Traits"}),
       resources: new foundry.data.fields.SchemaField({
         primary: makeResourceField({label: "DND5E.ResourcePrimary"}),
@@ -18511,11 +22587,42 @@ class CharacterData extends CreatureTemplate {
   }
 
   /* -------------------------------------------- */
+  /*  Data Migration                              */
+  /* -------------------------------------------- */
 
   /** @inheritdoc */
-  static migrateData(source) {
-    super.migrateData(source);
+  static _migrateData(source) {
+    super._migrateData(source);
     AttributesFields._migrateInitiative(source.attributes);
+  }
+
+  /* -------------------------------------------- */
+  /*  Data Preparation                            */
+  /* -------------------------------------------- */
+
+  /**
+   * Prepare movement & senses values derived from race item.
+   */
+  prepareEmbeddedData() {
+    const raceData = this.details.race?.system;
+    if ( !raceData ) {
+      this.details.type = new CreatureTypeField({ swarm: false }).initialize({ value: "humanoid" }, this);
+      return;
+    }
+
+    for ( const key of Object.keys(CONFIG.DND5E.movementTypes) ) {
+      if ( raceData.movement[key] ) this.attributes.movement[key] ??= raceData.movement[key];
+    }
+    if ( raceData.movement.hover ) this.attributes.movement.hover = true;
+    this.attributes.movement.units ??= raceData.movement.units;
+
+    for ( const key of Object.keys(CONFIG.DND5E.senses) ) {
+      if ( raceData.senses[key] ) this.attributes.senses[key] ??= raceData.senses[key];
+    }
+    this.attributes.senses.special = [this.attributes.senses.special, raceData.senses.special].filterJoin(";");
+    this.attributes.senses.units ??= raceData.senses.units;
+
+    this.details.type = raceData.type;
   }
 }
 
@@ -18606,11 +22713,8 @@ class GroupActor extends SystemDataModel.mixin(CurrencyTemplate) {
   /*  Data Preparation                            */
   /* -------------------------------------------- */
 
-  /**
-   * Prepare base data for group actors.
-   * @internal
-   */
-  _prepareBaseData() {
+  /** @inheritdoc */
+  prepareBaseData() {
     this.members.clear();
     for ( const id of this._source.members ) {
       const a = game.actors.get(id);
@@ -18622,14 +22726,6 @@ class GroupActor extends SystemDataModel.mixin(CurrencyTemplate) {
       }
       else console.warn(`Actor "${id}" in group "${this._id}" does not exist within the World.`);
     }
-  }
-
-  /**
-   * Prepare derived data for group actors.
-   * @internal
-   */
-  _prepareDerivedData() {
-    // No preparation needed at this time
   }
 
   /* -------------------------------------------- */
@@ -18703,7 +22799,7 @@ class GroupActor extends SystemDataModel.mixin(CurrencyTemplate) {
  * @property {string} details.environment        Common environments in which this NPC is found.
  * @property {number} details.cr                 NPC's challenge rating.
  * @property {number} details.spellLevel         Spellcasting level of this NPC.
- * @property {string} details.source             What book or adventure is this NPC from?
+ * @property {SourceField} details.source        Adventure or sourcebook where this NPC originated.
  * @property {object} resources
  * @property {object} resources.legact           NPC's legendary actions.
  * @property {number} resources.legact.value     Currently available legendary actions.
@@ -18748,12 +22844,7 @@ class NPCData extends CreatureTemplate {
       details: new foundry.data.fields.SchemaField({
         ...DetailsField.common,
         ...DetailsField.creature,
-        type: new foundry.data.fields.SchemaField({
-          value: new foundry.data.fields.StringField({required: true, blank: true, label: "DND5E.CreatureType"}),
-          subtype: new foundry.data.fields.StringField({required: true, label: "DND5E.CreatureTypeSelectorSubtype"}),
-          swarm: new foundry.data.fields.StringField({required: true, blank: true, label: "DND5E.CreatureSwarmSize"}),
-          custom: new foundry.data.fields.StringField({required: true, label: "DND5E.CreatureTypeSelectorCustom"})
-        }, {label: "DND5E.CreatureType"}),
+        type: new CreatureTypeField(),
         environment: new foundry.data.fields.StringField({required: true, label: "DND5E.Environment"}),
         cr: new foundry.data.fields.NumberField({
           required: true, nullable: false, min: 0, initial: 1, label: "DND5E.ChallengeRating"
@@ -18761,7 +22852,7 @@ class NPCData extends CreatureTemplate {
         spellLevel: new foundry.data.fields.NumberField({
           required: true, nullable: false, integer: true, min: 0, initial: 0, label: "DND5E.SpellcasterLevel"
         }),
-        source: new foundry.data.fields.StringField({required: true, label: "DND5E.Source"})
+        source: new SourceField()
       }, {label: "DND5E.Details"}),
       resources: new foundry.data.fields.SchemaField({
         legact: new foundry.data.fields.SchemaField({
@@ -18797,10 +22888,23 @@ class NPCData extends CreatureTemplate {
   /* -------------------------------------------- */
 
   /** @inheritdoc */
-  static migrateData(source) {
-    super.migrateData(source);
+  static _migrateData(source) {
+    super._migrateData(source);
+    NPCData.#migrateSource(source);
     NPCData.#migrateTypeData(source);
     AttributesFields._migrateInitiative(source.attributes);
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * Convert source string into custom object.
+   * @param {object} source  The candidate source data from which the model will be constructed.
+   */
+  static #migrateSource(source) {
+    if ( source.details?.source && (foundry.utils.getType(source.details.source) !== "Object") ) {
+      source.details.source = { custom: source.details.source };
+    }
   }
 
   /* -------------------------------------------- */
@@ -18891,6 +22995,8 @@ class NPCData extends CreatureTemplate {
  * @property {object} cargo                            Details on this vehicle's crew and cargo capacities.
  * @property {PassengerData[]} cargo.crew              Creatures responsible for operating the vehicle.
  * @property {PassengerData[]} cargo.passengers        Creatures just takin' a ride.
+ * @property {object} details
+ * @property {SourceField} details.source              Adventure or sourcebook where this vehicle originated.
  */
 class VehicleData extends CommonTemplate {
 
@@ -18951,7 +23057,10 @@ class VehicleData extends CommonTemplate {
           })
         }, {label: "DND5E.VehicleCargoCrew"})
       }, {label: "DND5E.Attributes"}),
-      details: new foundry.data.fields.SchemaField(DetailsField.common, {label: "DND5E.Details"}),
+      details: new foundry.data.fields.SchemaField({
+        ...DetailsField.common,
+        source: new SourceField()
+      }, {label: "DND5E.Details"}),
       traits: new foundry.data.fields.SchemaField({
         ...TraitsField.common,
         size: new foundry.data.fields.StringField({required: true, initial: "lg", label: "DND5E.Size"}),
@@ -18972,9 +23081,22 @@ class VehicleData extends CommonTemplate {
   /* -------------------------------------------- */
 
   /** @inheritdoc */
-  static migrateData(source) {
-    super.migrateData(source);
+  static _migrateData(source) {
+    super._migrateData(source);
     AttributesFields._migrateInitiative(source.attributes);
+    VehicleData.#migrateSource(source);
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * Convert source string into custom object.
+   * @param {object} source  The candidate source data from which the model will be constructed.
+   */
+  static #migrateSource(source) {
+    if ( source.details?.source && (foundry.utils.getType(source.details.source) !== "Object") ) {
+      source.details.source = { custom: source.details.source };
+    }
   }
 }
 
@@ -19025,54 +23147,18 @@ var _module$4 = /*#__PURE__*/Object.freeze({
 
 var _module$3 = /*#__PURE__*/Object.freeze({
   __proto__: null,
+  AbilityScoreImprovementConfigurationData: AbilityScoreImprovementConfigurationData,
+  AbilityScoreImprovementValueData: AbilityScoreImprovementValueData,
   BaseAdvancement: BaseAdvancement,
+  ItemChoiceConfigurationData: ItemChoiceConfigurationData,
   ItemGrantConfigurationData: ItemGrantConfigurationData,
+  SizeConfigurationData: SizeConfigurationData,
+  SizeValueData: SizeValueData,
   SpellConfigurationData: SpellConfigurationData,
+  TraitConfigurationData: TraitConfigurationData,
+  TraitValueData: TraitValueData,
   scaleValue: scaleValue
 });
-
-/**
- * Data model template with item description & source.
- *
- * @property {object} description               Various item descriptions.
- * @property {string} description.value         Full item description.
- * @property {string} description.chat          Description displayed in chat card.
- * @property {string} description.unidentified  Description displayed if item is unidentified.
- * @property {string} source                    Adventure or sourcebook where this item originated.
- * @mixin
- */
-class ItemDescriptionTemplate extends foundry.abstract.DataModel {
-  /** @inheritdoc */
-  static defineSchema() {
-    return {
-      description: new foundry.data.fields.SchemaField({
-        value: new foundry.data.fields.HTMLField({required: true, nullable: true, label: "DND5E.Description"}),
-        chat: new foundry.data.fields.HTMLField({required: true, nullable: true, label: "DND5E.DescriptionChat"}),
-        unidentified: new foundry.data.fields.HTMLField({
-          required: true, nullable: true, label: "DND5E.DescriptionUnidentified"
-        })
-      }),
-      source: new foundry.data.fields.StringField({required: true, label: "DND5E.Source"})
-    };
-  }
-
-  /* -------------------------------------------- */
-
-  /** @inheritdoc */
-  static migrateData(source) {
-    ItemDescriptionTemplate.#migrateSource(source);
-  }
-
-  /* -------------------------------------------- */
-
-  /**
-   * Convert null source to the blank string.
-   * @param {object} source  The candidate source data from which the model will be constructed.
-   */
-  static #migrateSource(source) {
-    if ( source.source === null ) source.source = "";
-  }
-}
 
 /**
  * Data definition for Background items.
@@ -19087,97 +23173,44 @@ class BackgroundData extends SystemDataModel.mixin(ItemDescriptionTemplate) {
       advancement: new foundry.data.fields.ArrayField(new AdvancementField(), {label: "DND5E.AdvancementTitle"})
     });
   }
-}
-
-/**
- * Data definition for Class items.
- * @mixes ItemDescriptionTemplate
- *
- * @property {string} identifier        Identifier slug for this class.
- * @property {number} levels            Current number of levels in this class.
- * @property {string} hitDice           Denomination of hit dice available as defined in `DND5E.hitDieTypes`.
- * @property {number} hitDiceUsed       Number of hit dice consumed.
- * @property {object[]} advancement     Advancement objects for this class.
- * @property {string[]} saves           Savings throws in which this class grants proficiency.
- * @property {object} skills            Available class skills and selected skills.
- * @property {number} skills.number     Number of skills selectable by the player.
- * @property {string[]} skills.choices  List of skill keys that are valid to be chosen.
- * @property {string[]} skills.value    List of skill keys the player has chosen.
- * @property {object} spellcasting      Details on class's spellcasting ability.
- * @property {string} spellcasting.progression  Spell progression granted by class as from `DND5E.spellProgression`.
- * @property {string} spellcasting.ability      Ability score to use for spellcasting.
- */
-class ClassData extends SystemDataModel.mixin(ItemDescriptionTemplate) {
-  /** @inheritdoc */
-  static defineSchema() {
-    return this.mergeSchema(super.defineSchema(), {
-      identifier: new IdentifierField({required: true, label: "DND5E.Identifier"}),
-      levels: new foundry.data.fields.NumberField({
-        required: true, nullable: false, integer: true, min: 0, initial: 1, label: "DND5E.ClassLevels"
-      }),
-      hitDice: new foundry.data.fields.StringField({
-        required: true, initial: "d6", blank: false, label: "DND5E.HitDice",
-        validate: v => /d\d+/.test(v), validationError: "must be a dice value in the format d#"
-      }),
-      hitDiceUsed: new foundry.data.fields.NumberField({
-        required: true, nullable: false, integer: true, initial: 0, min: 0, label: "DND5E.HitDiceUsed"
-      }),
-      advancement: new foundry.data.fields.ArrayField(new AdvancementField(), {label: "DND5E.AdvancementTitle"}),
-      saves: new foundry.data.fields.ArrayField(new foundry.data.fields.StringField(), {label: "DND5E.ClassSaves"}),
-      skills: new foundry.data.fields.SchemaField({
-        number: new foundry.data.fields.NumberField({
-          required: true, nullable: false, integer: true, min: 0, initial: 2, label: "DND5E.ClassSkillsNumber"
-        }),
-        choices: new foundry.data.fields.ArrayField(
-          new foundry.data.fields.StringField(), {label: "DND5E.ClassSkillsEligible"}
-        ),
-        value: new foundry.data.fields.ArrayField(
-          new foundry.data.fields.StringField(), {label: "DND5E.ClassSkillsChosen"}
-        )
-      }),
-      spellcasting: new foundry.data.fields.SchemaField({
-        progression: new foundry.data.fields.StringField({
-          required: true, initial: "none", blank: false, label: "DND5E.SpellProgression"
-        }),
-        ability: new foundry.data.fields.StringField({required: true, label: "DND5E.SpellAbility"})
-      }, {label: "DND5E.Spellcasting"})
-    });
-  }
 
   /* -------------------------------------------- */
 
   /** @inheritdoc */
-  static migrateData(source) {
-    super.migrateData(source);
-    ClassData.#migrateLevels(source);
-    ClassData.#migrateSpellcastingData(source);
+  static metadata = Object.freeze({
+    singleton: true
+  });
+
+  /* -------------------------------------------- */
+  /*  Socket Event Handlers                       */
+  /* -------------------------------------------- */
+
+  /**
+   * Set the background reference in actor data.
+   * @param {object} data     The initial data object provided to the document creation request
+   * @param {object} options  Additional options which modify the creation request
+   * @param {string} userId   The id of the User requesting the document update
+   * @see {Document#_onCreate}
+   * @protected
+   */
+  _onCreate(data, options, userId) {
+    if ( (game.user.id !== userId) || this.parent.actor?.type !== "character" ) return;
+    this.parent.actor.update({"system.details.background": this.parent.id});
   }
 
   /* -------------------------------------------- */
 
   /**
-   * Migrate the class levels.
-   * @param {object} source  The candidate source data from which the model will be constructed.
+   * Remove the background reference in actor data.
+   * @param {object} options            Additional options which modify the deletion request
+   * @param {documents.BaseUser} user   The User requesting the document deletion
+   * @returns {Promise<boolean|void>}   A return value of false indicates the deletion operation should be cancelled.
+   * @see {Document#_preDelete}
+   * @protected
    */
-  static #migrateLevels(source) {
-    if ( typeof source.levels !== "string" ) return;
-    if ( source.levels === "" ) source.levels = 1;
-    else if ( Number.isNumeric(source.levels) ) source.levels = Number(source.levels);
-  }
-
-  /* -------------------------------------------- */
-
-  /**
-   * Migrate the class's spellcasting string to object.
-   * @param {object} source  The candidate source data from which the model will be constructed.
-   */
-  static #migrateSpellcastingData(source) {
-    if ( source.spellcasting?.progression === "" ) source.spellcasting.progression = "none";
-    if ( typeof source.spellcasting !== "string" ) return;
-    source.spellcasting = {
-      progression: source.spellcasting,
-      ability: ""
-    };
+  async _preDelete(options, user) {
+    if ( this.parent.actor?.type !== "character" ) return;
+    await this.parent.actor.update({"system.details.background": null});
   }
 }
 
@@ -19201,7 +23234,7 @@ class ClassData extends SystemDataModel.mixin(ItemDescriptionTemplate) {
  * @property {string} save.scaling        Method for automatically determining saving throw DC.
  * @mixin
  */
-class ActionTemplate extends foundry.abstract.DataModel {
+class ActionTemplate extends SystemDataModel {
   /** @inheritdoc */
   static defineSchema() {
     return {
@@ -19239,9 +23272,12 @@ class ActionTemplate extends foundry.abstract.DataModel {
   }
 
   /* -------------------------------------------- */
+  /*  Migrations                                  */
+  /* -------------------------------------------- */
 
   /** @inheritdoc */
-  static migrateData(source) {
+  static _migrateData(source) {
+    super._migrateData(source);
     ActionTemplate.#migrateAbility(source);
     ActionTemplate.#migrateAttackBonus(source);
     ActionTemplate.#migrateCritical(source);
@@ -19278,11 +23314,11 @@ class ActionTemplate extends foundry.abstract.DataModel {
    */
   static #migrateCritical(source) {
     if ( !("critical" in source) ) return;
-    if ( source.critical?.damage === null ) source.critical.damage = "";
     if ( (typeof source.critical !== "object") || (source.critical === null) ) source.critical = {
       threshold: null,
       damage: ""
     };
+    if ( source.critical.damage === null ) source.critical.damage = "";
   }
 
   /* -------------------------------------------- */
@@ -19292,9 +23328,11 @@ class ActionTemplate extends foundry.abstract.DataModel {
    * @param {object} source  The candidate source data from which the model will be constructed.
    */
   static #migrateSave(source) {
-    if ( source.save?.scaling === "" ) source.save.scaling = "spell";
-    if ( source.save?.ability === null ) source.save.ability = "";
-    if ( typeof source.save?.dc === "string" ) {
+    if ( !("save" in source) ) return;
+    source.save ??= {};
+    if ( source.save.scaling === "" ) source.save.scaling = "spell";
+    if ( source.save.ability === null ) source.save.ability = "";
+    if ( typeof source.save.dc === "string" ) {
       if ( source.save.dc === "" ) source.save.dc = null;
       else if ( Number.isNumeric(source.save.dc) ) source.save.dc = Number(source.save.dc);
     }
@@ -19308,8 +23346,129 @@ class ActionTemplate extends foundry.abstract.DataModel {
    */
   static #migrateDamage(source) {
     if ( !("damage" in source) ) return;
+    source.damage ??= {};
     source.damage.parts ??= [];
   }
+
+  /* -------------------------------------------- */
+  /*  Getters                                     */
+  /* -------------------------------------------- */
+
+  /**
+   * Which ability score modifier is used by this item?
+   * @type {string|null}
+   */
+  get abilityMod() {
+    if ( this.ability === "none" ) return null;
+    return this.ability || this._typeAbilityMod || {
+      mwak: "str",
+      rwak: "dex",
+      msak: this.parent?.actor?.system.attributes.spellcasting || "int",
+      rsak: this.parent?.actor?.system.attributes.spellcasting || "int"
+    }[this.actionType] || null;
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * Default ability key defined for this type.
+   * @type {string|null}
+   * @internal
+   */
+  get _typeAbilityMod() {
+    return null;
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * What is the critical hit threshold for this item? Uses the smallest value from among the following sources:
+   *  - `critical.threshold` defined on the item
+   *  - `critical.threshold` defined on ammunition, if consumption mode is set to ammo
+   *  - Type-specific critical threshold
+   * @type {number|null}
+   */
+  get criticalThreshold() {
+    if ( !this.hasAttack ) return null;
+    let ammoThreshold = Infinity;
+    if ( this.hasAmmo ) {
+      ammoThreshold = this.parent?.actor?.items.get(this.consume.target)?.system.critical.threshold ?? Infinity;
+    }
+    const threshold = Math.min(this.critical.threshold ?? Infinity, this._typeCriticalThreshold, ammoThreshold);
+    return threshold < Infinity ? threshold : 20;
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * Default critical threshold for this type.
+   * @type {number}
+   * @internal
+   */
+  get _typeCriticalThreshold() {
+    return Infinity;
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * Does the Item implement an ability check as part of its usage?
+   * @type {boolean}
+   */
+  get hasAbilityCheck() {
+    return (this.actionType === "abil") && !!this.ability;
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * Does the Item implement an attack roll as part of its usage?
+   * @type {boolean}
+   */
+  get hasAttack() {
+    return ["mwak", "rwak", "msak", "rsak"].includes(this.actionType);
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * Does the Item implement a damage roll as part of its usage?
+   * @type {boolean}
+   */
+  get hasDamage() {
+    return this.actionType && (this.damage.parts.length > 0);
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * Does the Item implement a saving throw as part of its usage?
+   * @type {boolean}
+   */
+  get hasSave() {
+    return this.actionType && !!(this.save.ability && this.save.scaling);
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * Does the Item provide an amount of healing instead of conventional damage?
+   * @type {boolean}
+   */
+  get isHealing() {
+    return (this.actionType === "heal") && this.hasDamage;
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * Does the Item implement a versatile damage roll as part of its usage?
+   * @type {boolean}
+   */
+  get isVersatile() {
+    return this.actionType && !!(this.hasDamage && this.damage.versatile);
+  }
+
 }
 
 /**
@@ -19322,6 +23481,7 @@ class ActionTemplate extends foundry.abstract.DataModel {
  * @property {object} duration              Effect's duration.
  * @property {number} duration.value        How long the effect lasts.
  * @property {string} duration.units        Time duration period as defined in `DND5E.timePeriods`.
+ * @property {number} cover                 Amount of cover does this item affords to its crew on a vehicle.
  * @property {object} target                Effect's valid targets.
  * @property {number} target.value          Length or radius of target depending on targeting mode selected.
  * @property {number} target.width          Width of line when line type is selected.
@@ -19341,7 +23501,7 @@ class ActionTemplate extends foundry.abstract.DataModel {
  * @property {number} consume.amount        Quantity of the resource to consume per use.
  * @mixin
  */
-class ActivatedEffectTemplate extends foundry.abstract.DataModel {
+class ActivatedEffectTemplate extends SystemDataModel {
   /** @inheritdoc */
   static defineSchema() {
     return {
@@ -19354,11 +23514,16 @@ class ActivatedEffectTemplate extends foundry.abstract.DataModel {
         value: new FormulaField({required: true, deterministic: true, label: "DND5E.Duration"}),
         units: new foundry.data.fields.StringField({required: true, blank: true, label: "DND5E.DurationType"})
       }, {label: "DND5E.Duration"}),
+      cover: new foundry.data.fields.NumberField({
+        required: true, nullable: true, min: 0, max: 1, label: "DND5E.Cover"
+      }),
+      crewed: new foundry.data.fields.BooleanField({label: "DND5E.Crewed"}),
       target: new foundry.data.fields.SchemaField({
         value: new foundry.data.fields.NumberField({required: true, min: 0, label: "DND5E.TargetValue"}),
         width: new foundry.data.fields.NumberField({required: true, min: 0, label: "DND5E.TargetWidth"}),
         units: new foundry.data.fields.StringField({required: true, blank: true, label: "DND5E.TargetUnits"}),
-        type: new foundry.data.fields.StringField({required: true, blank: true, label: "DND5E.TargetType"})
+        type: new foundry.data.fields.StringField({required: true, blank: true, label: "DND5E.TargetType"}),
+        prompt: new foundry.data.fields.BooleanField({initial: true, label: "DND5E.TemplatePrompt"})
       }, {label: "DND5E.Target"}),
       range: new foundry.data.fields.SchemaField({
         value: new foundry.data.fields.NumberField({required: true, min: 0, label: "DND5E.RangeNormal"}),
@@ -19371,7 +23536,8 @@ class ActivatedEffectTemplate extends foundry.abstract.DataModel {
         target: new foundry.data.fields.StringField({
           required: true, nullable: true, initial: null, label: "DND5E.ConsumeTarget"
         }),
-        amount: new foundry.data.fields.NumberField({required: true, integer: true, label: "DND5E.ConsumeAmount"})
+        amount: new foundry.data.fields.NumberField({required: true, integer: true, label: "DND5E.ConsumeAmount"}),
+        scale: new foundry.data.fields.BooleanField({label: "DND5E.ConsumeScaling"})
       }, {label: "DND5E.ConsumeTitle"})
     };
   }
@@ -19390,17 +23556,21 @@ class ActivatedEffectTemplate extends foundry.abstract.DataModel {
         }),
         max: new FormulaField({required: true, deterministic: true, label: "DND5E.LimitedUsesMax"}),
         per: new foundry.data.fields.StringField({
-          required: true, nullable: true, initial: null, label: "DND5E.LimitedUsesPer"
+          required: true, nullable: true, blank: false, initial: null, label: "DND5E.LimitedUsesPer"
         }),
-        recovery: new FormulaField({required: true, label: "DND5E.RecoveryFormula"})
+        recovery: new FormulaField({required: true, label: "DND5E.RecoveryFormula"}),
+        prompt: new foundry.data.fields.BooleanField({initial: true, label: "DND5E.LimitedUsesPrompt"})
       }, extraSchema), options);
     }
   };
 
   /* -------------------------------------------- */
+  /*  Migrations                                  */
+  /* -------------------------------------------- */
 
   /** @inheritdoc */
-  static migrateData(source) {
+  static _migrateData(source) {
+    super._migrateData(source);
     ActivatedEffectTemplate.#migrateFormulaFields(source);
     ActivatedEffectTemplate.#migrateRanges(source);
     ActivatedEffectTemplate.#migrateTargets(source);
@@ -19431,6 +23601,7 @@ class ActivatedEffectTemplate extends foundry.abstract.DataModel {
    */
   static #migrateRanges(source) {
     if ( !("range" in source) ) return;
+    source.range ??= {};
     if ( source.range.units === null ) source.range.units = "";
     if ( typeof source.range.long === "string" ) {
       if ( source.range.long === "" ) source.range.long = null;
@@ -19453,9 +23624,11 @@ class ActivatedEffectTemplate extends foundry.abstract.DataModel {
    * @param {object} source  The candidate source data from which the model will be constructed.
    */
   static #migrateTargets(source) {
-    if ( source.target?.value === "" ) source.target.value = null;
-    if ( source.target?.units === null ) source.target.units = "";
-    if ( source.target?.type === null ) source.target.type = "";
+    if ( !("target" in source) ) return;
+    source.target ??= {};
+    if ( source.target.value === "" ) source.target.value = null;
+    if ( source.target.units === null ) source.target.units = "";
+    if ( source.target.type === null ) source.target.type = "";
   }
 
   /* -------------------------------------------- */
@@ -19466,12 +23639,12 @@ class ActivatedEffectTemplate extends foundry.abstract.DataModel {
    */
   static #migrateUses(source) {
     if ( !("uses" in source) ) return;
+    source.uses ??= {};
     const value = source.uses.value;
     if ( typeof value === "string" ) {
       if ( value === "" ) source.uses.value = null;
       else if ( Number.isNumeric(value) ) source.uses.value = Number(source.uses.value);
     }
-    if ( source.uses.recovery === undefined ) source.uses.recovery = "";
   }
 
   /* -------------------------------------------- */
@@ -19482,6 +23655,7 @@ class ActivatedEffectTemplate extends foundry.abstract.DataModel {
    */
   static #migrateConsume(source) {
     if ( !("consume" in source) ) return;
+    source.consume ??= {};
     if ( source.consume.type === null ) source.consume.type = "";
     const amount = source.consume.amount;
     if ( typeof amount === "string" ) {
@@ -19489,6 +23663,126 @@ class ActivatedEffectTemplate extends foundry.abstract.DataModel {
       else if ( Number.isNumeric(amount) ) source.consume.amount = Number(amount);
     }
   }
+
+  /* -------------------------------------------- */
+  /*  Getters                                     */
+  /* -------------------------------------------- */
+
+  /**
+   * Chat properties for activated effects.
+   * @type {string[]}
+   */
+  get activatedEffectChatProperties() {
+    return [
+      this.parent.labels.activation + (this.activation.condition ? ` (${this.activation.condition})` : ""),
+      this.parent.labels.target,
+      this.parent.labels.range,
+      this.parent.labels.duration
+    ];
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * Is this Item an activatable item?
+   * @type {boolean}
+   */
+  get isActive() {
+    return !!this.activation.type;
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * Does the Item have an area of effect target?
+   * @type {boolean}
+   */
+  get hasAreaTarget() {
+    return this.isActive && (this.target.type in CONFIG.DND5E.areaTargetTypes);
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * Does the Item target one or more distinct targets?
+   * @type {boolean}
+   */
+  get hasIndividualTarget() {
+    return this.isActive && (this.target.type in CONFIG.DND5E.individualTargetTypes);
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * Is this Item limited in its ability to be used by charges or by recharge?
+   * @type {boolean}
+   */
+  get hasLimitedUses() {
+    return this.isActive && (this.uses.per in CONFIG.DND5E.limitedUsePeriods) && (this.uses.max > 0);
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * Does this Item draw from a resource?
+   * @type {boolean}
+   */
+  get hasResource() {
+    const consume = this.consume;
+    return this.isActive && !!consume.target && !!consume.type && (!this.hasAttack || (consume.type !== "ammo"));
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * Does this Item draw from ammunition?
+   * @type {boolean}
+   */
+  get hasAmmo() {
+    const consume = this.consume;
+    return this.isActive && !!consume.target && !!consume.type && this.hasAttack && (consume.type === "ammo");
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * Does the Item duration accept an associated numeric value or formula?
+   * @type {boolean}
+   */
+  get hasScalarDuration() {
+    return this.duration.units in CONFIG.DND5E.scalarTimePeriods;
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * Does the Item range accept an associated numeric value?
+   * @type {boolean}
+   */
+  get hasScalarRange() {
+    return this.range.units in CONFIG.DND5E.movementUnits;
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * Does the Item target accept an associated numeric value?
+   * @type {boolean}
+   */
+  get hasScalarTarget() {
+    return ![null, "", "self"].includes(this.target.type);
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * Does the Item have a target?
+   * @type {boolean}
+   */
+  get hasTarget() {
+    return this.isActive && !["", null].includes(this.target.type);
+  }
+
 }
 
 /**
@@ -19498,7 +23792,7 @@ class ActivatedEffectTemplate extends foundry.abstract.DataModel {
  * @property {boolean} equipped   Is this item equipped on its owning actor.
  * @mixin
  */
-class EquippableItemTemplate extends foundry.abstract.DataModel {
+class EquippableItemTemplate extends SystemDataModel {
   /** @inheritdoc */
   static defineSchema() {
     return {
@@ -19510,9 +23804,12 @@ class EquippableItemTemplate extends foundry.abstract.DataModel {
   }
 
   /* -------------------------------------------- */
+  /*  Migrations                                  */
+  /* -------------------------------------------- */
 
   /** @inheritdoc */
-  static migrateData(source) {
+  static _migrateData(source) {
+    super._migrateData(source);
     EquippableItemTemplate.#migrateAttunement(source);
     EquippableItemTemplate.#migrateEquipped(source);
   }
@@ -19535,7 +23832,25 @@ class EquippableItemTemplate extends foundry.abstract.DataModel {
    * @param {object} source  The candidate source data from which the model will be constructed.
    */
   static #migrateEquipped(source) {
+    if ( !("equipped" in source) ) return;
     if ( (source.equipped === null) || (source.equipped === undefined) ) source.equipped = false;
+  }
+
+  /* -------------------------------------------- */
+  /*  Getters                                     */
+  /* -------------------------------------------- */
+
+  /**
+   * Chat properties for equippable items.
+   * @type {string[]}
+   */
+  get equippableItemChatProperties() {
+    const req = CONFIG.DND5E.attunementTypes.REQUIRED;
+    return [
+      this.attunement === req ? CONFIG.DND5E.attunements[req] : null,
+      game.i18n.localize(this.equipped ? "DND5E.Equipped" : "DND5E.Unequipped"),
+      ("proficient" in this) ? CONFIG.DND5E.proficiencyLevels[this.prof?.multiplier || 0] : null
+    ];
   }
 }
 
@@ -19551,7 +23866,7 @@ class EquippableItemTemplate extends foundry.abstract.DataModel {
  * @property {boolean} identified         Has this item been identified?
  * @mixin
  */
-class PhysicalItemTemplate extends foundry.abstract.DataModel {
+class PhysicalItemTemplate extends SystemDataModel {
   /** @inheritdoc */
   static defineSchema() {
     return {
@@ -19575,9 +23890,26 @@ class PhysicalItemTemplate extends foundry.abstract.DataModel {
   }
 
   /* -------------------------------------------- */
+  /*  Getters                                     */
+  /* -------------------------------------------- */
+
+  /**
+   * Get a human-readable label for the price and denomination.
+   * @type {string}
+   */
+  get priceLabel() {
+    const { value, denomination } = this.price;
+    const hasPrice = value && (denomination in CONFIG.DND5E.currencies);
+    return hasPrice ? `${value} ${CONFIG.DND5E.currencies[denomination].label}` : null;
+  }
+
+  /* -------------------------------------------- */
+  /*  Migrations                                  */
+  /* -------------------------------------------- */
 
   /** @inheritdoc */
-  static migrateData(source) {
+  static _migrateData(source) {
+    super._migrateData(source);
     PhysicalItemTemplate.#migratePrice(source);
     PhysicalItemTemplate.#migrateRarity(source);
     PhysicalItemTemplate.#migrateWeight(source);
@@ -19590,7 +23922,7 @@ class PhysicalItemTemplate extends foundry.abstract.DataModel {
    * @param {object} source  The candidate source data from which the model will be constructed.
    */
   static #migratePrice(source) {
-    if ( foundry.utils.getType(source.price) === "Object" ) return;
+    if ( !("price" in source) || foundry.utils.getType(source.price) === "Object" ) return;
     source.price = {
       value: Number.isNumeric(source.price) ? Number(source.price) : 0,
       denomination: "gp"
@@ -19617,6 +23949,7 @@ class PhysicalItemTemplate extends foundry.abstract.DataModel {
    * @param {object} source  The candidate source data from which the model will be constructed.
    */
   static #migrateWeight(source) {
+    if ( !("weight" in source) ) return;
     if ( (source.weight === null) || (source.weight === undefined) ) source.weight = 0;
   }
 }
@@ -19642,10 +23975,48 @@ class ConsumableData extends SystemDataModel.mixin(
       consumableType: new foundry.data.fields.StringField({
         required: true, initial: "potion", label: "DND5E.ItemConsumableType"
       }),
+      properties: new MappingField(new foundry.data.fields.BooleanField(), {
+        required: false, label: "DND5E.ItemAmmoProperties"
+      }),
       uses: new ActivatedEffectTemplate.ItemUsesField({
         autoDestroy: new foundry.data.fields.BooleanField({required: true, label: "DND5E.ItemDestroyEmpty"})
       }, {label: "DND5E.LimitedUses"})
     });
+  }
+
+  /* -------------------------------------------- */
+  /*  Getters                                     */
+  /* -------------------------------------------- */
+
+  /**
+   * Properties displayed in chat.
+   * @type {string[]}
+   */
+  get chatProperties() {
+    return [
+      CONFIG.DND5E.consumableTypes[this.consumableType],
+      this.hasLimitedUses ? `${this.uses.value}/${this.uses.max} ${game.i18n.localize("DND5E.Charges")}` : null,
+      this.priceLabel
+    ];
+  }
+
+  /* -------------------------------------------- */
+
+  /** @inheritdoc */
+  get _typeAbilityMod() {
+    if ( this.consumableType !== "scroll" ) return null;
+    return this.parent?.actor?.system.attributes.spellcasting || "int";
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * The proficiency multiplier for this item.
+   * @returns {number}
+   */
+  get proficiencyMultiplier() {
+    const isProficient = this.parent?.actor?.getFlag("dnd5e", "tavernBrawlerFeat");
+    return isProficient ? 1 : 0;
   }
 }
 
@@ -19692,7 +24063,7 @@ class ContainerData extends SystemDataModel.mixin(
  * @property {string} hp.conditions  Conditions that are triggered when this equipment takes damage.
  * @mixin
  */
-class MountableTemplate extends foundry.abstract.DataModel {
+class MountableTemplate extends SystemDataModel {
   /** @inheritdoc */
   static defineSchema() {
     return {
@@ -19737,7 +24108,7 @@ class MountableTemplate extends foundry.abstract.DataModel {
  * @property {string} speed.conditions  Conditions that may affect item's speed.
  * @property {number} strength          Minimum strength required to use a piece of armor.
  * @property {boolean} stealth          Does this equipment grant disadvantage on stealth checks when used?
- * @property {boolean} proficient       Does the owner have proficiency in this piece of equipment?
+ * @property {number} proficient        Does the owner have proficiency in this piece of equipment?
  */
 class EquipmentData extends SystemDataModel.mixin(
   ItemDescriptionTemplate, PhysicalItemTemplate, EquippableItemTemplate,
@@ -19762,17 +24133,22 @@ class EquipmentData extends SystemDataModel.mixin(
         required: true, integer: true, min: 0, label: "DND5E.ItemRequiredStr"
       }),
       stealth: new foundry.data.fields.BooleanField({required: true, label: "DND5E.ItemEquipmentStealthDisav"}),
-      proficient: new foundry.data.fields.BooleanField({required: true, initial: true, label: "DND5E.Proficient"})
+      proficient: new foundry.data.fields.NumberField({
+        required: true, min: 0, max: 1, integer: true, initial: null, label: "DND5E.ProficiencyLevel"
+      })
     });
   }
 
   /* -------------------------------------------- */
+  /*  Migrations                                  */
+  /* -------------------------------------------- */
 
   /** @inheritdoc */
-  static migrateData(source) {
-    super.migrateData(source);
+  static _migrateData(source) {
+    super._migrateData(source);
     EquipmentData.#migrateArmor(source);
     EquipmentData.#migrateStrength(source);
+    EquipmentData.#migrateProficient(source);
   }
 
   /* -------------------------------------------- */
@@ -19782,6 +24158,7 @@ class EquipmentData extends SystemDataModel.mixin(
    * @param {object} source  The candidate source data from which the model will be constructed.
    */
   static #migrateArmor(source) {
+    if ( !("armor" in source) ) return;
     source.armor ??= {};
     if ( source.armor.type === "bonus" ) source.armor.type = "trinket";
     if ( (typeof source.armor.dex === "string") ) {
@@ -19801,6 +24178,71 @@ class EquipmentData extends SystemDataModel.mixin(
     if ( typeof source.strength !== "string" ) return;
     if ( source.strength === "" ) source.strength = null;
     if ( Number.isNumeric(source.strength) ) source.strength = Number(source.strength);
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * Migrate the proficient field to convert boolean values.
+   * @param {object} source  The candidate source data from which the model will be constructed.
+   */
+  static #migrateProficient(source) {
+    if ( typeof source.proficient === "boolean" ) source.proficient = Number(source.proficient);
+  }
+
+  /* -------------------------------------------- */
+  /*  Getters                                     */
+  /* -------------------------------------------- */
+
+  /**
+   * Properties displayed in chat.
+   * @type {string[]}
+   */
+  get chatProperties() {
+    return [
+      CONFIG.DND5E.equipmentTypes[this.armor.type],
+      this.parent.labels?.armor ?? null,
+      this.stealth ? game.i18n.localize("DND5E.StealthDisadvantage") : null
+    ];
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * Is this Item any of the armor subtypes?
+   * @type {boolean}
+   */
+  get isArmor() {
+    return this.armor.type in CONFIG.DND5E.armorTypes;
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * Is this item a separate large object like a siege engine or vehicle component that is
+   * usually mounted on fixtures rather than equipped, and has its own AC and HP?
+   * @type {boolean}
+   */
+  get isMountable() {
+    return this.armor.type === "vehicle";
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * The proficiency multiplier for this item.
+   * @returns {number}
+   */
+  get proficiencyMultiplier() {
+    if ( Number.isFinite(this.proficient) ) return this.proficient;
+    const actor = this.parent.actor;
+    if ( !actor ) return 0;
+    if ( actor.type === "npc" ) return 1; // NPCs are always considered proficient with any armor in their stat block.
+    const config = CONFIG.DND5E.armorProficienciesMap;
+    const itemProf = config[this.armor?.type];
+    const actorProfs = actor.system.traits?.armorProf?.value ?? new Set();
+    const isProficient = (itemProf === true) || actorProfs.has(itemProf) || actorProfs.has(this.baseItem);
+    return Number(isProficient);
   }
 }
 
@@ -19825,8 +24267,8 @@ class FeatData extends SystemDataModel.mixin(
   static defineSchema() {
     return this.mergeSchema(super.defineSchema(), {
       type: new foundry.data.fields.SchemaField({
-        value: new foundry.data.fields.StringField({required: true}),
-        subtype: new foundry.data.fields.StringField({required: true})
+        value: new foundry.data.fields.StringField({required: true, label: "DND5E.Type"}),
+        subtype: new foundry.data.fields.StringField({required: true, label: "DND5E.Subtype"})
       }, {label: "DND5E.ItemFeatureType"}),
       requirements: new foundry.data.fields.StringField({required: true, nullable: true, label: "DND5E.Requirements"}),
       recharge: new foundry.data.fields.SchemaField({
@@ -19839,10 +24281,12 @@ class FeatData extends SystemDataModel.mixin(
   }
 
   /* -------------------------------------------- */
+  /*  Migrations                                  */
+  /* -------------------------------------------- */
 
   /** @inheritdoc */
-  static migrateData(source) {
-    super.migrateData(source);
+  static _migrateData(source) {
+    super._migrateData(source);
     FeatData.#migrateType(source);
     FeatData.#migrateRecharge(source);
   }
@@ -19854,6 +24298,7 @@ class FeatData extends SystemDataModel.mixin(
    * @param {object} source The candidate source data from which the model will be constructed.
    */
   static #migrateType(source) {
+    if ( !("type" in source) ) return;
     if ( !source.type ) source.type = {value: "", subtype: ""};
   }
 
@@ -19870,6 +24315,35 @@ class FeatData extends SystemDataModel.mixin(
     else if ( (typeof value === "string") && Number.isNumeric(value) ) source.recharge.value = Number(value);
     if ( source.recharge.charged === null ) source.recharge.charged = false;
   }
+
+  /* -------------------------------------------- */
+  /*  Getters                                     */
+  /* -------------------------------------------- */
+
+  /**
+   * Properties displayed in chat.
+   * @type {string[]}
+   */
+  get chatProperties() {
+    return [this.requirements];
+  }
+
+  /* -------------------------------------------- */
+
+  /** @inheritdoc */
+  get hasLimitedUses() {
+    return this.isActive && (!!this.recharge.value || super.hasLimitedUses);
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * The proficiency multiplier for this item.
+   * @returns {number}
+   */
+  get proficiencyMultiplier() {
+    return 1;
+  }
 }
 
 /**
@@ -19877,7 +24351,169 @@ class FeatData extends SystemDataModel.mixin(
  * @mixes ItemDescriptionTemplate
  * @mixes PhysicalItemTemplate
  */
-class LootData extends SystemDataModel.mixin(ItemDescriptionTemplate, PhysicalItemTemplate) {}
+class LootData extends SystemDataModel.mixin(ItemDescriptionTemplate, PhysicalItemTemplate) {
+    /** @inheritdoc */
+    static defineSchema() {
+      return this.mergeSchema(super.defineSchema(), {
+        type: new foundry.data.fields.SchemaField({
+          value: new foundry.data.fields.StringField({required: true, label: "DND5E.Type"}),
+          subtype: new foundry.data.fields.StringField({required: true, label: "DND5E.Subtype"})
+        }, {label: "DND5E.ItemLootType"})
+      });
+    }
+
+  /* -------------------------------------------- */
+  /*  Getters                                     */
+  /* -------------------------------------------- */
+
+  /**
+   * Properties displayed in chat.
+   * @type {string[]}
+   */
+  get chatProperties() {
+    return [
+      game.i18n.localize(CONFIG.Item.typeLabels.loot),
+      this.weight ? `${this.weight} ${game.i18n.localize("DND5E.AbbreviationLbs")}` : null,
+      this.priceLabel
+    ];
+  }
+}
+
+var _module$2 = /*#__PURE__*/Object.freeze({
+  __proto__: null,
+  CreatureTypeField: CreatureTypeField,
+  CurrencyTemplate: CurrencyTemplate,
+  MovementField: MovementField,
+  SensesField: SensesField,
+  SourceField: SourceField
+});
+
+/**
+ * Data definition for Race items.
+ * @mixes ItemDescriptionTemplate
+ *
+ * @property {string} identifier       Identifier slug for this race.
+ * @property {object[]} advancement    Advancement objects for this race.
+ * @property {MovementField} movement
+ * @property {SensesField} senses
+ * @property {CreatureType} type
+ */
+class RaceData extends SystemDataModel.mixin(ItemDescriptionTemplate) {
+  /** @inheritdoc */
+  static defineSchema() {
+    return this.mergeSchema(super.defineSchema(), {
+      identifier: new IdentifierField({label: "DND5E.Identifier"}),
+      advancement: new foundry.data.fields.ArrayField(new AdvancementField(), {label: "DND5E.AdvancementTitle"}),
+      movement: new MovementField(),
+      senses: new SensesField(),
+      type: new CreatureTypeField({ swarm: false }, { initial: { value: "humanoid" } })
+    });
+  }
+
+  /* -------------------------------------------- */
+
+  /** @inheritdoc */
+  static metadata = Object.freeze({
+    singleton: true
+  });
+
+  /* -------------------------------------------- */
+  /*  Properties                                  */
+  /* -------------------------------------------- */
+
+  /**
+   * Sheet labels for a race's movement.
+   * @returns {Object<string>}
+   */
+  get movementLabels() {
+    const units = CONFIG.DND5E.movementUnits[this.movement.units || Object.keys(CONFIG.DND5E.movementUnits)[0]];
+    return Object.entries(CONFIG.DND5E.movementTypes).reduce((obj, [k, label]) => {
+      const value = this.movement[k];
+      if ( value ) obj[k] = `${label} ${value} ${units}`;
+      return obj;
+    }, {});
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * Sheet labels for a race's senses.
+   * @returns {Object<string>}
+   */
+  get sensesLabels() {
+    const units = CONFIG.DND5E.movementUnits[this.senses.units || Object.keys(CONFIG.DND5E.movementUnits)[0]];
+    return Object.entries(CONFIG.DND5E.senses).reduce((arr, [k, label]) => {
+      const value = this.senses[k];
+      if ( value ) arr.push(`${label} ${value} ${units}`);
+      return arr;
+    }, []).concat(this.senses.special.split(";").filter(l => l));
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * Sheet label for a race's creature type.
+   * @returns {Object<string>}
+   */
+  get typeLabel() {
+    return Actor5e.formatCreatureType(this.type);
+  }
+
+  /* -------------------------------------------- */
+  /*  Socket Event Handlers                       */
+  /* -------------------------------------------- */
+
+  /**
+   * Create default advancement items when race is created.
+   * @param {object} data               The initial data object provided to the document creation request.
+   * @param {object} options            Additional options which modify the creation request.
+   * @param {User} user                 The User requesting the document creation.
+   * @returns {Promise<boolean|void>}   A return value of false indicates the creation operation should be cancelled.
+   * @see {Document#_preCreate}
+   * @protected
+   */
+  async _preCreate(data, options, user) {
+    if ( data._id || foundry.utils.hasProperty(data, "system.advancement") ) return;
+    const toCreate = [
+      { type: "AbilityScoreImprovement" }, { type: "Size" },
+      { type: "Trait", configuration: { grants: ["languages:standard:common"] } }
+    ];
+    this.parent.updateSource({"system.advancement": toCreate.map(c => {
+      const AdvancementClass = CONFIG.DND5E.advancementTypes[c.type];
+      return new AdvancementClass(c, { parent: this.parent }).toObject();
+    })});
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * Set the race reference in actor data.
+   * @param {object} data     The initial data object provided to the document creation request
+   * @param {object} options  Additional options which modify the creation request
+   * @param {string} userId   The id of the User requesting the document update
+   * @see {Document#_onCreate}
+   * @protected
+   */
+  _onCreate(data, options, userId) {
+    if ( (game.user.id !== userId) || this.parent.actor?.type !== "character" ) return;
+    this.parent.actor.update({ "system.details.race": this.parent.id });
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * Remove the race reference in actor data.
+   * @param {object} options            Additional options which modify the deletion request
+   * @param {documents.BaseUser} user   The User requesting the document deletion
+   * @returns {Promise<boolean|void>}   A return value of false indicates the deletion operation should be cancelled.
+   * @see {Document#_preDelete}
+   * @protected
+   */
+  async _preDelete(options, user) {
+    if ( (this.parent.actor?.type !== "character") ) return;
+    await this.parent.actor.update({ "system.details.race": null });
+  }
+}
 
 /**
  * Data definition for Spell items.
@@ -19943,10 +24579,12 @@ class SpellData extends SystemDataModel.mixin(
   }
 
   /* -------------------------------------------- */
+  /*  Migrations                                  */
+  /* -------------------------------------------- */
 
   /** @inheritdoc */
-  static migrateData(source) {
-    super.migrateData(source);
+  static _migrateData(source) {
+    super._migrateData(source);
     SpellData.#migrateComponentData(source);
     SpellData.#migrateScaling(source);
   }
@@ -19973,6 +24611,46 @@ class SpellData extends SystemDataModel.mixin(
   static #migrateScaling(source) {
     if ( !("scaling" in source) ) return;
     if ( (source.scaling.mode === "") || (source.scaling.mode === null) ) source.scaling.mode = "none";
+  }
+
+  /* -------------------------------------------- */
+  /*  Getters                                     */
+  /* -------------------------------------------- */
+
+  /**
+   * Properties displayed in chat.
+   * @type {string[]}
+   */
+  get chatProperties() {
+    return [
+      this.parent.labels.level,
+      this.parent.labels.components.vsm + (this.parent.labels.materials ? ` (${this.parent.labels.materials})` : ""),
+      ...this.parent.labels.components.tags
+    ];
+  }
+
+  /* -------------------------------------------- */
+
+  /** @inheritdoc */
+  get _typeAbilityMod() {
+    return this.parent?.actor?.system.attributes.spellcasting || "int";
+  }
+
+  /* -------------------------------------------- */
+
+  /** @inheritdoc */
+  get _typeCriticalThreshold() {
+    return this.parent?.actor?.flags.dnd5e?.spellCriticalThreshold ?? Infinity;
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * The proficiency multiplier for this item.
+   * @returns {number}
+   */
+  get proficiencyMultiplier() {
+    return 1;
   }
 }
 
@@ -20028,21 +24706,23 @@ class ToolData extends SystemDataModel.mixin(
       toolType: new foundry.data.fields.StringField({required: true, label: "DND5E.ItemToolType"}),
       baseItem: new foundry.data.fields.StringField({required: true, label: "DND5E.ItemToolBase"}),
       ability: new foundry.data.fields.StringField({
-        required: true, initial: "int", blank: false, label: "DND5E.DefaultAbilityCheck"
+        required: true, blank: true, label: "DND5E.DefaultAbilityCheck"
       }),
       chatFlavor: new foundry.data.fields.StringField({required: true, label: "DND5E.ChatFlavor"}),
       proficient: new foundry.data.fields.NumberField({
-        required: true, nullable: false, initial: 0, min: 0, label: "DND5E.ItemToolProficiency"
+        required: true, initial: null, min: 0, max: 2, step: 0.5, label: "DND5E.ItemToolProficiency"
       }),
       bonus: new FormulaField({required: true, label: "DND5E.ItemToolBonus"})
     });
   }
 
   /* -------------------------------------------- */
+  /*  Migrations                                  */
+  /* -------------------------------------------- */
 
   /** @inheritdoc */
-  static migrateData(source) {
-    super.migrateData(source);
+  static _migrateData(source) {
+    super._migrateData(source);
     ToolData.#migrateAbility(source);
   }
 
@@ -20054,6 +24734,44 @@ class ToolData extends SystemDataModel.mixin(
    */
   static #migrateAbility(source) {
     if ( Array.isArray(source.ability) ) source.ability = source.ability[0];
+  }
+
+  /* -------------------------------------------- */
+  /*  Getters                                     */
+  /* -------------------------------------------- */
+
+  /**
+   * Properties displayed in chat.
+   * @type {string[]}
+   */
+  get chatProperties() {
+    return [CONFIG.DND5E.abilities[this.ability]?.label];
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * Which ability score modifier is used by this item?
+   * @type {string|null}
+   */
+  get abilityMod() {
+    return this.ability || "int";
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * The proficiency multiplier for this item.
+   * @returns {number}
+   */
+  get proficiencyMultiplier() {
+    if ( Number.isFinite(this.proficient) ) return this.proficient;
+    const actor = this.parent.actor;
+    if ( !actor ) return 0;
+    if ( actor.type === "npc" ) return 1;
+    const baseItemProf = actor.system.tools?.[this.baseItem];
+    const categoryProf = actor.system.tools?.[this.toolType];
+    return Math.max(baseItemProf?.value ?? 0, categoryProf?.value ?? 0);
   }
 }
 
@@ -20069,7 +24787,7 @@ class ToolData extends SystemDataModel.mixin(
  * @property {string} weaponType   Weapon category as defined in `DND5E.weaponTypes`.
  * @property {string} baseItem     Base weapon as defined in `DND5E.weaponIds` for determining proficiency.
  * @property {object} properties   Mapping of various weapon property booleans.
- * @property {boolean} proficient  Does the weapon's owner have proficiency?
+ * @property {number} proficient   Does the weapon's owner have proficiency?
  */
 class WeaponData extends SystemDataModel.mixin(
   ItemDescriptionTemplate, PhysicalItemTemplate, EquippableItemTemplate,
@@ -20085,15 +24803,19 @@ class WeaponData extends SystemDataModel.mixin(
       properties: new MappingField(new foundry.data.fields.BooleanField(), {
         required: true, initialKeys: CONFIG.DND5E.weaponProperties, label: "DND5E.ItemWeaponProperties"
       }),
-      proficient: new foundry.data.fields.BooleanField({required: true, initial: true, label: "DND5E.Proficient"})
+      proficient: new foundry.data.fields.NumberField({
+        required: true, min: 0, max: 1, integer: true, initial: null, label: "DND5E.ProficiencyLevel"
+      })
     });
   }
 
   /* -------------------------------------------- */
+  /*  Migrations                                  */
+  /* -------------------------------------------- */
 
   /** @inheritdoc */
-  static migrateData(source) {
-    super.migrateData(source);
+  static _migrateData(source) {
+    super._migrateData(source);
     WeaponData.#migratePropertiesData(source);
     WeaponData.#migrateProficient(source);
     WeaponData.#migrateWeaponType(source);
@@ -20115,11 +24837,11 @@ class WeaponData extends SystemDataModel.mixin(
   /* -------------------------------------------- */
 
   /**
-   * Migrate the proficient field to remove non-boolean values.
+   * Migrate the proficient field to convert boolean values.
    * @param {object} source  The candidate source data from which the model will be constructed.
    */
   static #migrateProficient(source) {
-    if ( typeof source.proficient === "number" ) source.proficient = Boolean(source.proficient);
+    if ( typeof source.proficient === "boolean" ) source.proficient = Number(source.proficient);
   }
 
   /* -------------------------------------------- */
@@ -20131,6 +24853,70 @@ class WeaponData extends SystemDataModel.mixin(
   static #migrateWeaponType(source) {
     if ( source.weaponType === null ) source.weaponType = "simpleM";
   }
+
+  /* -------------------------------------------- */
+  /*  Getters                                     */
+  /* -------------------------------------------- */
+
+  /**
+   * Properties displayed in chat.
+   * @type {string[]}
+   */
+  get chatProperties() {
+    return [CONFIG.DND5E.weaponTypes[this.weaponType]];
+  }
+
+  /* -------------------------------------------- */
+
+  /** @inheritdoc */
+  get _typeAbilityMod() {
+    if ( ["simpleR", "martialR"].includes(this.weaponType) ) return "dex";
+
+    const abilities = this.parent?.actor?.system.abilities;
+    if ( this.properties.fin && abilities ) {
+      return (abilities.dex?.mod ?? 0) >= (abilities.str?.mod ?? 0) ? "dex" : "str";
+    }
+
+    return null;
+  }
+
+  /* -------------------------------------------- */
+
+  /** @inheritdoc */
+  get _typeCriticalThreshold() {
+    return this.parent?.actor?.flags.dnd5e?.weaponCriticalThreshold ?? Infinity;
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * Is this item a separate large object like a siege engine or vehicle component that is
+   * usually mounted on fixtures rather than equipped, and has its own AC and HP?
+   * @type {boolean}
+   */
+  get isMountable() {
+    return this.weaponType === "siege";
+  }
+
+  /* -------------------------------------------- */
+
+  /**
+   * The proficiency multiplier for this item.
+   * @returns {number}
+   */
+  get proficiencyMultiplier() {
+    if ( Number.isFinite(this.proficient) ) return this.proficient;
+    const actor = this.parent.actor;
+    if ( !actor ) return 0;
+    if ( actor.type === "npc" ) return 1; // NPCs are always considered proficient with any weapon in their stat block.
+    const config = CONFIG.DND5E.weaponProficienciesMap;
+    const itemProf = config[this.weaponType];
+    const actorProfs = actor.system.traits?.weaponProf?.value ?? new Set();
+    const natural = this.weaponType === "natural";
+    const improvised = (this.weaponType === "improv") && !!actor.getFlag("dnd5e", "tavernBrawlerFeat");
+    const isProficient = natural || improvised || actorProfs.has(itemProf) || actorProfs.has(this.baseItem);
+    return Number(isProficient);
+  }
 }
 
 const config$1 = {
@@ -20141,13 +24927,14 @@ const config$1 = {
   equipment: EquipmentData,
   feat: FeatData,
   loot: LootData,
+  race: RaceData,
   spell: SpellData,
   subclass: SubclassData,
   tool: ToolData,
   weapon: WeaponData
 };
 
-var _module$2 = /*#__PURE__*/Object.freeze({
+var _module$1 = /*#__PURE__*/Object.freeze({
   __proto__: null,
   ActionTemplate: ActionTemplate,
   ActivatedEffectTemplate: ActivatedEffectTemplate,
@@ -20162,6 +24949,7 @@ var _module$2 = /*#__PURE__*/Object.freeze({
   LootData: LootData,
   MountableTemplate: MountableTemplate,
   PhysicalItemTemplate: PhysicalItemTemplate,
+  RaceData: RaceData,
   SpellData: SpellData,
   SubclassData: SubclassData,
   ToolData: ToolData,
@@ -20222,26 +25010,22 @@ const config = {
   class: ClassJournalPageData
 };
 
-var _module$1 = /*#__PURE__*/Object.freeze({
+var _module = /*#__PURE__*/Object.freeze({
   __proto__: null,
   ClassJournalPageData: ClassJournalPageData,
   config: config
 });
 
-var _module = /*#__PURE__*/Object.freeze({
-  __proto__: null,
-  CurrencyTemplate: CurrencyTemplate
-});
-
 var dataModels = /*#__PURE__*/Object.freeze({
   __proto__: null,
+  SparseDataModel: SparseDataModel,
   SystemDataModel: SystemDataModel,
   actor: _module$4,
   advancement: _module$3,
   fields: fields,
-  item: _module$2,
-  journal: _module$1,
-  shared: _module
+  item: _module$1,
+  journal: _module,
+  shared: _module$2
 });
 
 /**
@@ -20308,7 +25092,7 @@ class D20Roll extends Roll {
     NORMAL: 0,
     ADVANTAGE: 1,
     DISADVANTAGE: -1
-  }
+  };
 
   /* -------------------------------------------- */
 
@@ -20535,7 +25319,7 @@ class D20Roll extends Roll {
         }
         return t;
       });
-      this.options.flavor += ` (${CONFIG.DND5E.abilities[form.ability.value]})`;
+      this.options.flavor += ` (${CONFIG.DND5E.abilities[form.ability.value]?.label ?? ""})`;
     }
 
     // Apply advantage or disadvantage
@@ -20831,7 +25615,7 @@ class TokenDocument5e extends TokenDocument {
     if ( data && (data.attribute === "attributes.hp") ) {
       const hp = this.actor.system.attributes.hp || {};
       data.value += (hp.temp || 0);
-      data.max += (hp.tempmax || 0);
+      data.max = Math.max(0, data.max + (hp.tempmax || 0));
     }
     return data;
   }
@@ -20840,6 +25624,7 @@ class TokenDocument5e extends TokenDocument {
 
   /** @inheritdoc */
   static getTrackedAttributes(data, _path=[]) {
+    if ( !game.dnd5e.isV10 ) return super.getTrackedAttributes(data, _path);
     if ( data instanceof foundry.abstract.DataModel ) return this._getTrackedAttributesFromSchema(data.schema, _path);
     const attributes = super.getTrackedAttributes(data, _path);
     if ( _path.length ) return attributes;
@@ -20869,7 +25654,7 @@ class TokenDocument5e extends TokenDocument {
         }
       }
       if ( !(field instanceof MappingField) ) continue;
-      if ( foundry.utils.isEmpty(field.initialKeys) ) continue;
+      if ( !field.initialKeys || foundry.utils.isEmpty(field.initialKeys) ) continue;
       if ( !isSchema(field.model) && !isModel(field.model) ) continue;
       const keys = Array.isArray(field.initialKeys) ? field.initialKeys : Object.keys(field.initialKeys);
       for ( const key of keys ) {
@@ -20886,13 +25671,10 @@ class TokenDocument5e extends TokenDocument {
   /**
    * Get an Array of attribute choices which are suitable for being consumed by an item usage.
    * @param {object} data  The actor data.
-   * @returns {{bar: string[], value: string[]}}
+   * @returns {string[]}
    */
   static getConsumedAttributes(data) {
-    const attributes = super.getTrackedAttributes(data);
-    const allowed = CONFIG.DND5E.consumableResources;
-    attributes.value = attributes.value.filter(attrs => this._isAllowedAttribute(allowed, attrs));
-    return attributes;
+    return CONFIG.DND5E.consumableResources;
   }
 
   /* -------------------------------------------- */
@@ -21089,7 +25871,7 @@ var chatMessage = /*#__PURE__*/Object.freeze({
  * @returns {D20Roll}         The D20Roll instance which is used to determine initiative for the Combatant
  */
 function getInitiativeRoll(formula="1d20") {
-  if ( !this.actor ) return CONFIG.Dice.D20Roll(formula, {});
+  if ( !this.actor ) return new CONFIG.Dice.D20Roll(formula ?? "1d20", {});
   return this.actor.getInitiativeRoll();
 }
 
@@ -21102,13 +25884,17 @@ var combat = /*#__PURE__*/Object.freeze({
  * Attempt to create a macro from the dropped data. Will use an existing macro if one exists.
  * @param {object} dropData     The dropped data
  * @param {number} slot         The hotbar slot to use
+ * @returns {Promise}
  */
 async function create5eMacro(dropData, slot) {
   const macroData = { type: "script", scope: "actor" };
   switch ( dropData.type ) {
     case "Item":
       const itemData = await Item.implementation.fromDropData(dropData);
-      if ( !itemData ) return ui.notifications.warn(game.i18n.localize("MACRO.5eUnownedWarn"));
+      if ( !itemData ) {
+        ui.notifications.warn("MACRO.5eUnownedWarn", {localize: true});
+        return null;
+      }
       foundry.utils.mergeObject(macroData, {
         name: itemData.name,
         img: itemData.img,
@@ -21118,7 +25904,10 @@ async function create5eMacro(dropData, slot) {
       break;
     case "ActiveEffect":
       const effectData = await ActiveEffect.implementation.fromDropData(dropData);
-      if ( !effectData ) return ui.notifications.warn(game.i18n.localize("MACRO.5eUnownedWarn"));
+      if ( !effectData ) {
+        ui.notifications.warn("MACRO.5eUnownedWarn", {localize: true});
+        return null;
+      }
       foundry.utils.mergeObject(macroData, {
         name: effectData.label,
         img: effectData.icon,
@@ -21131,8 +25920,9 @@ async function create5eMacro(dropData, slot) {
   }
 
   // Assign the macro to the hotbar
-  const macro = game.macros.find(m => (m.name === macroData.name) && (m.command === macroData.command)
-    && m.author.isSelf) || await Macro.create(macroData);
+  const macro = game.macros.find(m => {
+    return (m.name === macroData.name) && (m.command === macroData.command) && m.isAuthor;
+  }) || await Macro.create(macroData);
   game.user.assignHotbarMacro(macro, slot);
 }
 
@@ -21149,7 +25939,10 @@ function getMacroTarget(name, documentType) {
   const speaker = ChatMessage.getSpeaker();
   if ( speaker.token ) actor = game.actors.tokens[speaker.token];
   actor ??= game.actors.get(speaker.actor);
-  if ( !actor ) return ui.notifications.warn(game.i18n.localize("MACRO.5eNoActorSelected"));
+  if ( !actor ) {
+    ui.notifications.warn("MACRO.5eNoActorSelected", {localize: true});
+    return null;
+  }
 
   const collection = (documentType === "Item") ? actor.items : actor.effects;
   const nameKeyPath = (documentType === "Item") ? "name" : "label";
@@ -21158,7 +25951,8 @@ function getMacroTarget(name, documentType) {
   const documents = collection.filter(i => foundry.utils.getProperty(i, nameKeyPath) === name);
   const type = game.i18n.localize(`DOCUMENT.${documentType}`);
   if ( documents.length === 0 ) {
-    return ui.notifications.warn(game.i18n.format("MACRO.5eMissingTargetWarn", { actor: actor.name, type, name }));
+    ui.notifications.warn(game.i18n.format("MACRO.5eMissingTargetWarn", { actor: actor.name, type, name }));
+    return null;
   }
   if ( documents.length > 1 ) {
     ui.notifications.warn(game.i18n.format("MACRO.5eMultipleTargetsWarn", { actor: actor.name, type, name }));
@@ -21181,11 +25975,11 @@ function rollItem(itemName) {
 
 /**
  * Toggle an effect on and off when a macro is clicked.
- * @param {string} effectLabel       Label for the effect to be toggled.
+ * @param {string} effectName        Name of the effect to be toggled.
  * @returns {Promise<ActiveEffect>}  The effect after it has been toggled.
  */
-function toggleEffect(effectLabel) {
-  const effect = getMacroTarget(effectLabel, "ActiveEffect");
+function toggleEffect(effectName) {
+  const effect = getMacroTarget(effectName, "ActiveEffect");
   return effect?.update({disabled: !effect.disabled});
 }
 
@@ -21204,12 +25998,440 @@ var documents = /*#__PURE__*/Object.freeze({
   Actor5e: Actor5e,
   Item5e: Item5e,
   Proficiency: Proficiency,
+  SelectChoices: SelectChoices,
   TokenDocument5e: TokenDocument5e,
   Trait: trait,
-  advancement: _module$a,
+  advancement: _module$b,
   chat: chatMessage,
   combat: combat,
   macro: macro
+});
+
+/**
+ * Set up the custom text enricher.
+ */
+function registerCustomEnrichers() {
+  CONFIG.TextEditor.enrichers.push({
+    pattern: /\[\[\/(?<type>check|damage|save|skill|tool) (?<config>[^\]]+)]](?:{(?<label>[^}]+)})?/gi,
+    enricher: enrichString
+  });
+
+  document.body.addEventListener("click", rollAction);
+}
+
+/* -------------------------------------------- */
+
+/**
+ * Parse the enriched string and provide the appropriate content.
+ * @param {RegExpMatchArray} match       The regular expression match result.
+ * @param {EnrichmentOptions} options    Options provided to customize text enrichment.
+ * @returns {Promise<HTMLElement|null>}  An HTML element to insert in place of the matched text or null to
+ *                                       indicate that no replacement should be made.
+ */
+async function enrichString(match, options) {
+  let { type, config, label } = match.groups;
+  config = parseConfig(config, match.input);
+  config.input = match[0];
+  switch ( type.toLowerCase() ) {
+    case "damage": return enrichDamage(config, label, options);
+    case "check":
+    case "skill":
+    case "tool": return enrichCheck(config, label, options);
+    case "save": return enrichSave(config, label, options);
+  }
+  return match.input;
+}
+
+/* -------------------------------------------- */
+
+/**
+ * Parse a roll string into a configuration object.
+ * @param {string} match  Matched configuration string.
+ * @returns {object}
+ */
+function parseConfig(match) {
+  const config = { values: [] };
+  for ( const part of match.split(" ") ) {
+    if ( !part ) continue;
+    const [key, value] = part.split("=");
+    const valueLower = value?.toLowerCase();
+    if ( value === undefined ) config.values.push(key);
+    else if ( ["true", "false"].includes(valueLower) ) config[key] = valueLower === "true";
+    else if ( Number.isNumeric(value) ) config[key] = Number(value);
+    else config[key] = value;
+  }
+  return config;
+}
+
+/* -------------------------------------------- */
+/*  Enrichers                                   */
+/* -------------------------------------------- */
+
+/**
+ * Enrich an ability check link to perform a specific ability or skill check. If an ability is provided
+ * along with a skill, then the skill check will always use the provided ability. Otherwise it will use
+ * the character's default ability for that skill.
+ * @param {string[]} config            Configuration data.
+ * @param {string} [label]             Optional label to replace default text.
+ * @param {EnrichmentOptions} options  Options provided to customize text enrichment.
+ * @returns {HTMLElement|null}         An HTML link if the check could be built, otherwise null.
+ *
+ * @example Create a dexterity check:
+ * ```[[/check ability=dex]]```
+ * becomes
+ * ```html
+ * <a class="roll-action" data-type="check" data-ability="dex">
+ *   <i class="fa-solid fa-dice-d20"></i> Dexterity check
+ * </a>
+ * ```
+ *
+ * @example Create an acrobatics check with a DC and default ability:
+ * ```[[/check skill=acr dc=20]]```
+ * becomes
+ * ```html
+ * <a class="roll-action" data-type="check" data-skill="acr" data-dc="20">
+ *   <i class="fa-solid fa-dice-d20"></i> DC 20 Dexterity (Acrobatics) check
+ * </a>
+ * ```
+ *
+ * @example Create an acrobatics check using strength:
+ * ```[[/check ability=str skill=acr]]```
+ * becomes
+ * ```html
+ * <a class="roll-action" data-type="check" data-ability="str" data-skill="acr">
+ *   <i class="fa-solid fa-dice-d20"></i> Strength (Acrobatics) check
+ * </a>
+ * ```
+ *
+ * @example Create a tool check:
+ * ```[[/check tool=thief ability=int]]```
+ * becomes
+ * ```html
+ * <a class="roll-action" data-type="check" data-ability="int" data-tool="thief">
+ *   <i class="fa-solid fa-dice-d20"></i> Intelligence (Thieves' Tools) check
+ * </a>
+ * ```
+ *
+ * @example Formulas used for DCs will be resolved using data provided to the description (not the roller):
+ * ```[[/check ability=cha dc=@abilities.int.dc]]```
+ * becomes
+ * ```html
+ * <a class="roll-action" data-type="check" data-ability="cha" data-dc="15">
+ *   <i class="fa-solid fa-dice-d20"></i> DC 15 Charisma check
+ * </a>
+ * ```
+ */
+async function enrichCheck(config, label, options) {
+  for ( const value of config.values ) {
+    if ( value in CONFIG.DND5E.enrichmentLookup.abilities ) config.ability = value;
+    else if ( value in CONFIG.DND5E.enrichmentLookup.skills ) config.skill = value;
+    else if ( value in CONFIG.DND5E.enrichmentLookup.tools ) config.tool = value;
+    else if ( Number.isNumeric(value) ) config.dc = Number(value);
+    else config[value] = true;
+  }
+
+  let invalid = false;
+
+  const skillConfig = CONFIG.DND5E.enrichmentLookup.skills[config.skill];
+  if ( config.skill && !skillConfig ) {
+    console.warn(`Skill ${config.skill} not found while enriching ${config.input}.`);
+    invalid = true;
+  } else if ( config.skill && !config.ability ) {
+    config.ability = skillConfig.ability;
+  }
+
+  const toolUUID = CONFIG.DND5E.enrichmentLookup.tools[config.tool];
+  const toolIndex = toolUUID ? getBaseItem(toolUUID, { indexOnly: true }) : null;
+  if ( config.tool && !toolIndex ) {
+    console.warn(`Tool ${config.tool} not found while enriching ${config.input}.`);
+    invalid = true;
+  }
+
+  let abilityConfig = CONFIG.DND5E.enrichmentLookup.abilities[config.ability];
+  if ( config.ability && !abilityConfig ) {
+    console.warn(`Ability ${ability} not found while enriching ${config.input}.`);
+    invalid = true;
+  } else if ( !abilityConfig ) {
+    console.warn(`No ability provided while enriching check ${config.input}.`);
+    invalid = true;
+  }
+
+  if ( config.dc && !Number.isNumeric(config.dc) ) config.dc = simplifyBonus(config.dc, options.rollData ?? {});
+
+  if ( invalid ) return config.input;
+
+  // Insert the icon and label into the link
+  if ( !label ) {
+    const ability = abilityConfig?.label;
+    const skill = skillConfig?.label;
+    const tool = toolIndex?.name;
+    if ( ability && (skill || tool) ) {
+      label = game.i18n.format("EDITOR.DND5E.Inline.SpecificCheck", { ability, type: skill ?? tool });
+    } else {
+      label = ability;
+    }
+    const longSuffix = config.format === "long" ? "Long" : "Short";
+    if ( config.passive ) {
+      label = game.i18n.format(`EDITOR.DND5E.Inline.DCPassive${longSuffix}`, { dc: config.dc, check: label });
+    } else {
+      if ( config.dc ) label = game.i18n.format("EDITOR.DND5E.Inline.DC", { dc: config.dc, check: label });
+      label = game.i18n.format(`EDITOR.DND5E.Inline.Check${longSuffix}`, { check: label });
+    }
+  }
+
+  if ( config.passive ) return createPassiveTag(label, config);
+  const type = config.skill ? "skill" : config.tool ? "tool" : "check";
+  return createRollLink(label, { type, ...config });
+}
+
+/* -------------------------------------------- */
+
+/**
+ * Enrich a damage link.
+ * @param {string[]} config            Configuration data.
+ * @param {string} [label]             Optional label to replace default text.
+ * @param {EnrichmentOptions} options  Options provided to customize text enrichment.
+ * @returns {HTMLElement|null}         An HTML link if the save could be built, otherwise null.
+ *
+ * @example Create a damage link:
+ * ```[[/damage 2d6 type=bludgeoning]]``
+ * becomes
+ * ```html
+ * <a class="roll-action" data-type="damage" data-formula="2d6" data-damage-type="bludgeoning">
+ *   <i class="fa-solid fa-dice-d20"></i> 2d6
+ * </a> bludgeoning
+ * ````
+ *
+ * @example Display the average:
+ * ```[[/damage 2d6 type=bludgeoning average=true]]``
+ * becomes
+ * ```html
+ * 7 (<a class="roll-action" data-type="damage" data-formula="2d6" data-damage-type="bludgeoning">
+ *   <i class="fa-solid fa-dice-d20"></i> 2d6
+ * </a>) bludgeoning
+ * ````
+ *
+ * @example Manually set the average & don't prefix the type:
+ * ```[[/damage 8d4dl force average=666]]``
+ * becomes
+ * ```html
+ * 666 (<a class="roll-action" data-type="damage" data-formula="8d4dl" data-damage-type="force">
+ *   <i class="fa-solid fa-dice-d20"></i> 8d4dl
+ * </a> force
+ * ````
+ */
+async function enrichDamage(config, label, options) {
+  const formulaParts = [];
+  if ( config.formula ) formulaParts.push(config.formula);
+  for ( const value of config.values ) {
+    if ( value in CONFIG.DND5E.damageTypes ) config.type = value;
+    else if ( value === "average" ) config.average = true;
+    else formulaParts.push(value);
+  }
+  config.formula = Roll.defaultImplementation.replaceFormulaData(formulaParts.join(" "), options.rollData ?? {});
+  if ( !config.formula ) return null;
+  config.damageType = config.type;
+  config.type = "damage";
+
+  if ( label ) return createRollLink(label, config);
+
+  const localizationData = {
+    formula: createRollLink(config.formula, config).outerHTML,
+    type: game.i18n.localize(CONFIG.DND5E.damageTypes[config.damageType] ?? "").toLowerCase()
+  };
+
+  let localizationType = "Short";
+  if ( config.average ) {
+    localizationType = "Long";
+    if ( config.average === true ) {
+      const minRoll = Roll.create(config.formula).evaluate({ minimize: true, async: true });
+      const maxRoll = Roll.create(config.formula).evaluate({ maximize: true, async: true });
+      localizationData.average = Math.floor((await minRoll.total + await maxRoll.total) / 2);
+    } else if ( Number.isNumeric(config.average) ) {
+      localizationData.average = config.average;
+    }
+  }
+
+  const span = document.createElement("span");
+  span.innerHTML = game.i18n.format(`EDITOR.DND5E.Inline.Damage${localizationType}`, localizationData);
+  return span;
+}
+
+/* -------------------------------------------- */
+
+/**
+ * Enrich a saving throw link.
+ * @param {string[]} config            Configuration data.
+ * @param {string} [label]             Optional label to replace default text.
+ * @param {EnrichmentOptions} options  Options provided to customize text enrichment.
+ * @returns {HTMLElement|null}         An HTML link if the save could be built, otherwise null.
+ *
+ * @example Create a dexterity saving throw:
+ * ```[[/save ability=dex]]```
+ * becomes
+ * ```html
+ * <a class="roll-action" data-type="save" data-key="dex">
+ *   <i class="fa-solid fa-dice-d20"></i> Dexterity
+ * </a>
+ * ```
+ *
+ * @example Add a DC to the save:
+ * ```[[/save ability=dex dc=20]]```
+ * becomes
+ * ```html
+ * <a class="roll-action" data-type="save" data-key="dex" data-dc="20">
+ *   <i class="fa-solid fa-dice-d20"></i> DC 20 Dexterity
+ * </a>
+ * ```
+ */
+async function enrichSave(config, label, options) {
+  for ( const value of config.values ) {
+    if ( value in CONFIG.DND5E.enrichmentLookup.abilities ) config.ability = value;
+    else if ( Number.isNumeric(value) ) config.dc = Number(value);
+    else config[value] = true;
+  }
+
+  const abilityConfig = CONFIG.DND5E.enrichmentLookup.abilities[config.ability];
+  if ( !abilityConfig ) {
+    console.warn(`Ability ${config.ability} not found while enriching ${config.input}.`);
+    return config.input;
+  }
+
+  if ( config.dc && !Number.isNumeric(config.dc) ) config.dc = simplifyBonus(config.dc, options.rollData ?? {});
+
+  if ( !label ) {
+    label = abilityConfig.label;
+    if ( config.dc ) label = game.i18n.format("EDITOR.DND5E.Inline.DC", { dc: config.dc, check: label });
+    label = game.i18n.format(`EDITOR.DND5E.Inline.Save${config.format === "long" ? "Long" : "Short"}`, {
+      save: label
+    });
+  }
+
+  return createRollLink(label, { type: "save", ...config });
+}
+
+/* -------------------------------------------- */
+
+/**
+ * Add a dataset object to the provided element.
+ * @param {HTMLElement} element  Element to modify.
+ * @param {object} dataset       Data properties to add.
+ * @private
+ */
+function _addDataset(element, dataset) {
+  for ( const [key, value] of Object.entries(dataset) ) {
+    if ( !["input", "values"].includes(key) && value ) element.dataset[key] = value;
+  }
+}
+
+/* -------------------------------------------- */
+
+/**
+ * Create a passive skill tag.
+ * @param {string} label    Label to display.
+ * @param {object} dataset  Data that will be added to the tag.
+ * @returns {HTMLElement}
+ */
+function createPassiveTag(label, dataset) {
+  const span = document.createElement("span");
+  span.classList.add("passive-check");
+  _addDataset(span, dataset);
+  span.innerText = label;
+  return span;
+}
+
+/* -------------------------------------------- */
+
+/**
+ * Create a rollable link.
+ * @param {string} label    Label to display.
+ * @param {object} dataset  Data that will be added to the link for the rolling method.
+ * @returns {HTMLElement}
+ */
+function createRollLink(label, dataset) {
+  const link = document.createElement("a");
+  link.classList.add("roll-link");
+  _addDataset(link, dataset);
+  link.innerHTML = `<i class="fa-solid fa-dice-d20"></i> ${label}`;
+  return link;
+}
+
+/* -------------------------------------------- */
+/*  Actions                                     */
+/* -------------------------------------------- */
+
+/**
+ * Perform the provided roll action.
+ * @param {Event} event  The click event triggering the action.
+ * @returns {Promise|void}
+ */
+function rollAction(event) {
+  const target = event.target.closest(".roll-link");
+  if ( !target ) return;
+  event.stopPropagation();
+
+  const { type, ability, skill, tool, dc } = target.dataset;
+  const options = { event };
+  if ( dc ) options.targetValue = dc;
+
+  // Fetch the actor that should perform the roll
+  let actor;
+  const speaker = ChatMessage.implementation.getSpeaker();
+  if ( speaker.token ) actor = game.actors.tokens[speaker.token];
+  actor ??= game.actors.get(speaker.actor);
+  if ( !actor && (type !== "damage") ) {
+    ui.notifications.warn(game.i18n.localize("EDITOR.DND5E.Inline.NoActorWarning"));
+    return;
+  }
+
+  switch ( type ) {
+    case "check":
+      return actor.rollAbilityTest(ability, options);
+    case "damage":
+      return rollDamage(event, speaker);
+    case "save":
+      return actor.rollAbilitySave(ability, options);
+    case "skill":
+      if ( ability ) options.ability = ability;
+      return actor.rollSkill(skill, options);
+    case "tool":
+      options.ability = ability;
+      return actor.rollToolCheck(tool, options);
+    default:
+      return console.warn(`DnD5e | Unknown roll type ${type} provided.`);
+  }
+}
+
+/* -------------------------------------------- */
+
+/**
+ * Perform a damage roll.
+ * @param {Event} event              The click event triggering the action.
+ * @param {TokenDocument} [speaker]  Currently selected token, if one exists.
+ * @returns {Promise|void}
+ */
+async function rollDamage(event, speaker) {
+  const target = event.target.closest(".roll-link");
+  const { formula, damageType } = target.dataset;
+
+  const title = game.i18n.localize("DND5E.DamageRoll");
+  const messageData = { "flags.dnd5e.roll.type": "damage", speaker };
+  const rollConfig = {
+    parts: [formula],
+    flavor: `${title} (${game.i18n.localize(CONFIG.DND5E.damageTypes[damageType] ?? damageType)})`,
+    event,
+    title,
+    messageData
+  };
+
+  if ( Hooks.call("dnd5e.preRollDamage", undefined, rollConfig) === false ) return;
+  const roll = await damageRoll(rollConfig);
+  if ( roll ) Hooks.callAll("dnd5e.rollDamage", undefined, roll);
+}
+
+var enrichers = /*#__PURE__*/Object.freeze({
+  __proto__: null,
+  registerCustomEnrichers: registerCustomEnrichers
 });
 
 /**
@@ -21227,11 +26449,15 @@ const migrateWorld = async function() {
     .concat(Array.from(game.actors.invalidDocumentIds).map(id => [game.actors.getInvalid(id), false]));
   for ( const [actor, valid] of actors ) {
     try {
+      const flags = { persistSourceMigration: false };
       const source = valid ? actor.toObject() : game.data.actors.find(a => a._id === actor.id);
-      const updateData = migrateActorData(source, migrationData);
+      let updateData = migrateActorData(source, migrationData, flags);
       if ( !foundry.utils.isEmpty(updateData) ) {
         console.log(`Migrating Actor document ${actor.name}`);
-        await actor.update(updateData, {enforceTypes: false, diff: valid});
+        if ( flags.persistSourceMigration ) {
+          updateData = foundry.utils.mergeObject(source, updateData, {inplace: false});
+        }
+        await actor.update(updateData, {enforceTypes: false, diff: valid && !flags.persistSourceMigration});
       }
     } catch(err) {
       err.message = `Failed dnd5e system migration for Actor ${actor.name}: ${err.message}`;
@@ -21244,11 +26470,15 @@ const migrateWorld = async function() {
     .concat(Array.from(game.items.invalidDocumentIds).map(id => [game.items.getInvalid(id), false]));
   for ( const [item, valid] of items ) {
     try {
+      const flags = { persistSourceMigration: false };
       const source = valid ? item.toObject() : game.data.items.find(i => i._id === item.id);
-      const updateData = migrateItemData(source, migrationData);
+      let updateData = migrateItemData(source, migrationData, flags);
       if ( !foundry.utils.isEmpty(updateData) ) {
         console.log(`Migrating Item document ${item.name}`);
-        await item.update(updateData, {enforceTypes: false, diff: valid});
+        if ( flags.persistSourceMigration ) {
+          updateData = foundry.utils.mergeObject(source, updateData, {inplace: false});
+        }
+        await item.update(updateData, {enforceTypes: false, diff: valid && !flags.persistSourceMigration});
       }
     } catch(err) {
       err.message = `Failed dnd5e system migration for Item ${item.name}: ${err.message}`;
@@ -21266,6 +26496,20 @@ const migrateWorld = async function() {
       }
     } catch(err) {
       err.message = `Failed dnd5e system migration for Macro ${m.name}: ${err.message}`;
+      console.error(err);
+    }
+  }
+
+  // Migrate World Roll Tables
+  for ( const table of game.tables ) {
+    try {
+      const updateData = migrateRollTableData(table.toObject(), migrationData);
+      if ( !foundry.utils.isEmpty(updateData) ) {
+        console.log(`Migrating RollTable document ${table.name}`);
+        await table.update(updateData, { enforceTypes: false });
+      }
+    } catch(err) {
+      err.message = `Failed dnd5e system migration for RollTable ${table.name}: ${err.message}`;
       console.error(err);
     }
   }
@@ -21324,21 +26568,24 @@ const migrateCompendium = async function(pack) {
   for ( let doc of documents ) {
     let updateData = {};
     try {
+      const flags = { persistSourceMigration: false };
+      const source = doc.toObject();
       switch (documentName) {
         case "Actor":
-          updateData = migrateActorData(doc.toObject(), migrationData);
+          updateData = migrateActorData(source, migrationData, flags);
           break;
         case "Item":
-          updateData = migrateItemData(doc.toObject(), migrationData);
+          updateData = migrateItemData(source, migrationData, flags);
           break;
         case "Scene":
-          updateData = migrateSceneData(doc.toObject(), migrationData);
+          updateData = migrateSceneData(source, migrationData, flags);
           break;
       }
 
       // Save the entry, if data was changed
       if ( foundry.utils.isEmpty(updateData) ) continue;
-      await doc.update(updateData);
+      if ( flags.persistSourceMigration ) updateData = foundry.utils.mergeObject(source, updateData);
+      await doc.update(updateData, { diff: !flags.persistSourceMigration });
       console.log(`Migrated ${documentName} document ${doc.name} in Compendium ${pack.collection}`);
     }
 
@@ -21447,12 +26694,14 @@ const migrateArmorClass = async function(pack) {
  * Return an Object of updateData to be applied
  * @param {object} actor            The actor data object to update
  * @param {object} [migrationData]  Additional data to perform the migration
+ * @param {object} [flags={}]       Track the needs migration flag.
  * @returns {object}                The updateData to apply
  */
-const migrateActorData = function(actor, migrationData) {
+const migrateActorData = function(actor, migrationData, flags={}) {
   const updateData = {};
   _migrateTokenImage(actor, updateData);
   _migrateActorAC(actor, updateData);
+  _migrateActorMovementSenses(actor, updateData);
 
   // Migrate embedded effects
   if ( actor.effects ) {
@@ -21465,19 +26714,34 @@ const migrateActorData = function(actor, migrationData) {
   const items = actor.items.reduce((arr, i) => {
     // Migrate the Owned Item
     const itemData = i instanceof CONFIG.Item.documentClass ? i.toObject() : i;
-    let itemUpdate = migrateItemData(itemData, migrationData);
+    const itemFlags = { persistSourceMigration: false };
+    let itemUpdate = migrateItemData(itemData, migrationData, itemFlags);
+
+    if ( (itemData.type === "background") && (actor.system?.details?.background !== itemData._id) ) {
+      updateData["system.details.background"] = itemData._id;
+    }
 
     // Prepared, Equipped, and Proficient for NPC actors
     if ( actor.type === "npc" ) {
       if (foundry.utils.getProperty(itemData.system, "preparation.prepared") === false) itemUpdate["system.preparation.prepared"] = true;
       if (foundry.utils.getProperty(itemData.system, "equipped") === false) itemUpdate["system.equipped"] = true;
-      if (foundry.utils.getProperty(itemData.system, "proficient") === false) itemUpdate["system.proficient"] = true;
     }
 
     // Update the Owned Item
     if ( !foundry.utils.isEmpty(itemUpdate) ) {
-      itemUpdate._id = itemData._id;
-      arr.push(foundry.utils.expandObject(itemUpdate));
+      if ( itemFlags.persistSourceMigration ) {
+        itemUpdate = foundry.utils.mergeObject(itemData, itemUpdate, {inplace: false});
+        flags.persistSourceMigration = true;
+      }
+      arr.push({ ...itemUpdate, _id: itemData._id });
+    }
+
+    // Update tool expertise.
+    if ( actor.system.tools ) {
+      const hasToolProf = itemData.system.baseItem in actor.system.tools;
+      if ( (itemData.type === "tool") && (itemData.system.proficient > 1) && hasToolProf ) {
+        updateData[`system.tools.${itemData.system.baseItem}.value`] = itemData.system.proficient;
+      }
     }
 
     return arr;
@@ -21494,9 +26758,10 @@ const migrateActorData = function(actor, migrationData) {
  *
  * @param {object} item             Item data to migrate
  * @param {object} [migrationData]  Additional data to perform the migration
+ * @param {object} [flags={}]       Track the needs migration flag.
  * @returns {object}                The updateData to apply
  */
-function migrateItemData(item, migrationData) {
+function migrateItemData(item, migrationData, flags={}) {
   const updateData = {};
   _migrateDocumentIcon(item, updateData, migrationData);
 
@@ -21504,6 +26769,11 @@ function migrateItemData(item, migrationData) {
   if ( item.effects ) {
     const effects = migrateEffects(item, migrationData);
     if ( effects.length > 0 ) updateData.effects = effects;
+  }
+
+  if ( foundry.utils.getProperty(item, "flags.dnd5e.persistSourceMigration") ) {
+    flags.persistSourceMigration = true;
+    updateData["flags.dnd5e.-=persistSourceMigration"] = null;
   }
 
   return updateData;
@@ -21563,6 +26833,31 @@ const migrateMacroData = function(macro, migrationData) {
 /* -------------------------------------------- */
 
 /**
+ * Migrate a single RollTable document to incorporate the latest data model changes.
+ * @param {object} table            Roll table data to migrate.
+ * @param {object} [migrationData]  Additional data to perform the migration.
+ * @returns {object}                The update delta to apply.
+ */
+function migrateRollTableData(table, migrationData) {
+  const updateData = {};
+  _migrateDocumentIcon(table, updateData, migrationData);
+  if ( !table.results?.length ) return updateData;
+  const results = table.results.reduce((arr, result) => {
+    const resultUpdate = {};
+    _migrateDocumentIcon(result, resultUpdate, migrationData);
+    if ( !foundry.utils.isEmpty(resultUpdate) ) {
+      resultUpdate._id = result._id;
+      arr.push(foundry.utils.expandObject(resultUpdate));
+    }
+    return arr;
+  }, []);
+  if ( results.length ) updateData.results = results;
+  return updateData;
+}
+
+/* -------------------------------------------- */
+
+/**
  * Migrate a single Scene document to incorporate changes to the data model of it's actor data overrides
  * Return an Object of updateData to be applied
  * @param {object} scene            The Scene data to Update
@@ -21575,28 +26870,25 @@ const migrateSceneData = function(scene, migrationData) {
     const update = {};
     _migrateTokenImage(t, update);
     if ( Object.keys(update).length ) foundry.utils.mergeObject(t, update);
-    if ( !t.actorId || t.actorLink ) {
-      t.actorData = {};
-    }
-    else if ( !game.actors.has(t.actorId) ) {
-      t.actorId = null;
-      t.actorData = {};
-    }
+    if ( !game.actors.has(t.actorId) ) t.actorId = null;
+    if ( !t.actorId || t.actorLink ) t.actorData = {};
     else if ( !t.actorLink ) {
-      const actorData = duplicate(t.actorData);
+      const actorData = token.delta?.toObject() ?? foundry.utils.deepClone(t.actorData);
       actorData.type = token.actor?.type;
       const update = migrateActorData(actorData, migrationData);
-      ["items", "effects"].forEach(embeddedName => {
-        if (!update[embeddedName]?.length) return;
-        const updates = new Map(update[embeddedName].map(u => [u._id, u]));
-        t.actorData[embeddedName].forEach(original => {
-          const update = updates.get(original._id);
-          if (update) foundry.utils.mergeObject(original, update);
+      if ( game.dnd5e.isV10 ) {
+        ["items", "effects"].forEach(embeddedName => {
+          if ( !update[embeddedName]?.length ) return;
+          const updates = new Map(update[embeddedName].map(u => [u._id, u]));
+          t.actorData[embeddedName].forEach(original => {
+            const update = updates.get(original._id);
+            if ( update ) foundry.utils.mergeObject(original, update);
+          });
+          delete update[embeddedName];
         });
-        delete update[embeddedName];
-      });
-
-      foundry.utils.mergeObject(t.actorData, update);
+        foundry.utils.mergeObject(t.actorData, update);
+      }
+      else t.delta = update;
     }
     return t;
   });
@@ -21662,6 +26954,29 @@ function _migrateActorAC(actorData, updateData) {
     }
   }
 
+  return updateData;
+}
+
+/* -------------------------------------------- */
+
+/**
+ * Migrate the actor movement & senses to replace `0` with `null`.
+ * @param {object} actorData   Actor data being migrated.
+ * @param {object} updateData  Existing updates being applied to actor. *Will be mutated.*
+ * @returns {object}           Modified version of update data.
+ * @private
+ */
+function _migrateActorMovementSenses(actorData, updateData) {
+  if ( actorData._stats?.systemVersion && foundry.utils.isNewerVersion("2.4.0", actorData._stats.systemVersion) ) {
+    for ( const key of Object.keys(CONFIG.DND5E.movementTypes) ) {
+      const keyPath = `system.attributes.movement.${key}`;
+      if ( foundry.utils.getProperty(actorData, keyPath) === 0 ) updateData[keyPath] = null;
+    }
+    for ( const key of Object.keys(CONFIG.DND5E.senses) ) {
+      const keyPath = `system.attributes.senses.${key}`;
+      if ( foundry.utils.getProperty(actorData, keyPath) === 0 ) updateData[keyPath] = null;
+    }
+  }
   return updateData;
 }
 
@@ -21783,6 +27098,7 @@ var migrations = /*#__PURE__*/Object.freeze({
   migrateEffects: migrateEffects,
   migrateItemData: migrateItemData,
   migrateMacroData: migrateMacroData,
+  migrateRollTableData: migrateRollTableData,
   migrateSceneData: migrateSceneData,
   migrateWorld: migrateWorld,
   purgeFlags: purgeFlags,
@@ -21800,6 +27116,7 @@ var migrations = /*#__PURE__*/Object.freeze({
  * Issue Tracker: https://github.com/foundryvtt/dnd5e/issues
  */
 
+
 /* -------------------------------------------- */
 /*  Define Module Structure                     */
 /* -------------------------------------------- */
@@ -21811,6 +27128,7 @@ globalThis.dnd5e = {
   dataModels,
   dice,
   documents,
+  enrichers,
   migrations,
   utils
 };
@@ -21822,42 +27140,6 @@ globalThis.dnd5e = {
 Hooks.once("init", function() {
   globalThis.dnd5e = game.dnd5e = Object.assign(game.system, globalThis.dnd5e);
   console.log(`DnD5e | Initializing the DnD5e Game System - Version ${dnd5e.version}\n${DND5E.ASCII}`);
-
-  /** @deprecated */
-  Object.defineProperty(dnd5e, "entities", {
-    get() {
-      foundry.utils.logCompatibilityWarning(
-        "You are referencing the 'dnd5e.entities' property which has been deprecated and renamed to "
-        + "'dnd5e.documents'. Support for this old path will be removed in a future version.",
-        { since: "DnD5e 2.0", until: "DnD5e 2.2" }
-      );
-      return dnd5e.documents;
-    }
-  });
-
-  /** @deprecated */
-  Object.defineProperty(dnd5e, "rollItemMacro", {
-    get() {
-      foundry.utils.logCompatibilityWarning(
-        "You are referencing the 'dnd5e.rollItemMacro' method which has been deprecated and renamed to "
-        + "'dnd5e.documents.macro.rollItem'. Support for this old path will be removed in a future version.",
-        { since: "DnD5e 2.0", until: "DnD5e 2.2" }
-      );
-      return dnd5e.documents.macro.rollItem;
-    }
-  });
-
-  /** @deprecated */
-  Object.defineProperty(dnd5e, "macros", {
-    get() {
-      foundry.utils.logCompatibilityWarning(
-        "You are referencing the 'dnd5e.macros' property which has been deprecated and renamed to "
-        + "'dnd5e.documents.macro'. Support for this old path will be removed in a future version.",
-        { since: "DnD5e 2.0", until: "DnD5e 2.2" }
-      );
-      return dnd5e.documents.macro;
-    }
-  });
 
   // Record Configuration Values
   CONFIG.DND5E = DND5E;
@@ -21871,25 +27153,24 @@ Hooks.once("init", function() {
   CONFIG.Dice.D20Roll = D20Roll;
   CONFIG.MeasuredTemplate.defaults.angle = 53.13; // 5e cone RAW should be 53.13 degrees
   CONFIG.ui.combat = CombatTracker5e;
+  game.dnd5e.isV10 = game.release.generation < 11;
 
   // Register System Settings
   registerSystemSettings();
 
   // Validation strictness.
-  _determineValidationStrictness();
+  if ( game.dnd5e.isV10 ) _determineValidationStrictness();
 
   // Configure module art.
   game.dnd5e.moduleArt = new ModuleArt();
 
   // Remove honor & sanity from configuration if they aren't enabled
-  if ( !game.settings.get("dnd5e", "honorScore") ) {
-    delete DND5E.abilities.hon;
-    delete DND5E.abilityAbbreviations.hon;
-  }
-  if ( !game.settings.get("dnd5e", "sanityScore") ) {
-    delete DND5E.abilities.san;
-    delete DND5E.abilityAbbreviations.san;
-  }
+  if ( !game.settings.get("dnd5e", "honorScore") ) delete DND5E.abilities.hon;
+  if ( !game.settings.get("dnd5e", "sanityScore") ) delete DND5E.abilities.san;
+
+  // Configure trackable & consumable attributes.
+  _configureTrackableAttributes();
+  _configureConsumableAttributes();
 
   // Patch Core Functions
   Combatant.prototype.getInitiativeRoll = getInitiativeRoll;
@@ -21899,9 +27180,10 @@ Hooks.once("init", function() {
   CONFIG.Dice.rolls.push(DamageRoll);
 
   // Hook up system data types
-  CONFIG.Actor.systemDataModels = config$2;
-  CONFIG.Item.systemDataModels = config$1;
-  CONFIG.JournalEntryPage.systemDataModels = config;
+  const modelType = game.dnd5e.isV10 ? "systemDataModels" : "dataModels";
+  CONFIG.Actor[modelType] = config$2;
+  CONFIG.Item[modelType] = config$1;
+  CONFIG.JournalEntryPage[modelType] = config;
 
   // Register sheet application classes
   Actors.unregisterSheet("core", ActorSheet);
@@ -21939,6 +27221,8 @@ Hooks.once("init", function() {
   // Preload Handlebars helpers & partials
   registerHandlebarsHelpers();
   preloadHandlebarsTemplates();
+
+  registerCustomEnrichers();
 });
 
 /**
@@ -21955,13 +27239,78 @@ function _determineValidationStrictness() {
  */
 async function _configureValidationStrictness() {
   if ( !game.user.isGM ) return;
-  const invalidDocuments = game.actors.invalidDocumentIds.size + game.items.invalidDocumentIds.size;
+  const invalidDocuments = game.actors.invalidDocumentIds.size + game.items.invalidDocumentIds.size
+    + game.scenes.invalidDocumentIds.size;
   const strictValidation = game.settings.get("dnd5e", "strictValidation");
   if ( invalidDocuments && strictValidation ) {
     await game.settings.set("dnd5e", "strictValidation", false);
     game.socket.emit("reload");
     foundry.utils.debouncedReload();
   }
+}
+
+/**
+ * Configure explicit lists of attributes that are trackable on the token HUD and in the combat tracker.
+ * @internal
+ */
+function _configureTrackableAttributes() {
+  const common = {
+    bar: [],
+    value: [
+      ...Object.keys(DND5E.abilities).map(ability => `abilities.${ability}.value`),
+      ...Object.keys(DND5E.movementTypes).map(movement => `attributes.movement.${movement}`),
+      "attributes.ac.value", "attributes.init.total"
+    ]
+  };
+
+  const creature = {
+    bar: [...common.bar, "attributes.hp", "spells.pact"],
+    value: [
+      ...common.value,
+      ...Object.keys(DND5E.skills).map(skill => `skills.${skill}.passive`),
+      ...Object.keys(DND5E.senses).map(sense => `attributes.senses.${sense}`),
+      "attributes.spelldc"
+    ]
+  };
+
+  CONFIG.Actor.trackableAttributes = {
+    character: {
+      bar: [...creature.bar, "resources.primary", "resources.secondary", "resources.tertiary", "details.xp"],
+      value: [...creature.value]
+    },
+    npc: {
+      bar: [...creature.bar, "resources.legact", "resources.legres"],
+      value: [...creature.value, "details.cr", "details.spellLevel", "details.xp.value"]
+    },
+    vehicle: {
+      bar: [...common.bar, "attributes.hp"],
+      value: [...common.value]
+    },
+    group: {
+      bar: [],
+      value: []
+    }
+  };
+}
+
+/**
+ * Configure which attributes are available for item consumption.
+ * @internal
+ */
+function _configureConsumableAttributes() {
+  CONFIG.DND5E.consumableResources = [
+    ...Object.keys(DND5E.abilities).map(ability => `abilities.${ability}.value`),
+    "attributes.ac.flat",
+    "attributes.hp.value",
+    ...Object.keys(DND5E.senses).map(sense => `attributes.senses.${sense}`),
+    ...Object.keys(DND5E.movementTypes).map(type => `attributes.movement.${type}`),
+    ...Object.keys(DND5E.currencies).map(denom => `currency.${denom}`),
+    "details.xp.value",
+    "resources.primary.value", "resources.secondary.value", "resources.tertiary.value",
+    "resources.legact.value", "resources.legres.value",
+    "spells.pact.value",
+    ...Array.fromRange(Object.keys(DND5E.spellLevels).length - 1, 1).map(level => `spells.spell${level}.value`)
+  ];
 }
 
 /* -------------------------------------------- */
@@ -21973,8 +27322,13 @@ async function _configureValidationStrictness() {
  */
 Hooks.once("setup", function() {
   CONFIG.DND5E.trackableAttributes = expandAttributeList(CONFIG.DND5E.trackableAttributes);
-  CONFIG.DND5E.consumableResources = expandAttributeList(CONFIG.DND5E.consumableResources);
   game.dnd5e.moduleArt.registerModuleArt();
+
+  // Apply custom compendium styles to the SRD rules compendium.
+  if ( !game.dnd5e.isV10 ) {
+    const rules = game.packs.get("dnd5e.rules");
+    rules.applicationClass = SRDCompendium;
+  }
 });
 
 /* --------------------------------------------- */
@@ -22006,12 +27360,14 @@ Hooks.once("i18nInit", () => performPreLocalization(CONFIG.DND5E));
  * Once the entire VTT framework is initialized, check to see if we should perform a data migration
  */
 Hooks.once("ready", function() {
-  // Configure validation strictness.
-  _configureValidationStrictness();
+  if ( game.dnd5e.isV10 ) {
+    // Configure validation strictness.
+    _configureValidationStrictness();
 
-  // Apply custom compendium styles to the SRD rules compendium.
-  const rules = game.packs.get("dnd5e.rules");
-  rules.apps = [new SRDCompendium(rules)];
+    // Apply custom compendium styles to the SRD rules compendium.
+    const rules = game.packs.get("dnd5e.rules");
+    rules.apps = [new SRDCompendium(rules)];
+  }
 
   // Wait to register hotbar drop hook on ready so that modules could register earlier if they want to
   Hooks.on("hotbarDrop", (bar, data, slot) => {
@@ -22030,7 +27386,7 @@ Hooks.once("ready", function() {
 
   // Perform the migration
   if ( cv && isNewerVersion(game.system.flags.compatibleMigrationVersion, cv) ) {
-    ui.notifications.error(game.i18n.localize("MIGRATION.5eVersionTooOldWarning"), {permanent: true});
+    ui.notifications.error("MIGRATION.5eVersionTooOldWarning", {localize: true, permanent: true});
   }
   migrateWorld();
 });
@@ -22055,5 +27411,5 @@ Hooks.on("renderChatLog", (app, html, data) => Item5e.chatListeners(html));
 Hooks.on("renderChatPopout", (app, html, data) => Item5e.chatListeners(html));
 Hooks.on("getActorDirectoryEntryContext", Actor5e.addDirectoryContextOptions);
 
-export { DND5E, applications, canvas$1 as canvas, dataModels, dice, documents, migrations, utils };
+export { DND5E, applications, canvas$1 as canvas, dataModels, dice, documents, enrichers, migrations, utils };
 //# sourceMappingURL=dnd5e-compiled.mjs.map

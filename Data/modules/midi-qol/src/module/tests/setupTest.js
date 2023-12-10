@@ -1,12 +1,12 @@
 import { applySettings } from "../apps/ConfigPanel.js";
-import { completeItemUse } from "../utils.js";
+import { applyTokenDamage, completeItemUse } from "../utils.js";
 const actor1Name = "actor1";
 const actor2Name = "actor2";
 const target1Name = "Orc1";
 const target2Name = "Orc2";
 const target3Name = "Skeleton1";
 export async function busyWait(seconds) {
-	await (new Promise(resolve => setTimeout(resolve, seconds * 1000)));
+	return (new Promise(resolve => setTimeout(resolve, seconds * 1000)));
 }
 export async function resetActors() {
 	for (let name of [actor1Name, actor2Name, target1Name, target2Name, target3Name]) {
@@ -22,14 +22,16 @@ export function getToken(tokenName) {
 export function getActor(tokenName) {
 	const token = getToken(tokenName);
 	if (token?.actor) {
-		token.actor.prepareData();
+		//@ts-expect-error
+		token.actor._initialize();
 		return token.actor;
 	}
 	;
 	const actor = game.actors?.getName(tokenName);
 	if (!actor)
 		throw new Error(`No such actor ${tokenName}`);
-	actor?.prepareData();
+	//@ts-expect-error
+	actor?._initialize();
 	return actor;
 }
 export function getActorItem(actor, itemName) {
@@ -42,7 +44,7 @@ export function setupMidiTests() {
 	if (!game?.user?.isGM)
 		return;
 	//@ts-ignore .title v10
-	if (game.world.title !== "midi tests - quench")
+	if (!game.world.title.toLocaleLowerCase().includes("quench"))
 		return;
 	const actor1 = getActor(actor1Name);
 	const actor2 = getActor(actor2Name);
@@ -69,14 +71,14 @@ async function registerTests() {
 					await resetActors();
 					const actor = getActor(actor2Name);
 					const target = getToken(target1Name);
-					assert(target && !!target?.actor);
+					// assert(target && !!target?.actor)
 					game.user?.updateTokenTargets([target?.id ?? ""]);
 					const item = getActorItem(actor, "Toll the Dead");
 					if (target?.actor)
 						await target.actor.setFlag("midi-qol", "fail.ability.save.all", true);
 					try {
 						const workflow = await completeItemUse(item);
-						target?.actor?.unsetFlag("midi-qol", "fail.ability.save.all");
+						await target?.actor?.unsetFlag("midi-qol", "fail.ability.save.all");
 						assert.ok(!!workflow);
 					}
 					catch (err) {
@@ -94,31 +96,31 @@ async function registerTests() {
 			describe("skill roll tests", function () {
 				it("roll perception - 1 dice", function () {
 					return actor.rollSkill("prc", { chatMessage: false, fastForward: true })
-						// .then(skillRoll => { actor.prepareData(); assert.equal(skillRoll.terms[0].number, 1) });
-						.then(skillRoll => { actor.prepareData(); expect(skillRoll.terms[0].number).to.equal(1); });
+						// .then(skillRoll => { actor._initialize(); assert.equal(skillRoll.terms[0].number, 1) });
+						.then(skillRoll => { actor._initialize(); expect(skillRoll.terms[0].number).to.equal(1); });
 				});
 				it("roll perception - adv.all", async function () {
 					setProperty(actor, "flags.midi-qol.advantage.all", true);
 					const result = await actor.rollSkill("prc", { chatMessage: false, fastForward: true })
-						.then(skillRoll => { delete actor.flags["midi-qol"].advantage.all; actor.prepareData(); assert.equal(skillRoll.terms[0].number, 2); });
+						.then(skillRoll => { delete actor.flags["midi-qol"].advantage.all; actor._initialize(); assert.equal(skillRoll.terms[0].number, 2); });
 					return result;
 				});
 				it("roll perception - adv.skill.all", async function () {
 					setProperty(actor, "flags.midi-qol.advantage.skill.all", true);
 					const result = await actor.rollSkill("prc", { chatMessage: false, fastForward: true })
-						.then(skillRoll => { delete actor.flags["midi-qol"].advantage.skill.all; actor.prepareData(); assert.equal(skillRoll.terms[0].number, 2); });
+						.then(skillRoll => { delete actor.flags["midi-qol"].advantage.skill.all; actor._initialize(); assert.equal(skillRoll.terms[0].number, 2); });
 					return result;
 				});
 				it("roll perception - adv.skill.prc", async function () {
 					setProperty(actor, "flags.midi-qol.advantage.skill.prc", true);
 					const result = await actor.rollSkill("prc", { chatMessage: false, fastForward: true })
-						.then(skillRoll => { delete actor.flags["midi-qol"].advantage.skill.prc; actor.prepareData(); assert.equal(skillRoll.terms[0].number, 2); });
+						.then(skillRoll => { delete actor.flags["midi-qol"].advantage.skill.prc; actor._initialize(); assert.equal(skillRoll.terms[0].number, 2); });
 					return result;
 				});
 				it("roll perception - adv.skill.ath", async function () {
 					setProperty(actor, "flags.midi-qol.advantage.skill.ath", true);
 					return actor.rollSkill("prc", { chatMessage: false, fastForward: true })
-						.then(skillRoll => { delete actor.flags["midi-qol"].advantage.skill.ath; actor.prepareData(); assert.equal(skillRoll.terms[0].number, 1); });
+						.then(skillRoll => { delete actor.flags["midi-qol"].advantage.skill.ath; actor._initialize(); assert.equal(skillRoll.terms[0].number, 1); });
 				});
 				it("roll acr skill min = 10", async function () {
 					for (let i = 0; i < 20; i++) {
@@ -186,27 +188,27 @@ async function registerTests() {
 			describe("save roll tests", function () {
 				it("roll dex save - 1 dice", async function () {
 					return actor.rollAbilitySave("dex", { chatMessage: false, fastForward: true })
-						.then(abilitySave => { actor.prepareData(); assert.equal(abilitySave.terms[0].number, 1); });
+						.then(abilitySave => { actor._initialize(); assert.equal(abilitySave.terms[0].number, 1); });
 				});
 				it("roll dex save - adv.all", async function () {
 					setProperty(actor, "flags.midi-qol.advantage.all", true);
 					return actor.rollAbilitySave("dex", { chatMessage: false, fastForward: true })
-						.then(abilitySave => { delete actor.flags["midi-qol"].advantage.all; actor.prepareData(); assert.equal(abilitySave.terms[0].number, 2); });
+						.then(abilitySave => { delete actor.flags["midi-qol"].advantage.all; actor._initialize(); assert.equal(abilitySave.terms[0].number, 2); });
 				});
 				it("roll dex save - adv.ability.save.all", async function () {
 					setProperty(actor, "flags.midi-qol.advantage.ability.save.all", true);
 					return actor.rollAbilitySave("dex", { chatMessage: false, fastForward: true })
-						.then(abilitySave => { delete actor.flags["midi-qol"].advantage.ability.save.all; actor.prepareData(); assert.equal(abilitySave.terms[0].number, 2); });
+						.then(abilitySave => { delete actor.flags["midi-qol"].advantage.ability.save.all; actor._initialize(); assert.equal(abilitySave.terms[0].number, 2); });
 				});
 				it("roll dex save - adv.ability.save.dex", async function () {
 					setProperty(actor, "flags.midi-qol.advantage.ability.save.dex", true);
 					return actor.rollAbilitySave("dex", { chatMessage: false, fastForward: true })
-						.then(abilitySave => { delete actor.flags["midi-qol"].advantage.ability.save.dex; actor.prepareData(); assert.equal(abilitySave.terms[0].number, 2); });
+						.then(abilitySave => { delete actor.flags["midi-qol"].advantage.ability.save.dex; actor._initialize(); assert.equal(abilitySave.terms[0].number, 2); });
 				});
 				it("roll dex save - adv.ability.save.str", async function () {
 					setProperty(actor, "flags.midi-qol.advantage.ability.save.str", true);
 					return actor.rollAbilitySave("dex", { chatMessage: false, fastForward: true })
-						.then(abilitySave => { delete actor.flags["midi-qol"].advantage.ability.save.dex; actor.prepareData(); assert.equal(abilitySave.terms[0].number, 1); });
+						.then(abilitySave => { delete actor.flags["midi-qol"].advantage.ability.save.dex; actor._initialize(); assert.equal(abilitySave.terms[0].number, 1); });
 				});
 				it("roll str save min = 10", async function () {
 					for (let i = 0; i < 20; i++) {
@@ -293,10 +295,12 @@ async function registerTests() {
 						await cubInterface.removeCondition("Blinded", [target]);
 					assert.ok(!cubInterface.hasCondition("Blinded", [target]));
 					assert.ok(!!(await completeItemUse(actor.items.getName("Cub Test"))));
-					await busyWait(0.5);
+					//@ts-expect-error game.version
+					if (isNewerVersion("11.293", game.version))
+						await busyWait(0.5);
 					assert.ok(cubInterface.hasCondition("Blinded", [target]));
 					//@ts-ignore .label v10
-					const effect = target?.actor?.effects.find(e => e.label === "Cub Test");
+					const effect = target?.actor?.effects.find(e => (e.name || e.label) === "Cub Test");
 					results = await target?.actor?.deleteEmbeddedDocuments("ActiveEffect", [effect?.id ?? "bad"]);
 					// results = await globalThis.DAE.actionQueue.add(target.actor?.deleteEmbeddedDocuments.bind(target.actor),"ActiveEffect", [effect?.id ?? "bad"]);
 					await busyWait(0.5);
@@ -320,9 +324,10 @@ async function registerTests() {
 						await ceInterface.removeEffect({ effectName: "Deafened", uuid: target?.actor?.uuid });
 					assert.ok(!ceInterface.hasEffectApplied("Deafened", target?.actor?.uuid));
 					await completeItemUse(actor.items.getName("CE Test"));
+					await busyWait(0.5);
 					assert.ok(await ceInterface.hasEffectApplied("Deafened", target?.actor?.uuid));
 					//@ts-ignore .label v10
-					const effect = target?.actor?.effects.find(e => e.label === "CE Test");
+					const effect = target?.actor?.effects.find(e => (e.name || e.label) === "CE Test");
 					results = await target?.actor?.deleteEmbeddedDocuments("ActiveEffect", [effect?.id ?? "bad"]);
 					await busyWait(0.1);
 					if (await ceInterface.hasEffectApplied("Deafened", target?.actor?.uuid)) {
@@ -359,9 +364,9 @@ async function registerTests() {
 					game.user?.updateTokenTargets([target2?.id ?? "", target3?.id ?? ""]);
 					const target2hp = target2?.actor?.system.attributes.hp.value;
 					const target3hp = target3?.actor?.system.attributes.hp.value;
-					await completeItemUse(actor.items.getName("MODTest")); // does 10 + 10 to undead
-					const condition2 = target2.actor.effects.contents.filter(ef => ef.label === "Frightened");
-					const condition3 = target3.actor.effects.contents.filter(ef => ef.label === "Frightened");
+					await completeItemUse(actor.items.getName("MODTest"), {}, { advantage: true }); // does 10 + 10 to undead
+					const condition2 = target2.actor.effects.contents.filter(ef => (ef.name || ef.label) === "Frightened");
+					const condition3 = target3.actor.effects.contents.filter(ef => (ef.name || ef.label) === "Frightened");
 					if (condition2.length)
 						await target2.actor.deleteEmbeddedDocuments("ActiveEffect", condition2.map(ae => ae.id));
 					if (condition3.length)
@@ -380,8 +385,8 @@ async function registerTests() {
 					const target2hp = target2?.actor?.system.attributes.hp.value;
 					const target3hp = target3?.actor?.system.attributes.hp.value;
 					await completeItemUse(actor.items.getName("MODTestNoActivation")); // does 10 + 10 to undead
-					const condition2 = target2.actor.effects.contents.filter(ef => ef.label === "Frightened");
-					const condition3 = target3.actor.effects.contents.filter(ef => ef.label === "Frightened");
+					const condition2 = target2.actor.effects.contents.filter(ef => (ef.name || ef.label) === "Frightened");
+					const condition3 = target3.actor.effects.contents.filter(ef => (ef.name || ef.label) === "Frightened");
 					if (condition2.length)
 						await target2.actor.deleteEmbeddedDocuments("ActiveEffect", condition2.map(ae => ae.id));
 					if (condition3.length)
@@ -400,11 +405,11 @@ async function registerTests() {
 					assert.ok(target);
 					try {
 						//@ts-ignore .label v10
-						let hasEffect = actor.effects.filter(a => a.label === "Macro Execute Test") ?? [];
+						let hasEffect = actor.effects.filter(a => (a.name || a.label) === "Macro Execute Test") ?? [];
 						if (hasEffect?.length > 0)
 							await actor.deleteEmbeddedDocuments("ActiveEffect", hasEffect.map(e => e.id));
 						//@ts-ignore .label v10
-						hasEffect = target?.actor?.effects.filter(a => a.label === "Macro Execute Test") ?? [];
+						hasEffect = target?.actor?.effects.filter(a => (a.name || a.label) === "Macro Execute Test") ?? [];
 						if (hasEffect?.length > 0)
 							await target?.actor?.deleteEmbeddedDocuments("ActiveEffect", hasEffect.map(e => e.id));
 						game.user?.updateTokenTargets([target?.id ?? ""]);
@@ -413,19 +418,19 @@ async function registerTests() {
 						let flags = actor.flags["midi-qol"];
 						assert.equal(flags?.test, "metest");
 						//@ts-ignore .label v10
-						hasEffect = target?.actor?.effects.filter(a => a.label === "Macro Execute Test") ?? [];
+						hasEffect = target?.actor?.effects.filter(a => (a.name || a.label) === "Macro Execute Test") ?? [];
 						assert.ok(hasEffect);
 						await target?.actor?.deleteEmbeddedDocuments("ActiveEffect", hasEffect.map(e => e.id));
 						//@ts-ignore .flags v10
 						flags = getProperty(actor.flags, "midi-qol.test");
 						assert.ok(!flags?.test);
 						//@ts-ignore .label v10
-						hasEffect = target?.actor?.effects.filter(a => a.label === "Macro Execute Test") ?? [];
+						hasEffect = target?.actor?.effects.filter(a => (a.name || a.label) === "Macro Execute Test") ?? [];
 						assert.equal(hasEffect.length, 0);
 					}
 					finally {
 						//@ts-ignore .label v10
-						let hasEffect = target?.actor?.effects.filter(a => a.label === "Macro Execute Test") ?? [];
+						let hasEffect = target?.actor?.effects.filter(a => (a.name || a.label) === "Macro Execute Test") ?? [];
 						await target?.actor?.deleteEmbeddedDocuments("ActiveEffect", hasEffect.map(e => e.id));
 						await actor.unsetFlag("midi-qol", "test");
 					}
@@ -441,7 +446,7 @@ async function registerTests() {
 					assert.ok(globalThis.TokenMagic);
 					const theEffects = await actor.createEmbeddedDocuments("ActiveEffect", [effectData]);
 					//@ts-ignore .label v10
-					assert.ok(actor.effects.find(ef => ef.label === effectData.label));
+					assert.ok(actor.effects.find(ef => (ef.name || ef.label) === (effectData.name ?? effectData.label)));
 					await busyWait(3);
 					const actorToken = canvas?.tokens?.placeables.find(t => t.name === (actor.token?.name ?? actor.name));
 					assert.ok(actorToken, "found actor token");
@@ -473,7 +478,7 @@ async function registerTests() {
 					await completeItemUse(actor.items.getName("Longsword")); // Apply the effect
 					Hooks.off("OnUseMacroTest", hookid);
 					//@ts-ignore .label v10
-					let hasEffects = actor.effects.filter(a => a.label === "OnUseMacroTest") ?? [];
+					let hasEffects = actor.effects.filter(a => (a.name || a.label) === "OnUseMacroTest") ?? [];
 					assert.ok(hasEffects);
 					await actor.deleteEmbeddedDocuments("ActiveEffect", hasEffects.map(e => e.id));
 					console.error(macroPasses);
@@ -506,7 +511,7 @@ async function registerTests() {
 					await ceInterface.addEffect({ effectName: "Paralyzed", uuid: actor.uuid });
 					// assert.ok(await ceInterface.hasEffectApplied("Paralyzed", actor?.uuid));
 					//@ts-ignore .label v10
-					const theEffect = actor.effects.find(ef => ef.label === "Paralyzed");
+					const theEffect = actor.effects.find(ef => (ef.name || ef.label) === "Paralyzed");
 					assert.ok(theEffect, "not paralyzed");
 					//@ts-ignore .disabled v10
 					assert.ok(!theEffect?.disabled, "paralyzed disabled");
@@ -584,7 +589,7 @@ async function registerTests() {
 				});
 			});
 		}, { displayName: "Midi Over Time Tests" });
-		globalThis.quench.registerBatch("quench.midi-qol.otherTests", (context) => {
+		globalThis.quench.registerBatch("quench.midi-qol.midi-qol.flagTests", (context) => {
 			const { describe, it, assert } = context;
 			describe("midi flag tests", async function () {
 				it("sets advantage.all false", async function () {
@@ -647,6 +652,20 @@ async function registerTests() {
 					assert.ok(Number.isNumeric(getProperty(actor, "flags.midi-qol.DR.all")));
 					await actor.deleteEmbeddedDocuments("ActiveEffect", theEffects.map(ef => ef.id));
 					assert.ok(getProperty(actor, "flags.midi-qol.DR.all") === undefined);
+				});
+			});
+		}, { displayName: "Midi Flag Tests" });
+		globalThis.quench.registerBatch("quench.midi-qol.midi-qol.otherTests", (context) => {
+			const { describe, it, assert } = context;
+			describe("midi other tests", async function () {
+				it("tests applyTokenDamageMany", async function () {
+					await resetActors();
+					const token = getToken(target2Name);
+					const oldHp = getProperty(token?.actor ?? {}, "system.attributes.hp.value");
+					await applyTokenDamage([{ damage: 5, type: 'piercing' }], 5, new Set([token]), null, new Set(), {});
+					assert.equal(getProperty(token?.actor ?? {}, "system.attributes.hp.value"), oldHp - 5);
+					await applyTokenDamage([{ damage: 5, type: 'healing' }], 5, new Set([token]), null, new Set(), {});
+					assert.equal(getProperty(token?.actor ?? {}, "system.attributes.hp.value"), oldHp);
 				});
 			});
 		}, { displayName: "Midi Other Tests" });

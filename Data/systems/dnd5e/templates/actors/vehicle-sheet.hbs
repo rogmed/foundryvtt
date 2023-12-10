@@ -9,20 +9,20 @@
                 <input name="name" type="text" value="{{actor.name}}" placeholder="{{localize 'DND5E.Name'}}">
             </h1>
             <ul class="summary flexrow">
-                <li>
+                <li class="size">
                     <span>{{lookup config.actorSizes system.traits.size}}</span>
                 </li>
-                <li>
+                <li class="vehicle-type">
                     <select name="system.vehicleType">
                       {{selectOptions config.vehicleTypes selected=system.vehicleType}}
                     </select>
                 </li>
-                <li>
+                <li class="dimensions">
                     <input type="text" name="system.traits.dimensions" value="{{system.traits.dimensions}}"
                            placeholder="{{localize 'DND5E.Dimensions'}}">
                 </li>
-                <li>
-                    <input type="text" name="system.details.source" value="{{system.details.source}}"
+                <li class="source">
+                    <input type="text" name="system.details.source.custom" value="{{system.details.source.custom}}"
                            placeholder="{{localize 'DND5E.Source'}}">
                 </li>
             </ul>

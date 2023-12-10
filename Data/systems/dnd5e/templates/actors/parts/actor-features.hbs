@@ -47,6 +47,7 @@
                     {{#if item.system.isOriginalClass}}
                         <i class="original-class fas fa-sun" data-tooltip="DND5E.ClassOriginal"></i>
                     {{/if}}
+                    {{~#if ctx.isStack}} ({{item.system.quantity}}){{/if}}
                 </h4>
             </div>
 
@@ -57,7 +58,7 @@
                 {{else if item.system.recharge.value}}
                     {{localize "DND5E.Charged"}}
                 {{else if ctx.hasUses}}
-                    <input type="text" value="{{item.system.uses.value}}" placeholder="0"/>/ {{item.system.uses.max}}
+                    <input type="text" value="{{item.system.uses.value}}" placeholder="0" data-dtype="Number" data-name="system.uses.value">/ {{item.system.uses.max}}
                 {{/if}}
             </div>
             <div class="item-detail item-action">
@@ -85,10 +86,15 @@
                 {{#each section.columns}}
                     <div class="item-detail {{css}}">
                         {{#if editable}}
-                            <input type="text" value="{{getProperty item property}}" placeholder="&mdash;"
-                                   data-dtype="{{editable}}">
+                            <input type="text" data-dtype="{{editable}}" data-property="{{property}}"
+                                   value="{{#if (getProperty item property)}}{{getProperty item property}}
+                                   {{~else}}{{getProperty ctx property}}{{/if}}" placeholder="&mdash;">
                         {{else}}
-                            {{getProperty item property}}
+                            {{#if (getProperty item property)}}
+                                {{getProperty item property}}
+                            {{else}}
+                                {{getProperty ctx property}}
+                            {{/if}}
                         {{/if}}
                     </div>
                 {{/each}}

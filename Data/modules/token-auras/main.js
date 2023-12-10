@@ -38,7 +38,7 @@ const Auras = {
 		`));
 
 		const permissions = Auras.PERMISSIONS.map(perm => {
-			let i18n = `PERMISSION.${perm.toUpperCase()}`;
+			let i18n = `OWNERSHIP.${perm.toUpperCase()}`;
 			if (perm === 'all') {
 				i18n = 'AURAS.All';
 			}
@@ -111,87 +111,56 @@ const Auras = {
 		return ([1e7] + -1e3 + -4e3 + -8e3 + -1e11)
 			.replace(/[018]/g, c =>
 				(c ^ crypto.getRandomValues(new Uint8Array(1))[0] & 15 >> c / 4).toString(16));
-	}
-};
+	},
 
-Hooks.on('renderTokenConfig', Auras.onConfigRender);
-Hooks.on('canvasReady', () => canvas.tokens.placeables.forEach(t => {
-	// Some systems have special classes for auras, if we can't add children then we're going
-	// to use the token's children and thus don't need to force an initial draw.
-	if (t.auras.addChildren) {
-		t.draw();
-	}
-}));
+	onRefreshToken: function (token) {
+		if ( token.tokenAuras ) {
+			const { x, y } = token.document;
+			token.tokenAuras.position.set(x, y);
+		}
+	},
 
-Token.prototype.draw = (function () {
-	const cached = Token.prototype.draw;
-	return function () {
-		const p = cached.apply(this, arguments);
-		this.auras = this.addChildAt(new PIXI.Container(), 0);
-		this.drawAuras();
-		return p;
-	};
-})();
+	onUpdateToken: function (token, data) {
+		const aurasUpdated =
+			data.flags?.['token-auras']
+			&& ['aura1', 'aura2', 'auras'].some(k => typeof data.flags['token-auras'][k] === 'object');
 
-Token.prototype.drawAuras = function () {
+		const hiddenUpdated = "hidden" in data;
+		const sizeUpdated = "width" in data || "height" in data;
 
-	// Some systems have special classes for auras, if we can't removeChildren,
-	// then use the token's children and make sure to only remove the ones we created
+		if ( aurasUpdated || hiddenUpdated || sizeUpdated ) Auras.drawAuras(token.object);
+	},
 
-	if (this.auras.removeChildren) {
-		this.auras.removeChildren().forEach(c => c.destroy());
-	} else if (this.removeChildren) {
-		this.children.forEach(c => {
-			if (c.source === 'token-auras') {
-				c.destroy();
-			}
+	drawAuras: function (token) {
+		if ( token.tokenAuras?.removeChildren ) token.tokenAuras.removeChildren().forEach(c => c.destroy());
+		if ( token.document.hidden && !game.user.isGM ) return;
+
+		const auras = Auras.getAllAuras(token.document).filter(a => {
+			if ( !a.distance || (a.permission === 'gm' && !game.user.isGM) ) return false;
+			if ( !a.permission || a.permission === 'all' || (a.permission === 'gm' && game.user.isGM) ) return true;
+			return !!token.document?.actor?.testUserPermission(game.user, a.permission.toUpperCase());
 		});
-	}
 
-	const auras = Auras.getAllAuras(this.document).filter(a => {
-		if (!a.distance) {
-			return false;
-		}
+		if ( !auras.length ) return;
 
-		if (!a.permission || a.permission === 'all' || (a.permission === 'gm' && game.user.isGM)) {
-			return true;
-		}
-
-		return !!this.document?.actor?.testUserPermission(game.user, a.permission.toUpperCase());
-	});
-
-	if (auras.length) {
-		const gfx = new PIXI.Graphics();
-
-		// If we cannot create an aura as a child of the token through auras field,
-		// then do it through direct token's children while keeping track of which children we created
-
-		if (this.auras.addChild) {
-			this.auras.addChild(gfx);
-		} else if (this.addChild) {
-			gfx.source = 'token-auras';
-			this.addChild(gfx);
-		}
-
-		if (canvas.interface.reverseMaskfilter) {
-			gfx.filters = [canvas.interface.reverseMaskfilter];
-		}
+		token.tokenAuras ??= canvas.grid.tokenAuras.addChild(new PIXI.Container());
+		const gfx = token.tokenAuras.addChild(new PIXI.Graphics());
 		const squareGrid = canvas.scene.grid.type === 1;
 		const dim = canvas.dimensions;
 		const unit = dim.size / dim.distance;
-		const [cx, cy] = [this.w / 2, this.h / 2];
-		const {width, height} = this.document;
+		const [cx, cy] = [token.w / 2, token.h / 2];
+		const { width, height } = token.document;
 
 		auras.forEach(aura => {
 			let w, h;
 
-			if (aura.square) {
+			if ( aura.square ) {
 				w = aura.distance * 2 + (width * dim.distance);
 				h = aura.distance * 2 + (height * dim.distance);
 			} else {
 				[w, h] = [aura.distance, aura.distance];
 
-				if (squareGrid) {
+				if ( squareGrid ) {
 					w += width * dim.distance / 2;
 					h += height * dim.distance / 2;
 				} else {
@@ -204,7 +173,7 @@ Token.prototype.drawAuras = function () {
 			h *= unit;
 			gfx.beginFill(Color.from(aura.colour), aura.opacity);
 
-			if (aura.square) {
+			if ( aura.square ) {
 				const [x, y] = [cx - w / 2, cy - h / 2];
 				gfx.drawRect(x, y, w, h);
 			} else {
@@ -216,17 +185,11 @@ Token.prototype.drawAuras = function () {
 	}
 };
 
-Token.prototype._onUpdate = (function () {
-	const cached = Token.prototype._onUpdate;
-	return function (data) {
-		cached.apply(this, arguments);
-		const aurasUpdated =
-			data.flags && data.flags['token-auras']
-			&& ['aura1', 'aura2', 'auras']
-				.some(k => typeof data.flags['token-auras'][k] === 'object');
-
-		if (aurasUpdated) {
-			this.drawAuras();
-		}
-	};
-})();
+Hooks.on('renderTokenConfig', Auras.onConfigRender);
+Hooks.on('drawToken', Auras.drawAuras);
+Hooks.on('refreshToken', Auras.onRefreshToken);
+Hooks.on('updateToken', Auras.onUpdateToken);
+Hooks.on('drawGridLayer', layer => {
+	layer.tokenAuras = layer.addChildAt(new PIXI.Container(), layer.getChildIndex(layer.borders));
+});
+Hooks.on('destroyToken', token => token.tokenAuras?.destroy());

@@ -2,6 +2,16 @@ import { i18n } from "../midi-qol.js";
 import { autoFastForwardAbilityRolls, configSettings } from "./settings.js";
 import { isAutoFastAttack, isAutoFastDamage } from "./utils.js";
 export class MidiKeyManager {
+	resetKeyState() {
+		this._adv = false;
+		this._dis = false;
+		this._vers = false;
+		this._other = false;
+		this._rollToggle = false;
+		this._fastForward = false;
+		this._fastForwardSet = false;
+		this._critical = false;
+	}
 	constructor() {
 		this._adv = false;
 		this._dis = false;
@@ -32,16 +42,6 @@ export class MidiKeyManager {
 		};
 		this.resetKeyState();
 		window.addEventListener('keyup', (event) => this.handleKeyUpEvent(event));
-	}
-	resetKeyState() {
-		this._adv = false;
-		this._dis = false;
-		this._vers = false;
-		this._other = false;
-		this._rollToggle = false;
-		this._fastForward = false;
-		this._fastForwardSet = false;
-		this._critical = false;
 	}
 	handleKeyUpEvent(event) {
 		if (!configSettings.fixStickyKeys)

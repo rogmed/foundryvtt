@@ -1,0 +1,101 @@
+{
+  "id": "dae",
+  "title": "Dynamic effects using Active Effects",
+  "description": "replacement for dynamic effects",
+  "authors": [
+    {
+      "name": "tposney",
+      "flags": {}
+    }
+  ],
+  "version": "10.0.40",
+  "compatibility": {
+    "minimum": "10.279",
+    "verified": "11.304",
+    "maximum": "11.999"
+  },
+  "scripts": [
+    "libs/tokenizer.min.js"
+  ],
+  "flags": {
+    "compatible": [
+      "dnd5e",
+      "sw5e"
+    ],
+    "incompatible": [
+      "pf2e"
+    ],
+    "partial": []
+  },
+  "esmodules": [
+    "dae.js",
+    "module/patching.js"
+  ],
+  "relationships": {
+    "requires": [
+      {
+        "id": "lib-wrapper",
+        "type": "module",
+        "compatibility": {}
+      },
+      {
+        "id": "socketlib",
+        "type": "module",
+        "compatibility": {}
+      }
+    ]
+  },
+  "styles": [
+    "css/dae.css",
+    "css/awesomplete.css"
+  ],
+  "languages": [
+    {
+      "lang": "en",
+      "name": "English",
+      "path": "lang/en.json",
+      "flags": {}
+    },
+    {
+      "lang": "ja",
+      "name": "日本語",
+      "path": "lang/ja.json",
+      "flags": {}
+    },
+    {
+      "lang": "ko",
+      "name": "Korean",
+      "path": "lang/ko.json",
+      "flags": {}
+    },
+    {
+      "lang": "pt-BR",
+      "name": "Português (Brasil)",
+      "path": "lang/pt-BR.json",
+      "flags": {}
+    },
+    {
+      "lang": "fr",
+      "name": "Français",
+      "path": "lang/fr.json",
+      "flags": {}
+    },
+    {
+      "lang": "it",
+      "name": "Italian",
+      "path": "lang/it.json",
+      "flags": {}
+    },
+    {
+      "lang": "pl",
+      "name": "Polski",
+      "path": "lang/pl.json",
+      "flags": {}
+    }
+  ],
+  "socket": true,
+  "url": "https://gitlab.com/tposney/dae",
+  "bugs": "https://gitlab.com/tposney/dae/-/issues",
+  "manifest": "https://gitlab.com/tposney/dae/raw/v10/package/module.json",
+  "download": "https://gitlab.com/tposney/dae/raw/v10/package/dae-v10.0.40.zip"
+}
